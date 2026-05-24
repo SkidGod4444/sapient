@@ -24,6 +24,9 @@
 curl -fsSL https://raw.githubusercontent.com/SkidGod4444/sapient/main/install.sh | sh
 ```
 
+> **Piped installs** go to `~/.local/bin`. If `sapient` is not found afterward, run:
+> `export PATH="$HOME/.local/bin:$PATH"` and restart your terminal.
+
 ### Windows (PowerShell)
 
 ```powershell

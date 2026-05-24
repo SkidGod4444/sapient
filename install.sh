@@ -13,7 +13,7 @@ REPO="SkidGod4444/sapient"
 BINARY_NAME="sapient"
 INSTALL_DIR="${SAPIENT_INSTALL_DIR:-/usr/local/bin}"
 
-# ── Colours ──────────────────────────────────────────────────────────────────
+# ── Colours (stderr so `BINARY=$(download)` only captures the path) ───────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -22,14 +22,18 @@ BOLD='\033[1m'
 RESET='\033[0m'
 
 print_banner() {
-  printf "\n${BOLD}${CYAN}  SAPIENT${RESET}\n"
-  printf "  ${BOLD}LLM & SLM Inference Engine${RESET}\n\n"
+  printf "\n${BOLD}${CYAN}  SAPIENT${RESET}\n" >&2
+  printf "  ${BOLD}LLM & SLM Inference Engine${RESET}\n\n" >&2
 }
 
-info()    { printf "${CYAN}  →${RESET} %s\n" "$1"; }
-success() { printf "${GREEN}  ✓${RESET} %s\n" "$1"; }
-warn()    { printf "${YELLOW}  ⚠${RESET} %s\n" "$1"; }
-error()   { printf "${RED}  ✗ ERROR:${RESET} %s\n" "$1"; exit 1; }
+info()    { printf "${CYAN}  →${RESET} %s\n" "$1" >&2; }
+success() { printf "${GREEN}  ✓${RESET} %s\n" "$1" >&2; }
+warn()    { printf "${YELLOW}  ⚠${RESET} %s\n" "$1" >&2; }
+error()   { printf "${RED}  ✗ ERROR:${RESET} %s\n" "$1" >&2; exit 1; }
+
+is_interactive() {
+  [ -t 0 ] && [ -t 1 ]
+}
 
 # ── Detect OS and arch ───────────────────────────────────────────────────────
 detect_platform() {
@@ -80,6 +84,17 @@ get_latest_version() {
   fi
 }
 
+hash_file() {
+  FILE="$1"
+  if command -v sha256sum > /dev/null 2>&1; then
+    sha256sum "$FILE" | awk '{print $1}'
+  elif command -v shasum > /dev/null 2>&1; then
+    shasum -a 256 "$FILE" | awk '{print $1}'
+  else
+    echo ""
+  fi
+}
+
 # ── Download ─────────────────────────────────────────────────────────────────
 download() {
   FILENAME="${BINARY_NAME}-${PLATFORM}.${EXT}"
@@ -95,7 +110,22 @@ download() {
     wget -q --show-progress "$URL" -O "$TMPFILE" || error "Download failed. URL: $URL"
   fi
 
-  # Extract
+  # Verify checksum of the downloaded archive (matches release .sha256 files)
+  CHECKSUM_URL="${URL}.sha256"
+  if command -v curl > /dev/null 2>&1; then
+    EXPECTED=$(curl -fsSL "$CHECKSUM_URL" 2>/dev/null | awk '{print $1}')
+  else
+    EXPECTED=$(wget -qO- "$CHECKSUM_URL" 2>/dev/null | awk '{print $1}')
+  fi
+
+  if [ -n "$EXPECTED" ]; then
+    ACTUAL=$(hash_file "$TMPFILE")
+    if [ -n "$ACTUAL" ] && [ "$ACTUAL" != "$EXPECTED" ]; then
+      error "Checksum mismatch! Expected: $EXPECTED  Got: $ACTUAL\nDownload may be corrupted."
+    fi
+    success "Checksum verified"
+  fi
+
   info "Extracting..."
   case "$EXT" in
     tar.gz) tar -xzf "$TMPFILE" -C "$TMPDIR" ;;
@@ -104,31 +134,10 @@ download() {
 
   EXTRACTED_BINARY="${TMPDIR}/${BINARY_NAME}"
   if [ ! -f "$EXTRACTED_BINARY" ]; then
-    # Some archives nest in a subdirectory
     EXTRACTED_BINARY="$(find "$TMPDIR" -name "${BINARY_NAME}" -type f | head -1)"
   fi
 
   [ -f "$EXTRACTED_BINARY" ] || error "Binary not found after extraction"
-
-  # Verify checksum (SHA256)
-  CHECKSUM_URL="https://github.com/${REPO}/releases/download/${VERSION}/${FILENAME}.sha256"
-  if command -v curl > /dev/null 2>&1; then
-    EXPECTED=$(curl -fsSL "$CHECKSUM_URL" 2>/dev/null | awk '{print $1}')
-  else
-    EXPECTED=$(wget -qO- "$CHECKSUM_URL" 2>/dev/null | awk '{print $1}')
-  fi
-
-  if [ -n "$EXPECTED" ]; then
-    if command -v sha256sum > /dev/null 2>&1; then
-      ACTUAL=$(sha256sum "$EXTRACTED_BINARY" | awk '{print $1}')
-    elif command -v shasum > /dev/null 2>&1; then
-      ACTUAL=$(shasum -a 256 "$EXTRACTED_BINARY" | awk '{print $1}')
-    fi
-    if [ -n "$ACTUAL" ] && [ "$ACTUAL" != "$EXPECTED" ]; then
-      error "Checksum mismatch! Expected: $EXPECTED  Got: $ACTUAL\nBinary may be corrupted."
-    fi
-    success "Checksum verified"
-  fi
 
   chmod +x "$EXTRACTED_BINARY"
   echo "$EXTRACTED_BINARY"
@@ -137,32 +146,53 @@ download() {
 # ── Install ───────────────────────────────────────────────────────────────────
 install_binary() {
   EXTRACTED_BINARY="$1"
+  FINAL_PATH=""
+  USED_LOCAL_BIN=0
 
-  # Try to install to INSTALL_DIR, fall back to ~/.local/bin
+  if [ -n "${SAPIENT_INSTALL_DIR:-}" ]; then
+    mkdir -p "$INSTALL_DIR"
+  fi
+
   if [ -w "$INSTALL_DIR" ]; then
     cp "$EXTRACTED_BINARY" "${INSTALL_DIR}/${BINARY_NAME}"
     FINAL_PATH="${INSTALL_DIR}/${BINARY_NAME}"
-  elif command -v sudo > /dev/null 2>&1; then
+  elif is_interactive && command -v sudo > /dev/null 2>&1; then
     info "Requesting sudo to install to ${INSTALL_DIR}..."
     sudo cp "$EXTRACTED_BINARY" "${INSTALL_DIR}/${BINARY_NAME}"
     sudo chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
     FINAL_PATH="${INSTALL_DIR}/${BINARY_NAME}"
   else
-    # Fall back to user-local
     LOCAL_BIN="${HOME}/.local/bin"
     mkdir -p "$LOCAL_BIN"
     cp "$EXTRACTED_BINARY" "${LOCAL_BIN}/${BINARY_NAME}"
     FINAL_PATH="${LOCAL_BIN}/${BINARY_NAME}"
-    warn "Installed to ${LOCAL_BIN} (no sudo available)"
-    warn "Add to your PATH: export PATH=\"\$HOME/.local/bin:\$PATH\""
+    USED_LOCAL_BIN=1
+    if ! is_interactive; then
+      warn "Non-interactive install — using ${LOCAL_BIN} (sudo skipped)"
+    else
+      warn "Installed to ${LOCAL_BIN} (no write access to ${INSTALL_DIR})"
+    fi
+    case ":${PATH}:" in
+      *":${LOCAL_BIN}:"*) ;;
+      *)
+        warn "Add to your PATH: export PATH=\"\$HOME/.local/bin:\$PATH\""
+        warn "Then restart your terminal, or run: hash -r"
+        ;;
+    esac
   fi
 
   success "Installed to ${FINAL_PATH}"
+  INSTALLED_PATH="$FINAL_PATH"
 }
 
 # ── Post-install ──────────────────────────────────────────────────────────────
 post_install() {
   printf "\n${BOLD}${GREEN}✓ SAPIENT ${VERSION} installed successfully!${RESET}\n\n"
+  if ! command -v "${BINARY_NAME}" > /dev/null 2>&1; then
+    printf "  ${YELLOW}Note:${RESET} ${BINARY_NAME} is not on your PATH yet.\n"
+    printf "  Run: ${BOLD}export PATH=\"\$HOME/.local/bin:\$PATH\"${RESET}\n"
+    printf "  Or:  ${BOLD}${INSTALLED_PATH} --version${RESET}\n\n"
+  fi
   printf "  Run your first model:\n\n"
   printf "    ${BOLD}sapient chat microsoft/phi-2${RESET}\n\n"
   printf "  Other useful commands:\n"
@@ -182,7 +212,6 @@ main() {
   install_binary "$BINARY"
   post_install
 
-  # Cleanup
   rm -rf "$(dirname "$BINARY")"
 }
 
