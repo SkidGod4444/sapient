@@ -1,0 +1,28 @@
+[package]
+name        = "sapient-io"
+description = "Model format support: ONNX, GGUF, Safetensors for SAPIENT"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sapient-core = { workspace = true }
+sapient-ir   = { workspace = true }
+
+thiserror  = { workspace = true }
+tracing    = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+memmap2    = { workspace = true }
+
+# ONNX protobuf parsing (hand-rolled, no prost needed for a minimal parser)
+# We implement a minimal ONNX reader without generated protos.
+bytemuck      = { workspace = true }
+half          = { workspace = true }
+ordered-float = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

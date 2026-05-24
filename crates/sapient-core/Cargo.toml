@@ -1,0 +1,21 @@
+[package]
+name        = "sapient-core"
+description = "Core types, tensor, DType, buffer, and error handling for SAPIENT"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror  = { workspace = true }
+serde      = { workspace = true }
+bytemuck   = { workspace = true }
+half       = { workspace = true }
+num-traits = { workspace = true }
+tracing    = { workspace = true }
+
+[dev-dependencies]
+approx   = { workspace = true }
+proptest = { workspace = true }

@@ -1,0 +1,33 @@
+[package]
+name        = "sapient-cli"
+description = "Command-line tool and HTTP server for the SAPIENT inference engine"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "sapient"
+path = "src/main.rs"
+
+[dependencies]
+sapient-core      = { workspace = true }
+sapient-ir        = { workspace = true }
+sapient-backends-cpu = { workspace = true }
+sapient-scheduler = { workspace = true }
+sapient-io        = { workspace = true }
+sapient-telemetry = { workspace = true }
+sapient-runtime   = { workspace = true }
+
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+tokio       = { workspace = true }
+clap        = { workspace = true }
+axum        = { workspace = true }
+tower       = { workspace = true }
+tower-http  = { workspace = true }
+anyhow      = { workspace = true }

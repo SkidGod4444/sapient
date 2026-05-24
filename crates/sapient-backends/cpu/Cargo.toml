@@ -1,0 +1,43 @@
+[package]
+name        = "sapient-backends-cpu"
+description = "Pure-Rust CPU execution backend for the SAPIENT inference engine"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default  = []
+# Enable Apple Accelerate framework BLAS on macOS (AMX/Neural Engine path)
+accelerate = ["dep:blas-src", "dep:cblas-sys"]
+
+[dependencies]
+sapient-core = { workspace = true }
+sapient-ir   = { workspace = true }
+
+thiserror       = { workspace = true }
+tracing         = { workspace = true }
+matrixmultiply  = { workspace = true }
+half            = { workspace = true }
+num-traits      = { workspace = true }
+rayon           = { workspace = true }
+parking_lot     = { workspace = true }
+
+# Optional: Apple Accelerate BLAS (macOS only, replaces matrixmultiply on M-series)
+blas-src  = { version = "0.10", features = ["accelerate"], optional = true }
+cblas-sys = { version = "0.1", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Link Accelerate automatically on macOS when the feature is on.
+blas-src  = { version = "0.10", features = ["accelerate"], optional = true }
+
+[dev-dependencies]
+approx   = { workspace = true }
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name    = "cpu_ops"
+harness = false

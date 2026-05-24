@@ -1,0 +1,14 @@
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+
+[target.aarch64-apple-darwin]
+# Use the system linker on Apple Silicon Macs — no override needed.
+
+[target.'cfg(target_os = "macos")']
+# Reserve headroom for Metal framework dylibs.
+rustflags = ["-C", "link-arg=-framework", "-C", "link-arg=Metal",
+             "-C", "link-arg=-framework", "-C", "link-arg=Foundation"]
+
+[build]
+# Parallel build jobs.
+# jobs: leave unset to use all CPUs

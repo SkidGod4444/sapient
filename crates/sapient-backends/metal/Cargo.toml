@@ -1,0 +1,23 @@
+[package]
+name        = "sapient-backends-metal"
+description = "Apple MLX / Metal GPU backend for the SAPIENT inference engine (Apple Silicon)"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+rust-version.workspace = true
+
+# Only build on macOS
+[target.'cfg(target_os = "macos")'.dependencies]
+sapient-core = { workspace = true }
+sapient-ir   = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+
+# mlx-rs: Rust bindings for Apple MLX (Apple Silicon GPU)
+# Uncomment when ready to enable full MLX acceleration:
+# mlx-rs = "0.5"
+
+[dev-dependencies]
+approx = { workspace = true }

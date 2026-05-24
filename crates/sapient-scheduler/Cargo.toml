@@ -1,0 +1,24 @@
+[package]
+name        = "sapient-scheduler"
+description = "Batching scheduler and async executor for the SAPIENT inference engine"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sapient-core         = { workspace = true }
+sapient-ir           = { workspace = true }
+sapient-backends-cpu = { workspace = true }
+
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+tokio       = { workspace = true }
+rayon       = { workspace = true }
+flume       = { workspace = true }
+uuid        = { workspace = true }
+parking_lot = { workspace = true }
+serde       = { workspace = true }
+metrics     = { workspace = true }

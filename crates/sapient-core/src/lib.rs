@@ -1,0 +1,13 @@
+//! SAPIENT core — re-exports for all primary types.
+
+pub mod buffer;
+pub mod dtype;
+pub mod error;
+pub mod shape;
+pub mod tensor;
+
+pub use buffer::{Buffer, BufferHandle, CpuBuffer};
+pub use dtype::DType;
+pub use error::{Result, SapientError};
+pub use shape::Shape;
+pub use tensor::Tensor;
