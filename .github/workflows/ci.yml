@@ -38,6 +38,18 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+  # ── Build on Windows x86_64 ──────────────────────────────────────────────────
+  test-windows:
+    name: Build (Windows x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build CLI
+        shell: pwsh
+        run: cargo build --release --bin sapient
+
   # ── Tests on Linux x86_64 ────────────────────────────────────────────────────
   test-linux:
     name: Test (Linux x86_64)

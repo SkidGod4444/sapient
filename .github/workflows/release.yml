@@ -87,8 +87,14 @@ jobs:
           sudo apt-get install -y pkg-config libssl-dev
 
       # ── Build ──────────────────────────────────────────────────────────────
-      - name: Build (native)
-        if: matrix.cross != true
+      # Windows must use pwsh so MSVC link.exe is on PATH (Git Bash does not inherit it).
+      - name: Build (native — Windows)
+        if: matrix.cross != true && runner.os == 'Windows'
+        shell: pwsh
+        run: cargo build --release --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }}
+
+      - name: Build (native — Linux/macOS)
+        if: matrix.cross != true && runner.os != 'Windows'
         shell: bash
         run: cargo build --release --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }}
 
@@ -120,7 +126,7 @@ jobs:
           $binary = "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}.exe"
           $archive = "${{ env.BINARY_NAME }}-${{ matrix.target }}.zip"
           Compress-Archive -Path $binary -DestinationPath $archive
-          echo "ARCHIVE=$archive" | Out-File -Append $env:GITHUB_ENV
+          "ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8NoBOM
 
       # ── Checksum ──────────────────────────────────────────────────────────
       - name: Generate SHA256 checksum (Linux/macOS)
