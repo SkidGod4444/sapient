@@ -57,6 +57,20 @@ enum Commands {
     /// List models in the local HuggingFace cache.
     List,
 
+    /// Remove cached models from this device.
+    Reset {
+        /// HuggingFace model ID to remove (omit to clear all cached models).
+        model: Option<String>,
+
+        /// Skip confirmation when clearing all cached models.
+        #[arg(short = 'y', long)]
+        yes: bool,
+
+        /// Only remove incomplete downloads (`.sync.part` / `.lock` files).
+        #[arg(long)]
+        stale: bool,
+    },
+
     /// Show architecture and config info for a HuggingFace model.
     Info {
         /// HuggingFace model ID.
@@ -150,6 +164,7 @@ async fn main() -> Result<()> {
         Commands::Chat { model } => chat_command(&model).await,
         Commands::Pull { model } => pull_command(&model).await,
         Commands::List => list_command(),
+        Commands::Reset { model, yes, stale } => reset_command(model.as_deref(), yes, stale),
         Commands::Info { model } => info_command(&model).await,
         Commands::Login { token } => login_command(token.as_deref()),
         Commands::Run {
@@ -247,6 +262,59 @@ fn list_command() -> Result<()> {
     for m in models {
         println!("  {m}");
     }
+    Ok(())
+}
+
+fn reset_command(model: Option<&str>, yes: bool, stale_only: bool) -> Result<()> {
+    if stale_only {
+        let freed = hub::clear_stale_downloads()?;
+        if freed == 0 {
+            println!("No incomplete downloads found.");
+        } else {
+            println!(
+                "Removed incomplete downloads ({} freed).",
+                hub::format_bytes(freed)
+            );
+        }
+        return Ok(());
+    }
+
+    if let Some(model_id) = model {
+        let bytes = hub::clear_cached_model(model_id)?;
+        println!(
+            "Removed {model_id} from cache ({} freed).",
+            hub::format_bytes(bytes)
+        );
+        return Ok(());
+    }
+
+    let models = hub::list_cached_models()?;
+    if models.is_empty() {
+        println!("No cached models to remove.");
+        return Ok(());
+    }
+
+    if !yes {
+        print!(
+            "Remove all {} cached model(s)? This cannot be undone. [y/N] ",
+            models.len()
+        );
+        io::stdout().flush()?;
+
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        let answer = answer.trim().to_ascii_lowercase();
+        if answer != "y" && answer != "yes" {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    let (count, bytes) = hub::clear_all_cached_models()?;
+    println!(
+        "Removed {count} cached model(s) ({} freed).",
+        hub::format_bytes(bytes)
+    );
     Ok(())
 }
 

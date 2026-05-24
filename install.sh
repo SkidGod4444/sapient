@@ -197,6 +197,7 @@ post_install() {
   printf "  Other useful commands:\n"
   printf "    ${CYAN}sapient pull TheBloke/Llama-2-7B-GGUF${RESET}   # Download a model\n"
   printf "    ${CYAN}sapient list${RESET}                             # List cached models\n"
+  printf "    ${CYAN}sapient reset${RESET}                            # Clear all cached models\n"
   printf "    ${CYAN}sapient serve microsoft/phi-2 --port 8080${RESET} # Start API server\n"
   printf "    ${CYAN}sapient --help${RESET}                           # Full help\n\n"
   printf "  Docs: https://github.com/${REPO}\n\n"

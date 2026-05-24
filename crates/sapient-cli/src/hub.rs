@@ -60,16 +60,23 @@ pub fn pick_graph_weight(files: &ModelFiles) -> Result<PathBuf> {
     );
 }
 
+/// Root of the shared HuggingFace Hub model cache (`~/.cache/huggingface/hub`).
+pub fn hub_cache_root() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    let hub_cache = home.join(".cache/huggingface/hub");
+    hub_cache.is_dir().then_some(hub_cache)
+}
+
+/// Convert a HuggingFace model ID to its on-disk cache directory name.
+fn model_cache_dir_name(model_id: &str) -> String {
+    format!("models--{}", model_id.replace('/', "--"))
+}
+
 /// List models cached by the HuggingFace Hub client.
 pub fn list_cached_models() -> Result<Vec<String>> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(hub_cache) = hub_cache_root() else {
         return Ok(vec![]);
     };
-
-    let hub_cache = home.join(".cache/huggingface/hub");
-    if !hub_cache.is_dir() {
-        return Ok(vec![]);
-    }
 
     let mut models = Vec::new();
     for entry in std::fs::read_dir(&hub_cache)? {
@@ -81,6 +88,93 @@ pub fn list_cached_models() -> Result<Vec<String>> {
     }
     models.sort();
     Ok(models)
+}
+
+/// Remove incomplete HuggingFace Hub downloads (`.sync.part` and stale `.lock` files).
+pub fn clear_stale_downloads() -> Result<u64> {
+    let Some(hub_cache) = hub_cache_root() else {
+        return Ok(0);
+    };
+
+    let mut freed = 0u64;
+    for entry in walk_files(&hub_cache)? {
+        let name = entry.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.ends_with(".sync.part") || name.ends_with(".lock") {
+            freed += entry.metadata()?.len();
+            let _ = std::fs::remove_file(&entry);
+        }
+    }
+    Ok(freed)
+}
+
+/// Delete one model from the local HuggingFace Hub cache.
+pub fn clear_cached_model(model_id: &str) -> Result<u64> {
+    let hub_cache = hub_cache_root().context("HuggingFace Hub cache directory not found")?;
+    let dir = hub_cache.join(model_cache_dir_name(model_id));
+    if !dir.is_dir() {
+        anyhow::bail!("Model '{model_id}' is not in the local cache");
+    }
+    let bytes = dir_size(&dir)?;
+    std::fs::remove_dir_all(&dir).with_context(|| format!("failed to remove '{model_id}'"))?;
+    Ok(bytes)
+}
+
+/// Delete all models from the local HuggingFace Hub cache.
+pub fn clear_all_cached_models() -> Result<(usize, u64)> {
+    let models = list_cached_models()?;
+    if models.is_empty() {
+        return Ok((0, 0));
+    }
+
+    let mut total_bytes = 0u64;
+    for model_id in &models {
+        total_bytes += clear_cached_model(model_id)?;
+    }
+    let stale = clear_stale_downloads()?;
+    Ok((models.len(), total_bytes + stale))
+}
+
+fn walk_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    Ok(files)
+}
+
+fn dir_size(path: &Path) -> Result<u64> {
+    let mut total = 0u64;
+    if path.is_file() {
+        return Ok(path.metadata()?.len());
+    }
+    for file in walk_files(path)? {
+        total += file.metadata()?.len();
+    }
+    Ok(total)
+}
+
+pub fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 /// Save a HuggingFace token to the standard cache location.
