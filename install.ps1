@@ -12,6 +12,13 @@ $ErrorActionPreference = "Stop"
 $Repo = "SkidGod4444/sapient"
 $BinaryName = "sapient.exe"
 
+# GitHub API requires a User-Agent; TLS 1.2 for Windows PowerShell 5.1
+if ($PSVersionTable.PSVersion.Major -lt 6) {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+}
+
+$GitHubHeaders = @{ "User-Agent" = "sapient-installer" }
+
 # ── UI helpers ────────────────────────────────────────────────────────────────
 function Write-Banner {
     Write-Host ""
@@ -42,10 +49,18 @@ function Get-Platform {
 # ── Get latest release ────────────────────────────────────────────────────────
 function Get-LatestVersion {
     try {
-        $release = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest" -UseBasicParsing
-        return $release.tag_name
+        $response = Invoke-WebRequest `
+            -Uri "https://api.github.com/repos/$Repo/releases/latest" `
+            -Headers $GitHubHeaders `
+            -UseBasicParsing
+        $release = $response.Content | ConvertFrom-Json
+        $tag = [string]$release.tag_name
+        if ([string]::IsNullOrWhiteSpace($tag) -or $tag -notmatch '^v?\d+\.\d+\.\d+') {
+            Write-Fail "Could not parse release tag from GitHub API (got: '$tag')."
+        }
+        return $tag
     } catch {
-        Write-Fail "Could not fetch latest version. Check your internet connection."
+        Write-Fail "Could not fetch latest version. Check your internet connection.`nError: $_"
     }
 }
 
@@ -62,7 +77,7 @@ function Download-Binary {
     Write-Step "Downloading sapient $Ver for $Platform..."
     try {
         $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $Url -OutFile $TmpFile -UseBasicParsing
+        Invoke-WebRequest -Uri $Url -OutFile $TmpFile -Headers $GitHubHeaders -UseBasicParsing
         $ProgressPreference = 'Continue'
     } catch {
         Write-Fail "Download failed from $Url`nError: $_"
@@ -71,7 +86,8 @@ function Download-Binary {
     # Verify archive checksum (matches release .sha256 files)
     $ChecksumUrl = "$Url.sha256"
     try {
-        $Expected = (Invoke-RestMethod $ChecksumUrl -UseBasicParsing).Trim() -split '\s+' | Select-Object -First 1
+        $ChecksumText = (Invoke-WebRequest -Uri $ChecksumUrl -Headers $GitHubHeaders -UseBasicParsing).Content
+        $Expected = ($ChecksumText.Trim() -split '\s+')[0]
         $Actual = (Get-FileHash $TmpFile -Algorithm SHA256).Hash.ToLower()
         if ($Expected -and ($Actual -ne $Expected.ToLower())) {
             Write-Fail "Checksum mismatch!`n  Expected: $Expected`n  Got:      $Actual"
