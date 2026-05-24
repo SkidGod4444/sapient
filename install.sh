@@ -70,15 +70,21 @@ detect_platform() {
 
 # ── Get latest release version ───────────────────────────────────────────────
 get_latest_version() {
-  if command -v curl > /dev/null 2>&1; then
-    VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-      | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
-  elif command -v wget > /dev/null 2>&1; then
-    VERSION=$(wget -qO- "https://api.github.com/repos/${REPO}/releases/latest" \
-      | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
-  else
-    error "Neither curl nor wget found. Please install one and retry."
-  fi
+  fetch_release() {
+    if command -v curl > /dev/null 2>&1; then
+      curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest"
+    elif command -v wget > /dev/null 2>&1; then
+      wget -qO- "https://api.github.com/repos/${REPO}/releases/latest"
+    else
+      error "Neither curl nor wget found. Please install one and retry."
+    fi
+  }
+
+  # GitHub returns compact JSON; grep+sed on the whole line captures the release
+  # body instead of tag_name. Anchor the sed pattern on tag_name explicitly.
+  VERSION=$(fetch_release \
+    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | head -1)
 
   if [ -z "$VERSION" ]; then
     error "Could not determine latest version. Check your internet connection."
