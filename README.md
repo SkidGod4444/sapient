@@ -1,21 +1,84 @@
 <div align="center">
   <h1>⚡ SAPIENT</h1>
-  <p><strong>Run any HuggingFace LLM or SLM in pure Rust — one line to load, one line to generate</strong></p>
+  <p><strong>Run any HuggingFace LLM or SLM locally — one command to install, one line to run</strong></p>
   <p>
-    <a href="https://crates.io/crates/sapient-runtime"><img src="https://img.shields.io/crates/v/sapient-runtime.svg" alt="Crates.io"/></a>
-    <a href="https://docs.rs/sapient-runtime"><img src="https://docs.rs/sapient-runtime/badge.svg" alt="docs.rs"/></a>
+    <a href="https://crates.io/crates/sapient-generate"><img src="https://img.shields.io/crates/v/sapient-generate.svg" alt="Crates.io"/></a>
+    <a href="https://docs.rs/sapient-generate"><img src="https://docs.rs/sapient-generate/badge.svg" alt="docs.rs"/></a>
     <a href="https://github.com/SkidGod4444/sapient/actions"><img src="https://github.com/SkidGod4444/sapient/workflows/CI/badge.svg" alt="CI"/></a>
-    <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License"/>
+    <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License"/>
     <img src="https://img.shields.io/badge/rust-1.75%2B-orange" alt="MSRV"/>
+    <img src="https://img.shields.io/github/downloads/SkidGod4444/sapient/total" alt="Downloads"/>
+  </p>
+  <p>
+    <b>macOS · Linux · Windows</b> &nbsp;|&nbsp; No Python · No Docker · No CUDA required
   </p>
 </div>
 
-SAPIENT is a **purpose-built LLM & SLM inference engine** written in Rust.  
-It works like `llama.cpp` + `🤗 transformers` — but in a single, dependency-clean Rust crate.
+---
+
+## Install
+
+### macOS & Linux (one command)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SkidGod4444/sapient/main/install.sh | sh
+```
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/SkidGod4444/sapient/main/install.ps1 | iex
+```
+
+### Homebrew (macOS)
+
+```bash
+brew install skidgod4444/tap/sapient
+```
+
+### Direct Download
+
+Grab a pre-built binary for your platform from the [**latest release**](https://github.com/SkidGod4444/sapient/releases/latest):
+
+| Platform | Binary |
+|---|---|
+| macOS (Apple Silicon) | `sapient-aarch64-apple-darwin.tar.gz` |
+| macOS (Intel) | `sapient-x86_64-apple-darwin.tar.gz` |
+| Linux (x86_64) | `sapient-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux (ARM64) | `sapient-aarch64-unknown-linux-gnu.tar.gz` |
+| Windows (x86_64) | `sapient-x86_64-pc-windows-msvc.zip` |
+
+> **No Rust required.** The install script downloads a pre-compiled binary for your platform.
 
 ---
 
-## 30-Second Quickstart
+## CLI — 30 Seconds to Running a Model
+
+```bash
+# Interactive chat — just like Ollama
+sapient chat meta-llama/Llama-3.2-1B-Instruct
+
+# One-shot completion
+sapient run microsoft/phi-2 --prompt "Explain transformers in simple terms"
+
+# Download a model to local cache
+sapient pull TheBloke/Llama-2-7B-GGUF
+
+# List cached models
+sapient list
+
+# Start an OpenAI-compatible API server
+sapient serve microsoft/phi-2 --port 8080
+
+# Show info about a model
+sapient info google/gemma-2-2b-it
+```
+
+---
+
+## Rust API
+
+Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -28,242 +91,152 @@ use sapient_generate::Pipeline;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Downloads, caches, and runs — zero config needed.
-    let pipeline = Pipeline::from_pretrained("microsoft/phi-2").await?;
-    let reply = pipeline.generate("The key to good software is").await?;
-    println!("{reply}");
+    // Downloads, caches, and runs — zero config needed
+    let p = Pipeline::from_pretrained("microsoft/phi-2").await?;
+    println!("{}", p.generate("The key to good software is").await?);
     Ok(())
 }
 ```
 
-```bash
-cargo run --release
-# ✅ Downloaded microsoft/phi-2 to ~/.cache/sapient/hub/
-# ✅ Loaded tokenizer (BPE, vocab_size=51200)
-# ✅ Detected architecture: Phi
-# → "...clean abstractions, consistent naming, and thorough testing."
+### Chat (Instruct Models)
+
+```rust
+use sapient_tokenizers::ChatMessage;
+
+let p = Pipeline::from_pretrained("meta-llama/Llama-3.2-1B-Instruct").await?;
+let reply = p.chat(&[
+    ChatMessage::system("You are a helpful coding assistant."),
+    ChatMessage::user("Write a Rust function to reverse a string."),
+]).await?;
+println!("{reply}");
+```
+
+### Streaming
+
+```rust
+use futures::StreamExt;
+
+let mut stream = p.generate_stream("Once upon a time").await;
+while let Some(token) = stream.next().await {
+    print!("{token}");
+}
+```
+
+### Custom Sampling
+
+```rust
+use sapient_generate::{GenerationConfig, SamplingStrategy};
+
+let cfg = GenerationConfig {
+    max_new_tokens: 200,
+    strategy: SamplingStrategy::TopP { p: 0.95, temperature: 0.8 },
+    stop_sequences: vec!["<|end|>".into()],
+    ..Default::default()
+};
+let text = p.generate_with_config("Write a haiku about Rust", &cfg).await?;
 ```
 
 ---
 
 ## Supported Models
 
-All models on HuggingFace Hub are accessible via `Pipeline::from_pretrained("<model_id>")`.
+All HuggingFace Hub models work with `sapient chat <model-id>` or `Pipeline::from_pretrained("<model-id>")`.
 
-| Model Family | HuggingFace IDs (examples) | Format | Status |
-|---|---|---|---|
-| **Llama 3** | `meta-llama/Llama-3.2-1B-Instruct`, `meta-llama/Llama-3.1-8B` | GGUF / Safetensors | ✅ |
-| **Llama 2** | `meta-llama/Llama-2-7b-chat-hf`, `NousResearch/Llama-2-7b-hf` | GGUF / Safetensors | ✅ |
-| **Mistral** | `mistralai/Mistral-7B-Instruct-v0.3`, `mistralai/Mistral-7B-v0.1` | GGUF / Safetensors | ✅ |
-| **Phi** | `microsoft/phi-2`, `microsoft/Phi-3-mini-4k-instruct` | Safetensors | ✅ |
-| **Gemma** | `google/gemma-2-2b-it`, `google/gemma-7b` | Safetensors | ✅ |
-| **Qwen** | `Qwen/Qwen2.5-1.5B-Instruct`, `Qwen/Qwen2-7B` | Safetensors | ✅ |
-| **GPT-2** | `openai-community/gpt2`, `Salesforce/codegen-350M-mono` | Safetensors | ✅ |
-| **BERT** | `google-bert/bert-base-uncased`, `sentence-transformers/all-MiniLM-L6-v2` | Safetensors | ✅ |
-| **Mixtral** | `mistralai/Mixtral-8x7B-Instruct-v0.1` | GGUF / Safetensors | ✅ |
-| **Quantized (GGUF)** | `TheBloke/Llama-2-7B-GGUF`, `bartowski/gemma-2-2b-it-GGUF` | GGUF Q4/Q8 | ✅ |
-| **Custom LLMs** | Any model with a `config.json` + `tokenizer.json` | Any | ✅ |
-
-> **Any HuggingFace model with a standard `config.json` works.** SAPIENT auto-detects the architecture and builds the correct inference graph.
+| Family | Example IDs | Format |
+|---|---|---|
+| **Llama 3** | `meta-llama/Llama-3.2-1B-Instruct` | GGUF / Safetensors |
+| **Mistral** | `mistralai/Mistral-7B-Instruct-v0.3` | GGUF / Safetensors |
+| **Phi** | `microsoft/phi-2`, `microsoft/Phi-3-mini-4k-instruct` | Safetensors |
+| **Gemma** | `google/gemma-2-2b-it` | Safetensors |
+| **Qwen** | `Qwen/Qwen2.5-1.5B-Instruct` | Safetensors |
+| **GPT-2** | `openai-community/gpt2` | Safetensors |
+| **BERT** | `sentence-transformers/all-MiniLM-L6-v2` | Safetensors |
+| **Mixtral (MoE)** | `mistralai/Mixtral-8x7B-Instruct-v0.1` | GGUF / Safetensors |
+| **Any GGUF** | `TheBloke/Llama-2-7B-GGUF` | Q4_0, Q8_0 |
+| **Custom** | Any model with `config.json` + `tokenizer.json` | Any |
 
 ---
 
-## Usage Examples
-
-### Basic Completion
-
-```rust
-use sapient_generate::Pipeline;
-
-let p = Pipeline::from_pretrained("microsoft/phi-2").await?;
-println!("{}", p.generate("Rust is great because").await?);
-```
-
-### Chat (Instruct Models)
-
-```rust
-use sapient_generate::Pipeline;
-use sapient_tokenizers::ChatMessage;
-
-let p = Pipeline::from_pretrained("meta-llama/Llama-3.2-1B-Instruct").await?;
-
-let reply = p.chat(&[
-    ChatMessage::system("You are a helpful coding assistant."),
-    ChatMessage::user("Write a Rust function to reverse a string."),
-]).await?;
-
-println!("{reply}");
-```
-
-### Sampling Strategies
-
-```rust
-use sapient_generate::{Pipeline, GenerationConfig, SamplingStrategy};
-
-let p = Pipeline::from_pretrained("microsoft/phi-2").await?;
-
-// Top-P nucleus sampling with temperature
-let config = GenerationConfig {
-    max_new_tokens: 200,
-    strategy: SamplingStrategy::TopP { p: 0.95, temperature: 0.8 },
-    stop_sequences: vec!["<|endoftext|>".into()],
-    ..Default::default()
-};
-
-let text = p.generate_with_config("Once upon a time", &config).await?;
-println!("{text}");
-```
-
-### Streaming Output
-
-```rust
-use futures::StreamExt;
-use sapient_generate::Pipeline;
-
-let p = Pipeline::from_pretrained("meta-llama/Llama-3.2-1B-Instruct").await?;
-let mut stream = p.generate_stream("The universe began").await;
-
-while let Some(token) = stream.next().await {
-    print!("{token}");
-    std::io::stdout().flush().ok();
-}
-```
-
-### Sentence Embeddings (BERT-style)
-
-```rust
-let p = Pipeline::from_pretrained("sentence-transformers/all-MiniLM-L6-v2").await?;
-let embedding = p.embed("What is quantum entanglement?").await?;
-println!("Embedding dim: {}", embedding.len()); // 384
-```
-
-### Load a Quantized GGUF Model
-
-```rust
-// Auto-fetches the Q4_K_M quant from TheBloke's repo
-let p = Pipeline::from_pretrained("TheBloke/Llama-2-7B-GGUF").await?;
-println!("{}", p.generate("The difference between TCP and UDP is").await?);
-```
-
-### Custom / Private Models
-
-```rust
-use sapient_generate::{Pipeline, LoadOptions};
-use sapient_hub::LoadOptions as HubOptions;
-
-let p = Pipeline::from_pretrained_with_opts(
-    "my-org/my-custom-llm",
-    LoadOptions {
-        hub: HubOptions {
-            token: Some("hf_your_token_here".into()),
-            ..Default::default()
-        },
-        ..Default::default()
-    },
-).await?;
-```
-
----
-
-## CLI
+## OpenAI-Compatible API
 
 ```bash
-# Install
-cargo install sapient-cli
-
-# Interactive chat REPL
-sapient chat meta-llama/Llama-3.2-1B-Instruct
-
-# One-shot completion
-sapient run microsoft/phi-2 --prompt "Explain RoPE embeddings"
-
-# Download to local cache
-sapient download TheBloke/Llama-2-7B-GGUF
-
-# Start an OpenAI-compatible HTTP server
 sapient serve microsoft/phi-2 --port 8080
+```
 
-# POST /v1/infer  →  { "outputs": [...], "latency_ms": 12.3 }
-curl http://localhost:8080/v1/infer \
+```bash
+# Works with any OpenAI SDK — just change the base URL
+curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"inputs": {"input_ids": {"shape": [1, 10], "data": [1,2,3,4,5,6,7,8,9,10]}}}'
+  -d '{
+    "model": "microsoft/phi-2",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+Compatible with the **OpenAI Python SDK**, **LangChain**, **LlamaIndex**, and any tool that speaks the OpenAI API format.
+
+---
+
+## HuggingFace Token (Gated Models)
+
+For models that require access approval (Llama 3, Gemma):
+
+```bash
+# Set via environment variable
+export HF_TOKEN=hf_your_token_here
+
+# Or set once via CLI
+sapient login
 ```
 
 ---
 
 ## Architecture
 
+Built in Rust for maximum performance, zero dependencies on Python, ONNX Runtime, or CUDA.
+
 ```
-sapient-generate          ← Pipeline::from_pretrained(), generate(), chat(), embed()
+sapient-generate          ← Pipeline API — from_pretrained, generate, chat, embed, stream
 ├── sapient-hub           ← HuggingFace Hub client — download, auth, cache, arch detection
-├── sapient-tokenizers    ← BPE/WordPiece/SentencePiece + Jinja2 chat templates
-├── sapient-models        ← Llama / Phi / Gemma / GPT-2 / BERT / Qwen / Mixtral graphs
+├── sapient-tokenizers    ← All HF tokenizer types + Jinja2 chat templates
+├── sapient-models        ← Llama / Phi / Gemma / GPT-2 / BERT / Qwen / Mixtral builders
 │
-├── sapient-runtime       ← InferenceSession — model execution + telemetry
-│   ├── sapient-ir        ← Graph IR — 90+ ops including GQA, RoPE, MoE
-│   ├── sapient-scheduler ← Dynamic batching (5ms micro-window)
+├── sapient-runtime       ← InferenceSession — execution + telemetry
+│   ├── sapient-ir        ← Computation graph IR (90+ ops)
 │   └── sapient-io        ← GGUF (Q4/Q8 dequant), Safetensors, ONNX loaders
 │
-└── sapient-backends-cpu  ← CPU kernels: matmul, GQA attention, RoPE, LayerNorm…
-    └── sapient-backends-metal  ← 🚧 Apple Silicon GPU (MLX — in progress)
+└── sapient-backends-cpu  ← CPU kernels: GQA attention, RoPE, RMSNorm, MatMul...
+    └── sapient-backends-metal  ← 🚧 Apple Silicon GPU via Metal (coming soon)
 ```
 
 ---
 
-## Crates
-
-| Crate | Purpose |
-|-------|---------|
-| `sapient-generate` | **Start here** — Pipeline API, generation, sampling |
-| `sapient-hub` | HuggingFace Hub downloads + auth |
-| `sapient-tokenizers` | All HF tokenizer types + chat templates |
-| `sapient-models` | Model graph builders (Llama, Phi, Gemma…) |
-| `sapient-runtime` | Low-level InferenceSession |
-| `sapient-core` | Tensor, Shape, DType |
-| `sapient-ir` | Computation graph IR |
-| `sapient-io` | GGUF/Safetensors/ONNX loaders |
-| `sapient-cli` | `sapient` binary |
-
----
-
-## Building
+## Build from Source
 
 ```bash
 git clone https://github.com/SkidGod4444/sapient
 cd sapient
-
-# Build everything
 cargo build --workspace --release
 
-# Run all tests
-cargo test --workspace
-
-# Cross-compile for Raspberry Pi 4/5
-cross build --target aarch64-unknown-linux-gnu --release
-```
-
-### HuggingFace Token
-
-For gated models (Llama 3, Gemma), set your token:
-
-```bash
-export HF_TOKEN=hf_your_token_here
-# or
-echo "hf_your_token_here" > ~/.cache/huggingface/token
+# Binary will be at:
+./target/release/sapient
 ```
 
 ---
 
 ## License
 
-Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT License](LICENSE-MIT), at your option.
+SAPIENT is licensed under the **[GNU General Public License v3.0](LICENSE)**.
+
+You are free to use, study, share, and improve this software. Any modified version you distribute must also be open-source under the GPL-3.0.
 
 ---
 
 ## Contributing
 
-1. Fork the repository  
-2. `cargo test --workspace` must pass  
-3. Open a pull request
+Issues and PRs are very welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-Issues and PRs for new model architectures are especially welcome!
+Areas where contributions are especially appreciated:
+- New model architecture builders (`crates/sapient-models/src/architectures/`)
+- Apple Metal / MLX GPU backend (`crates/sapient-backends/metal/`)
+- Quantization kernels (INT4, INT8 fused)
