@@ -214,10 +214,7 @@ async fn chat_command(model: &str) -> Result<()> {
         print!("sapient> ");
         io::stdout().flush()?;
 
-        let reply = pipeline
-            .chat(&history)
-            .await
-            .context("generation failed")?;
+        let reply = pipeline.chat(&history).await.context("generation failed")?;
         println!("{reply}\n");
         history.push(ChatMessage::assistant(reply));
     }

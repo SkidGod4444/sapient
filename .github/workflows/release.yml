@@ -36,17 +36,10 @@ jobs:
             os: ubuntu-22.04
             archive: tar.gz
 
-          # Linux — ARM64 (Raspberry Pi 4/5, cloud ARM)
+          # Linux — ARM64 (native ARM runner — Pi 4/5 64-bit, cloud ARM; avoids cross-rs)
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-22.04
+            os: ubuntu-24.04-arm
             archive: tar.gz
-            cross: true            # Use cross-rs for cross-compilation
-
-          # Linux — ARMv7 (Raspberry Pi 3, 32-bit)
-          - target: armv7-unknown-linux-gnueabihf
-            os: ubuntu-22.04
-            archive: tar.gz
-            cross: true
 
           # Windows — x86_64
           - target: x86_64-pc-windows-msvc
@@ -74,14 +67,9 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # ── Cross-compilation setup (Linux non-native targets) ─────────────────
-      - name: Install cross (for cross-compilation)
-        if: matrix.cross == true
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
       # ── macOS universal binary setup ───────────────────────────────────────
       - name: Install OpenSSL (Linux)
-        if: runner.os == 'Linux' && matrix.cross != true
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update -q
           sudo apt-get install -y pkg-config libssl-dev
@@ -89,19 +77,14 @@ jobs:
       # ── Build ──────────────────────────────────────────────────────────────
       # Windows must use pwsh so MSVC link.exe is on PATH (Git Bash does not inherit it).
       - name: Build (native — Windows)
-        if: matrix.cross != true && runner.os == 'Windows'
+        if: runner.os == 'Windows'
         shell: pwsh
         run: cargo build --release --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }}
 
       - name: Build (native — Linux/macOS)
-        if: matrix.cross != true && runner.os != 'Windows'
+        if: runner.os != 'Windows'
         shell: bash
         run: cargo build --release --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }}
-
-      - name: Build (cross)
-        if: matrix.cross == true
-        shell: bash
-        run: cross build --release --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }}
 
       # ── Strip binary (reduces size ~50-70%) ───────────────────────────────
       - name: Strip binary (Linux/macOS)

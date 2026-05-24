@@ -48,10 +48,11 @@ Grab a pre-built binary for your platform from the [**latest release**](https://
 | macOS (Apple Silicon) | `sapient-aarch64-apple-darwin.tar.gz` |
 | macOS (Intel) | `sapient-x86_64-apple-darwin.tar.gz` |
 | Linux (x86_64) | `sapient-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux (ARM64) | `sapient-aarch64-unknown-linux-gnu.tar.gz` |
+| Linux (ARM64 — Pi 4/5 64-bit OS, cloud ARM) | `sapient-aarch64-unknown-linux-gnu.tar.gz` |
 | Windows (x86_64) | `sapient-x86_64-pc-windows-msvc.zip` |
 
-> **No Rust required.** The install script downloads a pre-compiled binary for your platform.
+> **Linux:** ARM64 binaries target 64-bit glibc systems (Pi 4/5 with Raspberry Pi OS 64-bit). 32-bit `armhf`/`armv7` is not built.
+
 
 ---
 

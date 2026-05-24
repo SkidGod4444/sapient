@@ -4,7 +4,7 @@
 #
 # Supported platforms:
 #   macOS  — Apple Silicon (arm64) + Intel (x86_64)
-#   Linux  — x86_64, aarch64 (glibc 2.17+, covers Ubuntu 18+, Debian 10+, RHEL 7+)
+#   Linux  — x86_64, aarch64 64-bit (e.g. Pi 4/5 with 64-bit OS — 32-bit armv7 is not supported)
 #   WSL    — treated as Linux
 
 set -e
@@ -53,7 +53,8 @@ detect_platform() {
       case "$ARCH" in
         x86_64)  PLATFORM="x86_64-unknown-linux-gnu" ;;
         aarch64) PLATFORM="aarch64-unknown-linux-gnu" ;;
-        armv7l)  PLATFORM="armv7-unknown-linux-gnueabihf" ;;
+        armv7l)
+          error "32-bit ARM (e.g. Raspberry Pi 3) is not supported. Use 64-bit Raspberry Pi OS on Pi 4 or Pi 5." ;;
         *)       error "Unsupported Linux architecture: $ARCH" ;;
       esac
       EXT="tar.gz"

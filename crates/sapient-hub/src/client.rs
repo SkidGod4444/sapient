@@ -166,10 +166,7 @@ impl HubClient {
                     }
                 }
                 "bin" => {
-                    for candidate in &[
-                        "pytorch_model.bin",
-                        "pytorch_model.bin.index.json",
-                    ] {
+                    for candidate in &["pytorch_model.bin", "pytorch_model.bin.index.json"] {
                         if filenames.iter().any(|n| n == candidate) {
                             let path = repo.get("pytorch_model.bin").await.with_context(|| {
                                 "Failed to download pytorch_model.bin".to_string()
