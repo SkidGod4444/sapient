@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 # SAPIENT Installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/SkidGod4444/sapient/main/install.sh | sh
+# Usage: curl -fsSL https://github.com/SkidGod4444/sapient/releases/latest/download/install.sh | sh
 #
 # Supported platforms:
 #   macOS  — Apple Silicon (arm64) + Intel (x86_64)
@@ -72,23 +72,28 @@ detect_platform() {
 get_latest_version() {
   fetch_release() {
     if command -v curl > /dev/null 2>&1; then
-      curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest"
+      curl -fsSL -H "User-Agent: sapient-installer" \
+        "https://api.github.com/repos/${REPO}/releases/latest"
     elif command -v wget > /dev/null 2>&1; then
-      wget -qO- "https://api.github.com/repos/${REPO}/releases/latest"
+      wget -qO- --header="User-Agent: sapient-installer" \
+        "https://api.github.com/repos/${REPO}/releases/latest"
     else
       error "Neither curl nor wget found. Please install one and retry."
     fi
   }
 
-  # GitHub returns compact JSON; grep+sed on the whole line captures the release
-  # body instead of tag_name. Anchor the sed pattern on tag_name explicitly.
+  # GitHub returns compact JSON; never grep the whole line — extract tag_name only.
   VERSION=$(fetch_release \
-    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-    | head -1)
+    | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' \
+    | head -1 \
+    | sed 's/.*"\([^"]*\)"$/\1/')
 
-  if [ -z "$VERSION" ]; then
-    error "Could not determine latest version. Check your internet connection."
-  fi
+  case "$VERSION" in
+    v[0-9]*.[0-9]*.[0-9]*) ;;
+    *)
+      error "Could not determine latest version (got: ${VERSION:-empty}). Check your internet connection."
+      ;;
+  esac
 }
 
 hash_file() {

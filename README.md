@@ -21,7 +21,7 @@
 ### macOS & Linux (one command)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SkidGod4444/sapient/main/install.sh | sh
+curl -fsSL https://github.com/SkidGod4444/sapient/releases/latest/download/install.sh | sh
 ```
 
 > **Piped installs** go to `~/.local/bin`. If `sapient` is not found afterward, run:
@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/SkidGod4444/sapient/main/install.sh
 ### Windows (PowerShell)
 
 ```powershell
-irm https://raw.githubusercontent.com/SkidGod4444/sapient/main/install.ps1 | iex
+irm https://github.com/SkidGod4444/sapient/releases/latest/download/install.ps1 | iex
 ```
 
 ### Homebrew (macOS)

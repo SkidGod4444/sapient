@@ -1,5 +1,5 @@
 # SAPIENT Windows Installer (PowerShell)
-# Usage: irm https://raw.githubusercontent.com/SkidGod4444/sapient/main/install.ps1 | iex
+# Usage: irm https://github.com/SkidGod4444/sapient/releases/latest/download/install.ps1 | iex
 #
 # Installs the sapient CLI to %LOCALAPPDATA%\sapient\bin and adds it to PATH.
 
