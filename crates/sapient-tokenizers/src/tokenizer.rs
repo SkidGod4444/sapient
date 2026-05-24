@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokenizers::Tokenizer;
 
 // ── TokenizerOptions ──────────────────────────────────────────────────────────
@@ -43,23 +43,20 @@ pub struct SapientTokenizer {
 impl SapientTokenizer {
     /// Load from a `tokenizer.json` file.
     pub fn from_file(path: &Path, opts: TokenizerOptions) -> Result<Self> {
-        let inner = Tokenizer::from_file(path)
-            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {e}"))?;
-
-        let bos_id = Self::special_token_id(&inner, &["<s>", "<bos>", "[BOS]"]);
-        let eos_id = Self::special_token_id(
-            &inner,
-            &["</s>", "<eos>", "[EOS]", "<|endoftext|>", "<|im_end|>"],
-        );
-        let pad_id = Self::special_token_id(&inner, &["<pad>", "[PAD]"]);
-
-        Ok(Self {
-            inner,
-            bos_id,
-            eos_id,
-            pad_id,
-            opts,
-        })
+        match Tokenizer::from_file(path) {
+            Ok(inner) => Self::from_inner(inner, opts),
+            Err(first_err) => {
+                let normalized = normalize_tokenizer_json(path).with_context(|| {
+                    format!(
+                        "Failed to load tokenizer and could not normalize it: {first_err}"
+                    )
+                })?;
+                let inner = Tokenizer::from_bytes(&normalized).map_err(|e| {
+                    anyhow::anyhow!("Failed to load normalized tokenizer: {e}")
+                })?;
+                Self::from_inner(inner, opts)
+            }
+        }
     }
 
     /// Load from a HuggingFace model ID string (uses the HF Hub cache).
@@ -141,6 +138,81 @@ impl SapientTokenizer {
         }
         None
     }
+
+    fn from_inner(inner: Tokenizer, opts: TokenizerOptions) -> Result<Self> {
+        let bos_id = Self::special_token_id(&inner, &["<s>", "<bos>", "<|begin_of_text|>", "[BOS]"]);
+        let eos_id = Self::special_token_id(
+            &inner,
+            &[
+                "</s>",
+                "<eos>",
+                "<|endoftext|>",
+                "<|end_of_text|>",
+                "<|im_end|>",
+                "<|redacted_EOS|>",
+            ],
+        );
+        let pad_id = Self::special_token_id(&inner, &["<pad>", "<|finetune_right_pad_id|>", "[PAD]"]);
+
+        Ok(Self {
+            inner,
+            bos_id,
+            eos_id,
+            pad_id,
+            opts,
+        })
+    }
+}
+
+/// Normalize newer HuggingFace tokenizer JSON into a format older `tokenizers`
+/// versions can deserialize (e.g. BPE merges stored as `[a, b]` pairs).
+fn normalize_tokenizer_json(path: &Path) -> Result<Vec<u8>> {
+    let text = std::fs::read_to_string(path)?;
+    let mut value: serde_json::Value = serde_json::from_str(&text)?;
+
+    let Some(model) = value.get_mut("model") else {
+        anyhow::bail!("tokenizer.json missing model section");
+    };
+    let Some(merges) = model.get_mut("merges") else {
+        anyhow::bail!("tokenizer.json missing BPE merges");
+    };
+    let Some(arr) = merges.as_array_mut() else {
+        anyhow::bail!("tokenizer merges are not an array");
+    };
+    if arr.is_empty() {
+        return Ok(text.into_bytes());
+    }
+    if !arr[0].is_array() {
+        anyhow::bail!("tokenizer merges already use string format");
+    }
+
+    let normalized: Vec<String> = arr
+        .iter()
+        .filter_map(|entry| {
+            let pair = entry.as_array()?;
+            if pair.len() != 2 {
+                return None;
+            }
+            Some(format!(
+                "{} {}",
+                pair[0].as_str()?,
+                pair[1].as_str()?
+            ))
+        })
+        .collect();
+
+    if normalized.len() != arr.len() {
+        anyhow::bail!("failed to normalize all BPE merges");
+    }
+
+    *merges = serde_json::Value::Array(
+        normalized
+            .into_iter()
+            .map(serde_json::Value::String)
+            .collect(),
+    );
+
+    Ok(serde_json::to_vec(&value)?)
 }
 
 #[cfg(test)]

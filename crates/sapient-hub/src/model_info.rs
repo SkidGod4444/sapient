@@ -41,7 +41,7 @@ impl ArchType {
     /// Detect arch from the `architectures` field in `config.json`.
     pub fn from_hf_arch_name(name: &str) -> Self {
         match name {
-            n if n.contains("Llama") || n.contains("Mistral") || n.contains("CodeLlama") => {
+            n if n.contains("Llama") || n.contains("Mistral") || n.contains("CodeLlama") || n.contains("VLlama") => {
                 Self::Llama
             }
             n if n.contains("Phi") => Self::Phi,
@@ -54,6 +54,7 @@ impl ArchType {
             n if n.contains("MPT") => Self::Mpt,
             n if n.contains("Bloom") => Self::Bloom,
             n if n.contains("T5") => Self::T5,
+            n if n.contains("Idefics") || n.contains("SmolVLM") => Self::Llama,
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -106,37 +107,36 @@ impl ModelInfo {
     /// Parse from a JSON string.
     pub fn from_json_str(json: &str) -> Result<Self> {
         let raw: serde_json::Value = serde_json::from_str(json).context("Invalid config.json")?;
+        let cfg = effective_config(&raw);
 
-        let arch_names: Vec<String> = raw["architectures"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let arch = detect_arch(&raw, &cfg);
 
-        let arch = arch_names
-            .first()
-            .map(|n| ArchType::from_hf_arch_name(n))
-            .unwrap_or(ArchType::Unknown("unknown".into()));
-
-        let model_type = raw["model_type"].as_str().unwrap_or("unknown").to_owned();
-        let vocab_size = raw["vocab_size"].as_u64().unwrap_or(32000) as usize;
-        let hidden_size = raw["hidden_size"].as_u64().unwrap_or(4096) as usize;
-        let num_hidden_layers = raw["num_hidden_layers"].as_u64().unwrap_or(32) as usize;
-        let num_attention_heads = raw["num_attention_heads"].as_u64().unwrap_or(32) as usize;
+        let model_type = cfg["model_type"]
+            .as_str()
+            .or_else(|| raw["model_type"].as_str())
+            .unwrap_or("unknown")
+            .to_owned();
+        let vocab_size = cfg["vocab_size"]
+            .as_u64()
+            .or_else(|| raw["vocab_size"].as_u64())
+            .unwrap_or(32000) as usize;
+        let hidden_size = cfg["hidden_size"].as_u64().unwrap_or(4096) as usize;
+        let num_hidden_layers = cfg["num_hidden_layers"].as_u64().unwrap_or(32) as usize;
+        let num_attention_heads = cfg["num_attention_heads"].as_u64().unwrap_or(32) as usize;
         // GQA: fall back to num_attention_heads if not specified.
-        let num_key_value_heads = raw["num_key_value_heads"]
+        let num_key_value_heads = cfg["num_key_value_heads"]
             .as_u64()
             .unwrap_or(num_attention_heads as u64) as usize;
-        let intermediate_size = raw["intermediate_size"].as_u64().unwrap_or(11008) as usize;
+        let intermediate_size = cfg["intermediate_size"].as_u64().unwrap_or(11008) as usize;
         let max_position_embeddings =
-            raw["max_position_embeddings"].as_u64().unwrap_or(4096) as usize;
-        let rms_norm_eps = raw["rms_norm_eps"].as_f64().unwrap_or(1e-5);
-        let hidden_act = raw["hidden_act"].as_str().unwrap_or("silu").to_owned();
-        let rope_theta = raw["rope_theta"].as_f64().unwrap_or(10000.0);
-        let head_dim = hidden_size / num_attention_heads;
+            cfg["max_position_embeddings"].as_u64().unwrap_or(4096) as usize;
+        let rms_norm_eps = cfg["rms_norm_eps"].as_f64().unwrap_or(1e-5);
+        let hidden_act = cfg["hidden_act"].as_str().unwrap_or("silu").to_owned();
+        let rope_theta = cfg["rope_theta"].as_f64().unwrap_or(10000.0);
+        let head_dim = cfg["head_dim"]
+            .as_u64()
+            .map(|d| d as usize)
+            .unwrap_or_else(|| hidden_size / num_attention_heads.max(1));
 
         Ok(Self {
             arch,
@@ -154,6 +154,91 @@ impl ModelInfo {
             head_dim,
             raw: raw.clone(),
         })
+    }
+}
+
+/// For VLMs and other composite models, hyperparameters live in `text_config`.
+fn effective_config(raw: &serde_json::Value) -> serde_json::Value {
+    let Some(text_config) = raw.get("text_config") else {
+        return raw.clone();
+    };
+    if !text_config.is_object() {
+        return raw.clone();
+    }
+
+    let mut merged = text_config.clone();
+    let Some(obj) = merged.as_object_mut() else {
+        return raw.clone();
+    };
+
+    for key in [
+        "vocab_size",
+        "bos_token_id",
+        "eos_token_id",
+        "pad_token_id",
+        "tie_word_embeddings",
+    ] {
+        if !obj.contains_key(key) {
+            if let Some(v) = raw.get(key) {
+                obj.insert(key.to_string(), v.clone());
+            }
+        }
+    }
+
+    merged
+}
+
+fn detect_arch(raw: &serde_json::Value, cfg: &serde_json::Value) -> ArchType {
+    for source in [cfg, raw] {
+        if let Some(name) = architecture_names(source).first() {
+            let arch = ArchType::from_hf_arch_name(name);
+            if !matches!(arch, ArchType::Unknown(_)) {
+                return arch;
+            }
+        }
+        if let Some(model_type) = source["model_type"].as_str() {
+            let arch = ArchType::from_model_type(model_type);
+            if !matches!(arch, ArchType::Unknown(_)) {
+                return arch;
+            }
+        }
+    }
+
+    architecture_names(raw)
+        .first()
+        .map(|n| ArchType::from_hf_arch_name(n))
+        .unwrap_or(ArchType::Unknown("unknown".into()))
+}
+
+fn architecture_names(config: &serde_json::Value) -> Vec<String> {
+    config["architectures"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+impl ArchType {
+    /// Detect arch from the `model_type` field in `config.json`.
+    pub fn from_model_type(model_type: &str) -> Self {
+        match model_type {
+            "llama" | "mistral" => Self::Llama,
+            "phi" => Self::Phi,
+            "gemma" | "gemma2" => Self::Gemma,
+            "gpt2" => Self::Gpt2,
+            "bert" | "roberta" => Self::Bert,
+            "qwen2" | "qwen3" => Self::Qwen,
+            "mixtral" => Self::Mixtral,
+            "falcon" => Self::Falcon,
+            "mpt" => Self::Mpt,
+            "bloom" => Self::Bloom,
+            "t5" => Self::T5,
+            "idefics3" => Self::Llama,
+            other => Self::Unknown(other.to_owned()),
+        }
     }
 }
 
@@ -202,5 +287,38 @@ mod tests {
         assert_eq!(info.arch, ArchType::Phi);
         // No KV heads → defaults to n_heads
         assert_eq!(info.num_key_value_heads, 32);
+    }
+
+    const SMOLVLM_CONFIG: &str = r#"{
+        "architectures": ["Idefics3ForConditionalGeneration"],
+        "model_type": "idefics3",
+        "vocab_size": 49280,
+        "text_config": {
+            "architectures": ["VLlama3ForCausalLM"],
+            "model_type": "llama",
+            "vocab_size": 49280,
+            "hidden_size": 960,
+            "num_hidden_layers": 32,
+            "num_attention_heads": 15,
+            "num_key_value_heads": 5,
+            "intermediate_size": 2560,
+            "max_position_embeddings": 8192,
+            "head_dim": 64,
+            "hidden_act": "silu",
+            "rms_norm_eps": 1e-5,
+            "rope_theta": 100000.0
+        },
+        "vision_config": { "hidden_size": 768 }
+    }"#;
+
+    #[test]
+    fn parse_smolvlm_text_config() {
+        let info = ModelInfo::from_json_str(SMOLVLM_CONFIG).unwrap();
+        assert_eq!(info.arch, ArchType::Llama);
+        assert_eq!(info.hidden_size, 960);
+        assert_eq!(info.num_hidden_layers, 32);
+        assert_eq!(info.num_key_value_heads, 5);
+        assert_eq!(info.head_dim, 64);
+        assert_eq!(info.vocab_size, 49280);
     }
 }

@@ -144,7 +144,9 @@ function Write-PostInstall {
     Write-Host "  Other useful commands:" -ForegroundColor White
     Write-Host "    sapient pull TheBloke/Llama-2-7B-GGUF   " -NoNewline; Write-Host "# Download a model" -ForegroundColor DarkGray
     Write-Host "    sapient list                             " -NoNewline; Write-Host "# List cached models" -ForegroundColor DarkGray
+    Write-Host "    sapient rm microsoft/phi-2               " -NoNewline; Write-Host "# Remove one cached model" -ForegroundColor DarkGray
     Write-Host "    sapient reset                            " -NoNewline; Write-Host "# Clear all cached models" -ForegroundColor DarkGray
+    Write-Host "    sapient update                           " -NoNewline; Write-Host "# Update sapient to latest release" -ForegroundColor DarkGray
     Write-Host "    sapient run microsoft/phi-2 --prompt ""Hello""" -NoNewline; Write-Host " # One-shot" -ForegroundColor DarkGray
     Write-Host "    sapient --help                           " -NoNewline; Write-Host "# Full help" -ForegroundColor DarkGray
     Write-Host ""

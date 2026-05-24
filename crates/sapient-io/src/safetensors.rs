@@ -22,8 +22,6 @@ struct StMeta {
     data_offsets: [usize; 2],
 }
 
-type StHeader = HashMap<String, StMeta>;
-
 // ── Loader ────────────────────────────────────────────────────────────────────
 
 pub struct SafetensorsLoader;
@@ -57,16 +55,18 @@ impl SafetensorsLoader {
         let header_json = std::str::from_utf8(&bytes[8..header_end])
             .map_err(|e| SapientError::SafetensorsParseError(e.to_string()))?;
 
-        let header: StHeader = serde_json::from_str(header_json)
+        let header_raw: HashMap<String, serde_json::Value> = serde_json::from_str(header_json)
             .map_err(|e| SapientError::SafetensorsParseError(e.to_string()))?;
 
         let data_section = &bytes[header_end..];
         let mut tensors = HashMap::new();
 
-        for (name, meta) in &header {
+        for (name, value) in &header_raw {
             if name == "__metadata__" {
                 continue;
             }
+            let meta: StMeta = serde_json::from_value(value.clone())
+                .map_err(|e| SapientError::SafetensorsParseError(format!("tensor '{name}': {e}")))?;
 
             let dtype = match meta.dtype.as_str() {
                 "F32" => DType::F32,
@@ -93,18 +93,42 @@ impl SafetensorsLoader {
             let raw = &data_section[start..end];
             let shape = Shape::new(meta.shape.clone());
 
-            // For F32 we can directly build a tensor; others → convert or store raw.
-            let tensor = if dtype == DType::F32 {
-                let f32s: Vec<f32> = raw
-                    .chunks_exact(4)
-                    .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-                    .collect();
-                Tensor::from_f32(&f32s, shape)
-                    .map_err(|e| SapientError::SafetensorsParseError(e.to_string()))?
-            } else {
-                // For other dtypes, zero-fill (future: native dtype buffers).
-                Tensor::zeros(shape, dtype)
-                    .map_err(|e| SapientError::SafetensorsParseError(e.to_string()))?
+            // For F32 we can directly build a tensor; others → convert to F32.
+            let tensor = match dtype {
+                DType::F32 => {
+                    let f32s: Vec<f32> = raw
+                        .chunks_exact(4)
+                        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                        .collect();
+                    Tensor::from_f32(&f32s, shape)
+                        .map_err(|e| SapientError::SafetensorsParseError(e.to_string()))?
+                }
+                DType::F16 => {
+                    let f32s: Vec<f32> = raw
+                        .chunks_exact(2)
+                        .map(|c| {
+                            half::f16::from_le_bytes(c.try_into().unwrap())
+                                .to_f32()
+                        })
+                        .collect();
+                    Tensor::from_f32(&f32s, shape)
+                        .map_err(|e| SapientError::SafetensorsParseError(e.to_string()))?
+                }
+                DType::BF16 => {
+                    let f32s: Vec<f32> = raw
+                        .chunks_exact(2)
+                        .map(|c| {
+                            f32::from(half::bf16::from_le_bytes(c.try_into().unwrap()))
+                        })
+                        .collect();
+                    Tensor::from_f32(&f32s, shape)
+                        .map_err(|e| SapientError::SafetensorsParseError(e.to_string()))?
+                }
+                other => {
+                    return Err(SapientError::SafetensorsParseError(format!(
+                        "unsupported safetensors dtype '{other}' for tensor '{name}'"
+                    )));
+                }
             };
 
             tensors.insert(name.clone(), tensor);

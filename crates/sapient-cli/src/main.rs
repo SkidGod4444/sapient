@@ -2,6 +2,7 @@
 
 mod hub;
 mod server;
+mod update;
 
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -56,6 +57,13 @@ enum Commands {
 
     /// List models in the local HuggingFace cache.
     List,
+
+    /// Remove one cached model from this device.
+    #[command(name = "rm", visible_aliases = ["remove"])]
+    Rm {
+        /// HuggingFace model ID to remove (e.g. `microsoft/phi-2`).
+        model: String,
+    },
 
     /// Remove cached models from this device.
     Reset {
@@ -151,6 +159,13 @@ enum Commands {
         #[arg(short, long, default_value = "4")]
         workers: usize,
     },
+
+    /// Update sapient to the latest release from GitHub.
+    Update {
+        /// Reinstall even if already on the latest version.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -164,6 +179,7 @@ async fn main() -> Result<()> {
         Commands::Chat { model } => chat_command(&model).await,
         Commands::Pull { model } => pull_command(&model).await,
         Commands::List => list_command(),
+        Commands::Rm { model } => rm_command(&model),
         Commands::Reset { model, yes, stale } => reset_command(model.as_deref(), yes, stale),
         Commands::Info { model } => info_command(&model).await,
         Commands::Login { token } => login_command(token.as_deref()),
@@ -192,6 +208,7 @@ async fn main() -> Result<()> {
             let model_path = hub::resolve_model_path(&model).await?;
             server::serve(model_path, port, backend, workers).await
         }
+        Commands::Update { force } => update::run_update(force),
     }
 }
 
@@ -262,6 +279,15 @@ fn list_command() -> Result<()> {
     for m in models {
         println!("  {m}");
     }
+    Ok(())
+}
+
+fn rm_command(model: &str) -> Result<()> {
+    let bytes = hub::clear_cached_model(model)?;
+    println!(
+        "Removed {model} from cache ({} freed).",
+        hub::format_bytes(bytes)
+    );
     Ok(())
 }
 

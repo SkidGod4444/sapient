@@ -16,7 +16,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version       = "0.1.1"
+version       = "0.1.2"
 edition       = "2021"
 authors       = ["SAPIENT Contributors"]
 license       = "GPL-3.0-only"
@@ -73,7 +73,7 @@ prost   = "0.12"
 
 # HuggingFace ecosystem
 hf-hub     = { version = "0.4.0", default-features = false, features = ["tokio", "rustls-tls"] }
-tokenizers = { version = "0.19", features = ["http"] }
+tokenizers = { version = "0.23", features = ["http"] }
 minijinja  = "2.0"
 
 # HTTP & Download
@@ -96,6 +96,10 @@ clap       = { version = "4.4", features = ["derive", "env"] }
 axum       = { version = "0.7", features = ["json"] }
 tower      = "0.4"
 tower-http = { version = "0.5", features = ["trace", "cors"] }
+ureq       = { version = "2.12", default-features = false, features = ["tls"] }
+flate2     = "1.0"
+tar        = "0.4"
+zip        = { version = "2.2", default-features = false, features = ["deflate"] }
 
 # Logging
 log        = "0.4"

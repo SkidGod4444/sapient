@@ -28,8 +28,14 @@ anyhow      = { workspace = true }
 axum        = { workspace = true }
 clap        = { workspace = true }
 dirs        = { workspace = true }
+flate2      = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
+sha2        = { workspace = true }
+tar         = { workspace = true }
+tempfile    = { workspace = true }
 tokio       = { workspace = true }
 tower-http  = { workspace = true }
 tracing     = { workspace = true }
+ureq        = { workspace = true }
+zip         = { workspace = true }

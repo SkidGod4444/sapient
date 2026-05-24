@@ -374,13 +374,37 @@ impl CpuBackend {
 
             // ── LLM ops ───────────────────────────────────────────────────
 
-            // Embedding lookup: weight[token_id] → hidden vector.
-            // The actual weight tensor is a constant node wired as inputs[0];
-            // inputs[1] contains the token IDs encoded as f32.
-            // Full implementation requires integer gather — for now pass-through
-            // to allow graph-build tests to pass; execution wires in runtime.
+            // Embedding lookup: weight `[vocab, hidden]` at inputs[0], token ids at inputs[1].
             OpType::Embedding { .. } => {
-                vec![inputs.get(0).unwrap().clone()]
+                let weight = inputs
+                    .get(0)
+                    .ok_or_else(|| SapientError::internal("Embedding: missing weight"))?;
+                let ids_t = inputs
+                    .get(1)
+                    .ok_or_else(|| SapientError::internal("Embedding: missing input_ids"))?;
+                let dims = ids_t.shape().dims();
+                let seq_len: usize = dims.iter().product();
+                let hidden = weight.shape().dims()[1];
+                let w = weight.as_f32_slice();
+                let ids: Vec<u32> = if ids_t.dtype() == DType::F32 {
+                    ids_t.as_f32_slice().iter().map(|&v| v as u32).collect()
+                } else {
+                    ids_t
+                        .as_bytes()
+                        .chunks_exact(4)
+                        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                        .collect()
+                };
+                let mut out = vec![0.0f32; seq_len * hidden];
+                for (i, &id) in ids.iter().enumerate() {
+                    let row = id as usize * hidden;
+                    out[i * hidden..(i + 1) * hidden]
+                        .copy_from_slice(&w[row..row + hidden]);
+                }
+                let batch = if dims.len() >= 2 { dims[0] } else { 1 };
+                let seq = if dims.len() >= 2 { dims[1] } else { seq_len };
+                vec![Tensor::from_f32(&out, vec![batch, seq, hidden])
+                    .map_err(|e| SapientError::internal(e.to_string()))?]
             }
 
             // Grouped-Query Attention — calls the attention kernel.

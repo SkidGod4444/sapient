@@ -15,6 +15,9 @@
 //! | `MixtralForCausalLM` | `mixtral` | Mixtral-8x7B, Mixtral-8x22B |
 
 pub mod architectures;
+pub mod forward;
 pub mod registry;
+pub mod weights;
 
+pub use forward::ForwardEngine;
 pub use registry::{build_graph, ModelGraph};

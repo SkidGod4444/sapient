@@ -9,9 +9,11 @@ repository.workspace  = true
 rust-version.workspace = true
 
 [dependencies]
-sapient-core = { workspace = true }
-sapient-ir   = { workspace = true }
-sapient-hub  = { workspace = true }
+sapient-core         = { workspace = true }
+sapient-ir           = { workspace = true }
+sapient-hub          = { workspace = true }
+sapient-io           = { workspace = true }
+sapient-backends-cpu = { workspace = true }
 thiserror    = { workspace = true }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
