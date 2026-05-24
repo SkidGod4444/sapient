@@ -1,0 +1,24 @@
+[package]
+name        = "sapient-tokenizers"
+description = "HuggingFace-compatible tokenizers for SAPIENT — BPE, WordPiece, SentencePiece, chat templates"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror  = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+anyhow     = { workspace = true }
+tracing    = { workspace = true }
+
+# Official HuggingFace tokenizers crate (Rust — no Python needed)
+tokenizers = { workspace = true }
+# Jinja2 chat template rendering
+minijinja  = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

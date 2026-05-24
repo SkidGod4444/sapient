@@ -117,4 +117,9 @@ impl SafetensorsLoader {
         }
         Ok(graph)
     }
+
+    /// Alias for `load` — returns a name → Tensor map.
+    pub fn load_tensors(path: &Path) -> Result<HashMap<String, Tensor>> {
+        Self::load(path)
+    }
 }

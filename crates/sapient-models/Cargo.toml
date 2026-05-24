@@ -1,0 +1,23 @@
+[package]
+name        = "sapient-models"
+description = "Pre-built LLM architecture graph builders for SAPIENT — Llama, Mistral, Phi, Gemma, GPT-2, BERT, Qwen"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+rust-version.workspace = true
+
+[dependencies]
+sapient-core = { workspace = true }
+sapient-ir   = { workspace = true }
+sapient-hub  = { workspace = true }
+thiserror    = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+anyhow       = { workspace = true }
+tracing      = { workspace = true }
+ordered-float = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -94,16 +94,57 @@ pub enum OpType {
     // ── Type conversion ───────────────────────────────────────────────────────
     Cast { to: sapient_core::DType },
 
-    // ── Transformer-specific ──────────────────────────────────────────────────
-    /// Multi-head attention (fused kernel when available).
-    MultiHeadAttention { num_heads: usize, head_dim: usize },
-    /// Rotary position embedding.
-    RoPE { base: ordered_float::OrderedFloat<f64> },
-    /// KV-cache update and concatenation.
-    KVCacheConcat,
-
     // ── Clip ─────────────────────────────────────────────────────────────────
     Clip { min: Option<ordered_float::OrderedFloat<f64>>, max: Option<ordered_float::OrderedFloat<f64>> },
+
+    // ── LLM / Transformer-specific ────────────────────────────────────────────
+
+    /// Token embedding lookup: (vocab_size, dim) weight × token_ids → (seq, dim).
+    Embedding { vocab_size: usize, dim: usize },
+
+    /// Multi-head self-attention (standard, causal or bidirectional).
+    MultiHeadAttention {
+        num_heads: usize,
+        head_dim:  usize,
+        causal:    bool,
+        /// Softmax scale override (default: 1/√head_dim).
+        scale: Option<ordered_float::OrderedFloat<f64>>,
+    },
+
+    /// Grouped-Query Attention — used by Llama2/3, Mistral, Gemma.
+    /// `n_kv_heads` < `n_heads`; KV heads are repeated to match Q heads.
+    GroupedQueryAttention {
+        n_heads:    usize,
+        n_kv_heads: usize,
+        head_dim:   usize,
+        causal:     bool,
+    },
+
+    /// Rotary Position Embedding (RoPE) — applied to Q and K tensors.
+    RotaryEmbedding {
+        /// RoPE base frequency (default 10000.0 for Llama).
+        base: ordered_float::OrderedFloat<f64>,
+        /// Rotary dimension (usually head_dim).
+        dim:  usize,
+    },
+
+    /// ALiBi positional bias — added to attention logits (MPT, BLOOM).
+    ALiBi { n_heads: usize },
+
+    /// Generate a causal (lower-triangular) attention mask of shape (seq, seq).
+    CausalMask,
+
+    /// KV-cache read/write: concatenate new K or V with the rolling cache.
+    KVCacheConcat,
+
+    /// Scaled dot-product attention (kernel-fused, no explicit QKV split).
+    ScaledDotProductAttention { causal: bool },
+
+    /// Mixture-of-Experts gate + dispatch (Mixtral, Qwen-MoE).
+    MoEGate { num_experts: usize, top_k: usize },
+
+    /// Repeat/expand KV heads to match Q heads (part of GQA expansion).
+    RepeatKV { n_rep: usize },
 
     // ── Misc ─────────────────────────────────────────────────────────────────
     Identity,
@@ -188,9 +229,16 @@ impl std::fmt::Display for OpType {
             OpType::Or             => "Or",
             OpType::Where          => "Where",
             OpType::Cast     {..}  => "Cast",
-            OpType::MultiHeadAttention{..} => "MultiHeadAttention",
-            OpType::RoPE     {..}  => "RoPE",
-            OpType::KVCacheConcat  => "KVCacheConcat",
+            OpType::MultiHeadAttention{..}       => "MultiHeadAttention",
+            OpType::GroupedQueryAttention{..}     => "GroupedQueryAttention",
+            OpType::RotaryEmbedding{..}           => "RotaryEmbedding",
+            OpType::ALiBi{..}                     => "ALiBi",
+            OpType::CausalMask                    => "CausalMask",
+            OpType::KVCacheConcat                 => "KVCacheConcat",
+            OpType::ScaledDotProductAttention{..} => "ScaledDotProductAttention",
+            OpType::MoEGate{..}                   => "MoEGate",
+            OpType::RepeatKV{..}                  => "RepeatKV",
+            OpType::Embedding{..}                 => "Embedding",
             OpType::Clip     {..}  => "Clip",
             OpType::Identity       => "Identity",
             OpType::Constant       => "Constant",

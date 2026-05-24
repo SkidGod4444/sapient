@@ -221,6 +221,61 @@ impl GgufLoader {
 
         Ok(graph)
     }
+
+    /// Load all tensors from a GGUF file as a raw name → Tensor map.
+    /// Useful for weight loading when you have a separately-built graph.
+    pub fn load_tensors(path: &Path) -> Result<HashMap<String, Tensor>> {
+        let bytes = fs::read(path)
+            .map_err(|e| SapientError::ModelNotFound(format!("{}: {e}", path.display())))?;
+        Self::tensors_from_bytes(&bytes)
+    }
+
+    pub fn tensors_from_bytes(bytes: &[u8]) -> Result<HashMap<String, Tensor>> {
+        use std::io::Cursor;
+        let mut cursor = Cursor::new(bytes);
+        let magic = read_u32(&mut cursor)?;
+        if magic != GGUF_MAGIC {
+            return Err(SapientError::GgufParseError("bad magic".into()));
+        }
+        let _version = read_u32(&mut cursor)?;
+        let tensor_count = read_u64(&mut cursor)? as usize;
+        let kv_count     = read_u64(&mut cursor)? as usize;
+        for _ in 0..kv_count { skip_kv(&mut cursor, bytes)?; }
+
+        let mut tensor_infos = Vec::with_capacity(tensor_count);
+        for _ in 0..tensor_count {
+            let name = read_gguf_string(&mut cursor)?;
+            let n_dims = read_u32(&mut cursor)? as usize;
+            let mut dims = Vec::with_capacity(n_dims);
+            for _ in 0..n_dims { dims.push(read_u64(&mut cursor)? as usize); }
+            let kind_raw = read_u32(&mut cursor)?;
+            let kind = GgmlType::from_u32(kind_raw)
+                .ok_or_else(|| SapientError::GgufParseError(format!("unknown ggml type {kind_raw}")))?;
+            let offset = read_u64(&mut cursor)?;
+            tensor_infos.push(GgufTensorInfo { name, dims, kind, offset });
+        }
+        let data_start = cursor.position() as usize;
+
+        let mut map = HashMap::with_capacity(tensor_infos.len());
+        for info in &tensor_infos {
+            let numel: usize = info.dims.iter().product::<usize>().max(1);
+            let start = data_start + info.offset as usize;
+            let f32_data: Vec<f32> = match info.kind {
+                GgmlType::F32 => bytes[start..start + numel * 4].chunks_exact(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect(),
+                GgmlType::F16 => bytes[start..start + numel * 2].chunks_exact(2)
+                    .map(|c| f16_to_f32(u16::from_le_bytes(c.try_into().unwrap()))).collect(),
+                GgmlType::Q4_0 => dequantize_q4_0(&bytes[start..start + (numel/32) * 18], numel),
+                GgmlType::Q8_0 => dequantize_q8_0(&bytes[start..start + (numel/32) * 34], numel),
+                _ => vec![0.0f32; numel],
+            };
+            let shape = if info.dims.is_empty() { Shape::new([1]) } else { Shape::new(info.dims.clone()) };
+            let tensor = Tensor::from_f32(&f32_data, shape)
+                .map_err(|e| SapientError::GgufParseError(e.to_string()))?;
+            map.insert(info.name.clone(), tensor);
+        }
+        Ok(map)
+    }
 }
 
 // ── Low-level read helpers ────────────────────────────────────────────────────

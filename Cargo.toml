@@ -7,98 +7,119 @@ members = [
     "crates/sapient-io",
     "crates/sapient-telemetry",
     "crates/sapient-runtime",
+    "crates/sapient-hub",
+    "crates/sapient-tokenizers",
+    "crates/sapient-models",
+    "crates/sapient-generate",
     "crates/sapient-cli",
 ]
 resolver = "2"
 
 [workspace.package]
-version      = "0.1.0"
-edition      = "2021"
-authors      = ["SAPIENT Contributors"]
-license      = "MIT OR Apache-2.0"
-repository   = "https://github.com/SkidGod4444/sapient"
-homepage     = "https://github.com/SkidGod4444/sapient"
+version       = "0.1.0"
+edition       = "2021"
+authors       = ["SAPIENT Contributors"]
+license       = "MIT OR Apache-2.0"
+repository    = "https://github.com/SkidGod4444/sapient"
+homepage      = "https://github.com/SkidGod4444/sapient"
 documentation = "https://docs.rs/sapient-runtime"
-description  = "High-performance inference engine for edge devices — ONNX, GGUF, CPU/GPU backends"
-keywords     = ["inference", "onnx", "gguf", "machine-learning", "edge"]
-categories   = ["science", "algorithms", "network-programming"]
-readme       = "README.md"
-rust-version = "1.75"
+description   = "Fast LLM & SLM inference engine — run any HuggingFace model with one line of Rust"
+keywords      = ["llm", "llama", "mistral", "transformers", "inference"]
+categories    = ["science", "algorithms", "text-processing"]
+readme        = "README.md"
+rust-version  = "1.75"
 
 [workspace.dependencies]
 # Internal crates
-sapient-core      = { path = "crates/sapient-core" }
-sapient-ir        = { path = "crates/sapient-ir" }
+sapient-core         = { path = "crates/sapient-core" }
+sapient-ir           = { path = "crates/sapient-ir" }
 sapient-backends-cpu = { path = "crates/sapient-backends/cpu" }
-sapient-scheduler = { path = "crates/sapient-scheduler" }
-sapient-io        = { path = "crates/sapient-io" }
-sapient-telemetry = { path = "crates/sapient-telemetry" }
-sapient-runtime   = { path = "crates/sapient-runtime" }
+sapient-scheduler    = { path = "crates/sapient-scheduler" }
+sapient-io           = { path = "crates/sapient-io" }
+sapient-telemetry    = { path = "crates/sapient-telemetry" }
+sapient-runtime      = { path = "crates/sapient-runtime" }
+sapient-hub          = { path = "crates/sapient-hub" }
+sapient-tokenizers   = { path = "crates/sapient-tokenizers" }
+sapient-models       = { path = "crates/sapient-models" }
+sapient-generate     = { path = "crates/sapient-generate" }
 
 # Core utilities
-thiserror  = "1.0"
-anyhow     = "1.0"
-serde      = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-bincode    = "1.3"
-uuid       = { version = "1.0", features = ["v4", "serde"] }
+thiserror      = "1.0"
+anyhow         = "1.0"
+serde          = { version = "1.0", features = ["derive"] }
+serde_json     = "1.0"
+bincode        = "1.3"
+uuid           = { version = "1.0", features = ["v4", "serde"] }
 bytemuck       = { version = "1.14", features = ["derive"] }
 ordered-float  = { version = "4.2", features = ["serde"] }
 
 # Async & Parallel
-tokio  = { version = "1.0", features = ["full"] }
-rayon  = "1.8"
-flume  = "0.11"          # lock-free mpmc channels
-parking_lot = "0.12"
+tokio        = { version = "1.0", features = ["full"] }
+tokio-stream = "0.1"
+rayon        = "1.8"
+flume        = "0.11"
+parking_lot  = "0.12"
+futures      = "0.3"
+async-trait  = "0.1"
 
 # Math & Compute
-matrixmultiply = "0.3"   # Pure-Rust BLAS-free GEMM
+matrixmultiply = "0.3"
 half           = { version = "2.3", features = ["serde", "bytemuck"] }
 num-traits     = "0.2"
-num-integer    = "0.1"
 
 # Formats
-memmap2    = "0.9"        # Safetensors / GGUF memory-mapping
-prost      = "0.12"       # Protobuf (ONNX)
+memmap2 = "0.9"
+prost   = "0.12"
+
+# HuggingFace ecosystem
+hf-hub     = { version = "0.3", features = ["tokio"] }
+tokenizers = { version = "0.19", features = ["http"] }
+minijinja  = "2.0"
+
+# HTTP & Download
+reqwest   = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+indicatif = "0.17"
+sha2      = "0.10"
+dirs      = "5.0"
 
 # Telemetry
-tracing            = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-opentelemetry      = { version = "0.22", features = ["trace"] }
-opentelemetry_sdk  = { version = "0.22", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.15", features = ["tonic"] }
-metrics            = "0.22"
-metrics-exporter-prometheus = { version = "0.13" }
+tracing                     = "0.1"
+tracing-subscriber          = { version = "0.3", features = ["env-filter", "json"] }
+metrics                     = "0.22"
+metrics-exporter-prometheus = "0.13"
+opentelemetry               = { version = "0.22", features = ["trace"] }
+opentelemetry_sdk           = { version = "0.22", features = ["rt-tokio"] }
+opentelemetry-otlp          = { version = "0.15", features = ["tonic"] }
 
 # CLI & HTTP
-clap  = { version = "4.4", features = ["derive", "env"] }
-axum  = { version = "0.7", features = ["json"] }
-tower = "0.4"
+clap       = { version = "4.4", features = ["derive", "env"] }
+axum       = { version = "0.7", features = ["json"] }
+tower      = "0.4"
 tower-http = { version = "0.5", features = ["trace", "cors"] }
 
 # Logging
-log    = "0.4"
+log        = "0.4"
 env_logger = "0.11"
 
 # Testing & Benchmarks
-criterion   = { version = "0.5", features = ["html_reports"] }
-proptest    = "1.4"
-approx      = "0.5"
-tempfile    = "3.10"
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest  = "1.4"
+approx    = "0.5"
+tempfile  = "3.10"
 
 [profile.release]
-opt-level    = 3
-lto          = "thin"
+opt-level     = 3
+lto           = "thin"
 codegen-units = 1
-panic        = "abort"
-strip        = "debuginfo"
+panic         = "abort"
+strip         = "debuginfo"
 
 [profile.bench]
 inherits = "release"
 debug    = true
 
 [profile.dev]
-opt-level = 1     # some optimisation in dev for numerical code
+opt-level = 1
 
 [profile.test]
 opt-level = 1

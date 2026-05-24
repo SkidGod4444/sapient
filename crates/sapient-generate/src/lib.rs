@@ -1,0 +1,41 @@
+//! `sapient-generate` — LLM text generation pipeline.
+//!
+//! The main entry point is [`Pipeline`], which provides a dead-simple API
+//! for running any HuggingFace LLM:
+//!
+//! ```no_run
+//! use sapient_generate::Pipeline;
+//!
+//! #[tokio::main]
+//! async fn main() -> anyhow::Result<()> {
+//!     let pipeline = Pipeline::from_pretrained("microsoft/phi-2").await?;
+//!
+//!     // Simple completion
+//!     let text = pipeline.generate("The meaning of life is").await?;
+//!     println!("{text}");
+//!
+//!     // Chat (for instruct models)
+//!     use sapient_tokenizers::ChatMessage;
+//!     let reply = pipeline.chat(&[
+//!         ChatMessage::system("You are a helpful assistant."),
+//!         ChatMessage::user("Explain quantum computing in simple terms."),
+//!     ]).await?;
+//!     println!("{reply}");
+//!
+//!     // Streaming
+//!     use futures::StreamExt;
+//!     let mut stream = pipeline.generate_stream("Once upon a time").await;
+//!     while let Some(token) = stream.next().await {
+//!         print!("{token}");
+//!     }
+//!     Ok(())
+//! }
+//! ```
+
+pub mod kv_cache;
+pub mod pipeline;
+pub mod sampler;
+
+pub use pipeline::{GenerationConfig, LoadOptions, Pipeline};
+pub use sampler::{SamplingStrategy, Sampler};
+pub use kv_cache::KVCache;
