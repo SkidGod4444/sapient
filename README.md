@@ -57,11 +57,13 @@ Grab a pre-built binary for your platform from the [**latest release**](https://
 
 ## CLI — 30 Seconds to Running a Model
 
+> **Requires v0.1.1+** — reinstall with the [install script](#macos--linux-one-command) if `chat` or `pull` are missing.
+
 ```bash
 # Interactive chat — just like Ollama
 sapient chat meta-llama/Llama-3.2-1B-Instruct
 
-# One-shot completion
+# One-shot completion (Hub models need --prompt)
 sapient run microsoft/phi-2 --prompt "Explain transformers in simple terms"
 
 # Download a model to local cache
@@ -70,8 +72,11 @@ sapient pull TheBloke/Llama-2-7B-GGUF
 # List cached models
 sapient list
 
-# Start an OpenAI-compatible API server
-sapient serve microsoft/phi-2 --port 8080
+# Gated models (Llama, Gemma) — set token first
+sapient login
+
+# Start an HTTP inference server (ONNX/GGUF files)
+sapient serve ./model.gguf --port 8080
 
 # Show info about a model
 sapient info google/gemma-2-2b-it

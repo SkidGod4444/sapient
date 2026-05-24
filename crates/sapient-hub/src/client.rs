@@ -123,61 +123,66 @@ impl HubClient {
     }
 
     async fn fetch_weights(&self, repo: &ApiRepo) -> Result<Vec<PathBuf>> {
-        // Try each preferred format.
+        let repo_info = repo
+            .info()
+            .await
+            .context("Failed to fetch model file listing from HuggingFace Hub")?;
+
+        let mut filenames: Vec<String> = repo_info
+            .siblings
+            .iter()
+            .map(|s| s.rfilename.clone())
+            .collect();
+        filenames.sort();
+
         for fmt in &self.opts.formats {
             match fmt.as_str() {
                 "gguf" => {
-                    // Look for a single .gguf file (quantized).
-                    if let Ok(p) = repo.get("model.gguf").await {
-                        info!("Found GGUF weights: {}", p.display());
-                        return Ok(vec![p]);
-                    }
-                    // TheBloke-style: look for Q4_K_M variant.
-                    for quant in &["Q4_K_M", "Q4_0", "Q8_0", "Q5_K_M"] {
-                        let name = format!("model.{quant}.gguf");
-                        if let Ok(p) = repo.get(&name).await {
-                            info!("Found GGUF weights: {}", p.display());
-                            return Ok(vec![p]);
+                    for name in &filenames {
+                        if name.ends_with(".gguf") {
+                            let path = repo.get(name).await.with_context(|| {
+                                format!("Failed to download GGUF weights '{name}'")
+                            })?;
+                            info!("Found GGUF weights: {}", path.display());
+                            return Ok(vec![path]);
                         }
                     }
                 }
                 "safetensors" => {
-                    // Single shard.
-                    if let Ok(p) = repo.get("model.safetensors").await {
-                        info!("Found safetensors weights: {}", p.display());
-                        return Ok(vec![p]);
-                    }
-                    // Multi-shard: model-00001-of-NNNNN.safetensors
-                    let mut shards = Vec::new();
-                    for i in 1..=100usize {
-                        let _name = format!("model-{i:05}-of-{i:05}.safetensors");
-                        // Try first shard to detect pattern.
-                        if i == 1 {
-                            if let Ok(p) = repo.get("model-00001-of-00001.safetensors").await {
-                                return Ok(vec![p]);
-                            }
-                        }
-                        match repo
-                            .get(&format!("model-{i:05}-of-{:05}.safetensors", 100))
-                            .await
-                        {
-                            Ok(p) => shards.push(p),
-                            Err(_) => break,
-                        }
-                    }
+                    let shards: Vec<&String> = filenames
+                        .iter()
+                        .filter(|n| n.ends_with(".safetensors"))
+                        .collect();
                     if !shards.is_empty() {
-                        return Ok(shards);
+                        let mut paths = Vec::with_capacity(shards.len());
+                        for name in shards {
+                            let path = repo.get(name).await.with_context(|| {
+                                format!("Failed to download safetensors shard '{name}'")
+                            })?;
+                            paths.push(path);
+                        }
+                        info!("Found {} safetensors shard(s)", paths.len());
+                        return Ok(paths);
                     }
                 }
                 "bin" => {
-                    if let Ok(p) = repo.get("pytorch_model.bin").await {
-                        info!("Found PyTorch bin weights: {}", p.display());
-                        return Ok(vec![p]);
+                    for candidate in &[
+                        "pytorch_model.bin",
+                        "pytorch_model.bin.index.json",
+                    ] {
+                        if filenames.iter().any(|n| n == candidate) {
+                            let path = repo.get("pytorch_model.bin").await.with_context(|| {
+                                "Failed to download pytorch_model.bin".to_string()
+                            })?;
+                            info!("Found PyTorch bin weights: {}", path.display());
+                            return Ok(vec![path]);
+                        }
                     }
                 }
                 _ => {}
             }
         }
+
         anyhow::bail!(
             "No supported weight files found. Tried: {:?}",
             self.opts.formats

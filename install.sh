@@ -147,7 +147,6 @@ download() {
 install_binary() {
   EXTRACTED_BINARY="$1"
   FINAL_PATH=""
-  USED_LOCAL_BIN=0
 
   if [ -n "${SAPIENT_INSTALL_DIR:-}" ]; then
     mkdir -p "$INSTALL_DIR"
@@ -166,7 +165,6 @@ install_binary() {
     mkdir -p "$LOCAL_BIN"
     cp "$EXTRACTED_BINARY" "${LOCAL_BIN}/${BINARY_NAME}"
     FINAL_PATH="${LOCAL_BIN}/${BINARY_NAME}"
-    USED_LOCAL_BIN=1
     if ! is_interactive; then
       warn "Non-interactive install — using ${LOCAL_BIN} (sudo skipped)"
     else

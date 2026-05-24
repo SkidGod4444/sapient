@@ -13,13 +13,16 @@ name = "sapient"
 path = "src/main.rs"
 
 [dependencies]
-sapient-core      = { workspace = true }
-sapient-ir        = { workspace = true }
+sapient-core         = { workspace = true }
+sapient-ir           = { workspace = true }
 sapient-backends-cpu = { workspace = true }
-sapient-scheduler = { workspace = true }
-sapient-io        = { workspace = true }
-sapient-telemetry = { workspace = true }
-sapient-runtime   = { workspace = true }
+sapient-scheduler    = { workspace = true }
+sapient-io           = { workspace = true }
+sapient-telemetry    = { workspace = true }
+sapient-runtime      = { workspace = true }
+sapient-generate     = { workspace = true }
+sapient-hub          = { workspace = true }
+sapient-tokenizers   = { workspace = true }
 
 thiserror   = { workspace = true }
 tracing     = { workspace = true }
@@ -31,3 +34,4 @@ axum        = { workspace = true }
 tower       = { workspace = true }
 tower-http  = { workspace = true }
 anyhow      = { workspace = true }
+dirs        = { workspace = true }

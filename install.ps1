@@ -55,9 +55,9 @@ function Download-Binary {
 
     $Filename = "sapient-$Platform.zip"
     $Url = "https://github.com/$Repo/releases/download/$Ver/$Filename"
-    $TmpDir = [System.IO.Path]::GetTempPath() + [System.Guid]::NewGuid().ToString()
+    $TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString())
     New-Item -ItemType Directory -Path $TmpDir | Out-Null
-    $TmpFile = "$TmpDir\$Filename"
+    $TmpFile = Join-Path $TmpDir $Filename
 
     Write-Step "Downloading sapient $Ver for $Platform..."
     try {
@@ -68,7 +68,7 @@ function Download-Binary {
         Write-Fail "Download failed from $Url`nError: $_"
     }
 
-    # Verify checksum
+    # Verify archive checksum (matches release .sha256 files)
     $ChecksumUrl = "$Url.sha256"
     try {
         $Expected = (Invoke-RestMethod $ChecksumUrl -UseBasicParsing).Trim() -split '\s+' | Select-Object -First 1
@@ -78,14 +78,13 @@ function Download-Binary {
         }
         Write-Ok "Checksum verified"
     } catch {
-        Write-Warn "Could not verify checksum (non-fatal)"
+        Write-Warn "Could not verify checksum (non-fatal): $_"
     }
 
-    # Extract
     Write-Step "Extracting..."
     Expand-Archive -Path $TmpFile -DestinationPath $TmpDir -Force
 
-    $Binary = Get-ChildItem $TmpDir -Recurse -Filter "sapient.exe" | Select-Object -First 1
+    $Binary = Get-ChildItem $TmpDir -Recurse -Filter $BinaryName | Select-Object -First 1
     if (-not $Binary) { Write-Fail "Binary not found after extraction" }
 
     return $Binary.FullName
@@ -99,20 +98,34 @@ function Install-Binary {
         New-Item -ItemType Directory -Path $Dir -Force | Out-Null
     }
 
-    $Dest = "$Dir\$BinaryName"
+    $Dest = Join-Path $Dir $BinaryName
     Copy-Item $BinaryPath $Dest -Force
     Write-Ok "Installed to $Dest"
 
-    # Add to PATH if not already there
-    $CurrentPath = [System.Environment]::GetEnvironmentVariable("PATH", "User")
-    if ($CurrentPath -notlike "*$Dir*") {
-        [System.Environment]::SetEnvironmentVariable(
-            "PATH",
-            "$CurrentPath;$Dir",
-            "User"
-        )
-        Write-Ok "Added $Dir to your PATH"
-        Write-Warn "Restart your terminal for the PATH change to take effect"
+    if (-not (Test-Path $Dest)) {
+        Write-Fail "Install verification failed — binary missing at $Dest"
+    }
+
+    $UserPath = [System.Environment]::GetEnvironmentVariable("PATH", "User")
+    if ([string]::IsNullOrEmpty($UserPath)) {
+        $NewPath = $Dir
+    } elseif ($UserPath -notlike "*$Dir*") {
+        $NewPath = "$UserPath;$Dir"
+    } else {
+        $NewPath = $UserPath
+    }
+
+    if ($NewPath -ne $UserPath) {
+        [System.Environment]::SetEnvironmentVariable("PATH", $NewPath, "User")
+        Write-Ok "Added $Dir to your user PATH"
+    }
+
+    # Refresh PATH in the current session (helps `irm | iex` without restart)
+    $MachinePath = [System.Environment]::GetEnvironmentVariable("PATH", "Machine")
+    $env:Path = "$NewPath;$MachinePath"
+
+    if (-not (Get-Command $BinaryName -ErrorAction SilentlyContinue)) {
+        Write-Warn "Restart your terminal if '$BinaryName' is not found"
     }
 }
 
@@ -122,14 +135,16 @@ function Write-PostInstall {
     Write-Host ""
     Write-Host "  SAPIENT $Ver installed successfully!" -ForegroundColor Green
     Write-Host ""
-    Write-Host "  Run your first model:"
+    Write-Host "  Verify:" -ForegroundColor White
+    Write-Host "    sapient --version" -ForegroundColor White
     Write-Host ""
+    Write-Host "  Run your first model:" -ForegroundColor White
     Write-Host "    sapient chat microsoft/phi-2" -ForegroundColor White
     Write-Host ""
-    Write-Host "  Other useful commands:"
+    Write-Host "  Other useful commands:" -ForegroundColor White
     Write-Host "    sapient pull TheBloke/Llama-2-7B-GGUF   " -NoNewline; Write-Host "# Download a model" -ForegroundColor DarkGray
     Write-Host "    sapient list                             " -NoNewline; Write-Host "# List cached models" -ForegroundColor DarkGray
-    Write-Host "    sapient serve microsoft/phi-2 --port 8080" -NoNewline; Write-Host " # Start API server" -ForegroundColor DarkGray
+    Write-Host "    sapient run microsoft/phi-2 --prompt ""Hello""" -NoNewline; Write-Host " # One-shot" -ForegroundColor DarkGray
     Write-Host "    sapient --help                           " -NoNewline; Write-Host "# Full help" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  Docs: https://github.com/$Repo" -ForegroundColor Cyan
@@ -150,5 +165,4 @@ Install-Binary -BinaryPath $Binary -Dir $InstallDir
 
 Write-PostInstall -Ver $Ver
 
-# Cleanup
 Remove-Item (Split-Path $Binary -Parent) -Recurse -Force -ErrorAction SilentlyContinue
