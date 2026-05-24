@@ -28,12 +28,12 @@ impl DType {
     #[inline]
     pub const fn element_size(self) -> usize {
         match self {
-            DType::F32  => 4,
-            DType::F16  => 2,
+            DType::F32 => 4,
+            DType::F16 => 2,
             DType::BF16 => 2,
-            DType::I32  => 4,
-            DType::I64  => 8,
-            DType::U8   => 1,
+            DType::I32 => 4,
+            DType::I64 => 8,
+            DType::U8 => 1,
             DType::Bool => 1,
         }
     }
@@ -42,12 +42,12 @@ impl DType {
     #[inline]
     pub const fn alignment(self) -> usize {
         match self {
-            DType::F32  => 4,
-            DType::F16  => 2,
+            DType::F32 => 4,
+            DType::F16 => 2,
             DType::BF16 => 2,
-            DType::I32  => 4,
-            DType::I64  => 8,
-            DType::U8   => 1,
+            DType::I32 => 4,
+            DType::I64 => 8,
+            DType::U8 => 1,
             DType::Bool => 1,
         }
     }
@@ -67,31 +67,20 @@ impl DType {
     /// Human-readable short name.
     pub const fn name(self) -> &'static str {
         match self {
-            DType::F32  => "f32",
-            DType::F16  => "f16",
+            DType::F32 => "f32",
+            DType::F16 => "f16",
             DType::BF16 => "bf16",
-            DType::I32  => "i32",
-            DType::I64  => "i64",
-            DType::U8   => "u8",
+            DType::I32 => "i32",
+            DType::I64 => "i64",
+            DType::U8 => "u8",
             DType::Bool => "bool",
         }
     }
 
-    /// Parse from a string (case-insensitive).
+    /// Parse from a string (case-insensitive). Also available via `s.parse::<DType>()`.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self> {
-        match s.to_ascii_lowercase().as_str() {
-            "f32" | "float32"  => Ok(DType::F32),
-            "f16" | "float16"  => Ok(DType::F16),
-            "bf16" | "bfloat16" => Ok(DType::BF16),
-            "i32" | "int32"    => Ok(DType::I32),
-            "i64" | "int64"    => Ok(DType::I64),
-            "u8"  | "uint8"    => Ok(DType::U8),
-            "bool"             => Ok(DType::Bool),
-            other => Err(SapientError::TypeMismatch {
-                expected: "a valid dtype".to_owned(),
-                got: other.to_owned(),
-            }),
-        }
+        s.parse()
     }
 
     /// Compute the total byte count for `numel` elements of this dtype.
@@ -107,17 +96,36 @@ impl std::fmt::Display for DType {
     }
 }
 
+impl std::str::FromStr for DType {
+    type Err = crate::error::SapientError;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "f32" | "float32" => Ok(DType::F32),
+            "f16" | "float16" => Ok(DType::F16),
+            "bf16" | "bfloat16" => Ok(DType::BF16),
+            "i32" | "int32" => Ok(DType::I32),
+            "i64" | "int64" => Ok(DType::I64),
+            "u8" | "uint8" => Ok(DType::U8),
+            "bool" => Ok(DType::Bool),
+            other => Err(SapientError::TypeMismatch {
+                expected: "a valid dtype".to_owned(),
+                got: other.to_owned(),
+            }),
+        }
+    }
+}
+
 // ── ONNX numeric type code mapping ──────────────────────────────────────────
 
 impl DType {
     /// Map from ONNX TensorProto::DataType integer.
     pub fn from_onnx_dtype(code: i32) -> Result<Self> {
         match code {
-            1  => Ok(DType::F32),
-            2  => Ok(DType::U8),
-            5  => Ok(DType::I32),
-            7  => Ok(DType::I64),
-            9  => Ok(DType::Bool),
+            1 => Ok(DType::F32),
+            2 => Ok(DType::U8),
+            5 => Ok(DType::I32),
+            7 => Ok(DType::I64),
+            9 => Ok(DType::Bool),
             10 => Ok(DType::F16),
             16 => Ok(DType::BF16),
             other => Err(SapientError::TypeMismatch {
@@ -130,12 +138,12 @@ impl DType {
     /// Map to ONNX TensorProto::DataType integer.
     pub fn to_onnx_dtype(self) -> i32 {
         match self {
-            DType::F32  => 1,
-            DType::U8   => 2,
-            DType::I32  => 5,
-            DType::I64  => 7,
+            DType::F32 => 1,
+            DType::U8 => 2,
+            DType::I32 => 5,
+            DType::I64 => 7,
             DType::Bool => 9,
-            DType::F16  => 10,
+            DType::F16 => 10,
             DType::BF16 => 16,
         }
     }
@@ -160,8 +168,13 @@ mod tests {
     #[test]
     fn from_str_roundtrip() {
         for (s, dt) in [
-            ("f32", DType::F32), ("f16", DType::F16), ("bf16", DType::BF16),
-            ("i32", DType::I32), ("i64", DType::I64), ("u8", DType::U8), ("bool", DType::Bool),
+            ("f32", DType::F32),
+            ("f16", DType::F16),
+            ("bf16", DType::BF16),
+            ("i32", DType::I32),
+            ("i64", DType::I64),
+            ("u8", DType::U8),
+            ("bool", DType::Bool),
         ] {
             assert_eq!(DType::from_str(s).unwrap(), dt);
         }
@@ -169,7 +182,15 @@ mod tests {
 
     #[test]
     fn onnx_roundtrip() {
-        for dt in [DType::F32, DType::F16, DType::BF16, DType::I32, DType::I64, DType::U8, DType::Bool] {
+        for dt in [
+            DType::F32,
+            DType::F16,
+            DType::BF16,
+            DType::I32,
+            DType::I64,
+            DType::U8,
+            DType::Bool,
+        ] {
             let code = dt.to_onnx_dtype();
             assert_eq!(DType::from_onnx_dtype(code).unwrap(), dt);
         }

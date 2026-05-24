@@ -4,15 +4,17 @@
 //! In Phase 1 this is a no-op (CPU uses NCHW); the pass is a hook for later
 //! backends that prefer NHWC (e.g. TensorFlow-style Metal kernels).
 
-use sapient_core::error::Result;
 use crate::graph::Graph;
 use crate::passes::Pass;
+use sapient_core::error::Result;
 
 #[derive(Debug)]
 pub struct LayoutOptimizationPass;
 
 impl Pass for LayoutOptimizationPass {
-    fn name(&self) -> &str { "layout-optimization" }
+    fn name(&self) -> &str {
+        "layout-optimization"
+    }
 
     fn run(&self, _graph: &mut Graph) -> Result<()> {
         // Phase 1 stub — CPU backend uses NCHW by convention, nothing to do.

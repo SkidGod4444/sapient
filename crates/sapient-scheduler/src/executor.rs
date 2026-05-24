@@ -11,9 +11,9 @@ use std::time::Instant;
 
 use tracing::{debug, error, instrument};
 
+use sapient_backends_cpu::backend::ExecutionBackend;
 use sapient_core::error::SapientError;
 use sapient_ir::graph::Graph;
-use sapient_backends_cpu::backend::ExecutionBackend;
 
 use crate::batcher::Batcher;
 use crate::request::{Batch, Request, Response};
@@ -24,7 +24,7 @@ use crate::scheduler::BatchScheduler;
 /// Async/rayon bridge for batch execution.
 pub struct Executor<B: ExecutionBackend + 'static> {
     backend: Arc<B>,
-    graph:   Arc<Graph>,
+    graph: Arc<Graph>,
     batcher: Batcher,
 }
 
@@ -32,7 +32,7 @@ impl<B: ExecutionBackend + 'static> Executor<B> {
     pub fn new(backend: B, graph: Graph) -> Self {
         Self {
             backend: Arc::new(backend),
-            graph:   Arc::new(graph),
+            graph: Arc::new(graph),
             batcher: Batcher::new(),
         }
     }
@@ -50,9 +50,11 @@ impl<B: ExecutionBackend + 'static> Executor<B> {
             Ok(m) => m,
             Err(e) => {
                 error!(error = %e, "Executor: failed to merge inputs");
-                return fake_batch.requests.into_iter().map(|r| {
-                    Response::err(r.id, SapientError::internal(e.to_string()), 0)
-                }).collect();
+                return fake_batch
+                    .requests
+                    .into_iter()
+                    .map(|r| Response::err(r.id, SapientError::internal(e.to_string()), 0))
+                    .collect();
             }
         };
         let requests = fake_batch.requests;
@@ -66,15 +68,15 @@ impl<B: ExecutionBackend + 'static> Executor<B> {
                 // Split batched outputs back to per-request responses.
                 // For now: broadcast the same output to all requesters.
                 // A production implementation would split on the batch dimension.
-                requests.into_iter().map(|r| {
-                    Response::ok(r.id, outputs.clone(), latency_us)
-                }).collect()
+                requests
+                    .into_iter()
+                    .map(|r| Response::ok(r.id, outputs.clone(), latency_us))
+                    .collect()
             }
-            Err(e) => {
-                requests.into_iter().map(|r| {
-                    Response::err(r.id, SapientError::internal(e.to_string()), latency_us)
-                }).collect()
-            }
+            Err(e) => requests
+                .into_iter()
+                .map(|r| Response::err(r.id, SapientError::internal(e.to_string()), latency_us))
+                .collect(),
         }
     }
 
@@ -100,10 +102,8 @@ impl<B: ExecutionBackend + 'static> Executor<B> {
             // Try to form a batch.
             if let Some(batch) = scheduler.try_form_batch() {
                 let exec = self.clone();
-                let responses = tokio::task::spawn_blocking(move || {
-                    exec.execute_batch(batch)
-                })
-                .await;
+                let responses =
+                    tokio::task::spawn_blocking(move || exec.execute_batch(batch)).await;
 
                 if let Ok(responses) = responses {
                     for resp in responses {

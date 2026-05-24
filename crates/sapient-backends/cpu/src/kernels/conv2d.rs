@@ -4,25 +4,35 @@
 //! compute efficiency. Production backends (Metal, Vulkan) use direct
 //! convolution or Winograd.
 
-use sapient_core::{DType, Shape, Tensor};
 use sapient_core::error::{Result, SapientError};
+use sapient_core::{Shape, Tensor};
 
 /// 2-D convolution: (N, C_in, H, W) → (N, C_out, H_out, W_out).
 pub fn conv2d(
-    x:            &Tensor,
-    weight:       &Tensor,
-    bias:         Option<&Tensor>,
-    kernel_shape: [usize; 2],
-    pads:         [usize; 4],   // [top, left, bottom, right]
-    strides:      [usize; 2],
-    dilations:    [usize; 2],
-    groups:       usize,
+    x: &Tensor,
+    weight: &Tensor,
+    bias: Option<&Tensor>,
+    _kernel_shape: [usize; 2],
+    pads: [usize; 4], // [top, left, bottom, right]
+    strides: [usize; 2],
+    dilations: [usize; 2],
+    groups: usize,
 ) -> Result<Tensor> {
     let xs = x.shape();
     let ws = weight.shape();
 
-    if xs.ndim() != 4 { return Err(SapientError::RankMismatch { expected: 4, got: xs.ndim() }); }
-    if ws.ndim() != 4 { return Err(SapientError::RankMismatch { expected: 4, got: ws.ndim() }); }
+    if xs.ndim() != 4 {
+        return Err(SapientError::RankMismatch {
+            expected: 4,
+            got: xs.ndim(),
+        });
+    }
+    if ws.ndim() != 4 {
+        return Err(SapientError::RankMismatch {
+            expected: 4,
+            got: ws.ndim(),
+        });
+    }
 
     let (n, c_in, h_in, w_in) = (xs.dims()[0], xs.dims()[1], xs.dims()[2], xs.dims()[3]);
     let (c_out, c_in_g, kh, kw) = (ws.dims()[0], ws.dims()[1], ws.dims()[2], ws.dims()[3]);
@@ -70,8 +80,10 @@ pub fn conv2d(
                                     + kj as isize * dilations[1] as isize
                                     - pads[1] as isize;
 
-                                let val = if ih >= 0 && ih < h_in as isize
-                                    && iw >= 0 && iw < w_in as isize
+                                let val = if ih >= 0
+                                    && ih < h_in as isize
+                                    && iw >= 0
+                                    && iw < w_in as isize
                                 {
                                     let c = c_start + ci;
                                     let flat = batch * (c_in * h_in * w_in)
@@ -102,25 +114,30 @@ pub fn conv2d(
             let mut gemm_out = vec![0.0f32; m * n2];
             unsafe {
                 matrixmultiply::sgemm(
-                    m, k, n2,
+                    m,
+                    k,
+                    n2,
                     1.0,
-                    w_data[w_off..].as_ptr(), k as isize, 1,
-                    col.as_ptr(), n2 as isize, 1,
+                    w_data[w_off..].as_ptr(),
+                    k as isize,
+                    1,
+                    col.as_ptr(),
+                    n2 as isize,
+                    1,
                     0.0,
-                    gemm_out.as_mut_ptr(), n2 as isize, 1,
+                    gemm_out.as_mut_ptr(),
+                    n2 as isize,
+                    1,
                 );
             }
 
             // Copy gemm_out into output tensor.
             let c_out_start = group * c_out_g;
             for co in 0..c_out_g {
-                let bias_v = b_data
-                    .map(|b| b[c_out_start + co])
-                    .unwrap_or(0.0);
+                let bias_v = b_data.map(|b| b[c_out_start + co]).unwrap_or(0.0);
                 for hw in 0..col_cols {
-                    let out_idx = batch * (c_out * h_out * w_out)
-                        + (c_out_start + co) * (h_out * w_out)
-                        + hw;
+                    let out_idx =
+                        batch * (c_out * h_out * w_out) + (c_out_start + co) * (h_out * w_out) + hw;
                     out_data[out_idx] = gemm_out[co * n2 + hw] + bias_v;
                 }
             }
@@ -138,10 +155,7 @@ mod tests {
     #[test]
     fn conv2d_identity_kernel() {
         // 1×1 conv with identity weight.
-        let x = Tensor::from_f32(
-            &[1.0, 2.0, 3.0, 4.0],
-            vec![1, 1, 2, 2],
-        ).unwrap();
+        let x = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], vec![1, 1, 2, 2]).unwrap();
         let w = Tensor::from_f32(&[1.0], vec![1, 1, 1, 1]).unwrap();
         let y = conv2d(&x, &w, None, [1, 1], [0, 0, 0, 0], [1, 1], [1, 1], 1).unwrap();
         assert_eq!(y.as_f32_slice(), &[1.0, 2.0, 3.0, 4.0]);

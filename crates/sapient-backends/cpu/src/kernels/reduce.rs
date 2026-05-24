@@ -1,14 +1,20 @@
 //! Reduction kernels: sum, mean, max, min.
 
+use sapient_core::error::Result;
 use sapient_core::{Shape, Tensor};
-use sapient_core::error::{Result, SapientError};
 
 fn normalise_axes(axes: &[i64], ndim: usize) -> Vec<usize> {
     if axes.is_empty() {
         (0..ndim).collect()
     } else {
         axes.iter()
-            .map(|&a| if a < 0 { (ndim as i64 + a) as usize } else { a as usize })
+            .map(|&a| {
+                if a < 0 {
+                    (ndim as i64 + a) as usize
+                } else {
+                    a as usize
+                }
+            })
             .collect()
     }
 }
@@ -19,7 +25,7 @@ where
     F: Fn(f32, f32) -> f32,
 {
     let shape = x.shape();
-    let data  = x.as_f32_slice();
+    let data = x.as_f32_slice();
     let norm_axes = normalise_axes(axes, shape.ndim());
 
     // Output shape.
@@ -29,7 +35,11 @@ where
         .enumerate()
         .filter_map(|(i, &d)| {
             if norm_axes.contains(&i) {
-                if keep_dims { Some(1) } else { None }
+                if keep_dims {
+                    Some(1)
+                } else {
+                    None
+                }
             } else {
                 Some(d)
             }
@@ -40,13 +50,9 @@ where
     let mut out_data = vec![init; out_numel];
 
     // Iterate every element and accumulate into its output position.
-    let strides = shape.strides();
     for (flat, &val) in data.iter().enumerate() {
         // Compute multi-index.
-        let mut rem = flat;
         let mut out_flat = 0usize;
-        let mut out_stride = 1usize;
-        let mut out_idx = 0usize;
 
         // We compute the flat output index by skipping reduced dims.
         // Build output index from most-to-least significant.
@@ -64,7 +70,12 @@ where
         let mut oi = 0;
         for (i, &mi) in multi.iter().enumerate() {
             if !norm_axes.contains(&i) {
-                out_flat += mi * if oi < out_strides.len() { out_strides[oi] } else { 1 };
+                out_flat += mi
+                    * if oi < out_strides.len() {
+                        out_strides[oi]
+                    } else {
+                        1
+                    };
                 oi += 1;
             } else if keep_dims {
                 // dim = 1, stride may still be 1.
@@ -86,7 +97,11 @@ pub fn reduce_mean(x: &Tensor, axes: &[i64], keep_dims: bool) -> Result<Tensor> 
     let sum = reduce_sum(x, axes, keep_dims)?;
     let norm_axes = normalise_axes(axes, x.shape().ndim());
     let count: usize = norm_axes.iter().map(|&a| x.shape().dims()[a]).product();
-    let d: Vec<f32> = sum.as_f32_slice().iter().map(|&v| v / count as f32).collect();
+    let d: Vec<f32> = sum
+        .as_f32_slice()
+        .iter()
+        .map(|&v| v / count as f32)
+        .collect();
     Tensor::from_f32(&d, sum.shape().clone())
 }
 

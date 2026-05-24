@@ -13,23 +13,23 @@
 
 use anyhow::Result;
 use ordered_float::OrderedFloat;
-use sapient_ir::{
-    graph::Graph,
-    op::OpType,
-};
 use sapient_hub::model_info::ModelInfo;
+use sapient_ir::{graph::Graph, op::OpType};
 
 pub fn build(info: &ModelInfo) -> Result<Graph> {
     let mut g = Graph::new(format!("llama_{}", info.model_type));
 
     // ── Inputs ────────────────────────────────────────────────────────────────
-    let input_ids = g.add_input("input_ids", None, None);          // (batch, seq)
-    let _attn_mask = g.add_input("attention_mask", None, None);    // (batch, seq) optional
-    let _pos_ids   = g.add_input("position_ids", None, None);      // (batch, seq) optional
+    let input_ids = g.add_input("input_ids", None, None); // (batch, seq)
+    let _attn_mask = g.add_input("attention_mask", None, None); // (batch, seq) optional
+    let _pos_ids = g.add_input("position_ids", None, None); // (batch, seq) optional
 
     // ── Token Embedding (embed_tokens) ────────────────────────────────────────
     let mut x = g.add_op(
-        OpType::Embedding { vocab_size: info.vocab_size, dim: info.hidden_size },
+        OpType::Embedding {
+            vocab_size: info.vocab_size,
+            dim: info.hidden_size,
+        },
         vec![input_ids],
         1,
         Some("embed_tokens".into()),
@@ -42,19 +42,16 @@ pub fn build(info: &ModelInfo) -> Result<Graph> {
 
     // ── Final RMSNorm ─────────────────────────────────────────────────────────
     let normed = g.add_op(
-        OpType::RmsNorm { epsilon: OrderedFloat(info.rms_norm_eps) },
+        OpType::RmsNorm {
+            epsilon: OrderedFloat(info.rms_norm_eps),
+        },
         vec![x],
         1,
         Some("norm".into()),
     );
 
     // ── LM Head (linear projection → vocab) ───────────────────────────────────
-    let logits = g.add_op(
-        OpType::MatMul,
-        vec![normed],
-        1,
-        Some("lm_head".into()),
-    );
+    let logits = g.add_op(OpType::MatMul, vec![normed], 1, Some("lm_head".into()));
 
     g.mark_output(logits, "logits");
 
@@ -63,10 +60,10 @@ pub fn build(info: &ModelInfo) -> Result<Graph> {
 
 /// Build one Llama decoder block and return its output node ID.
 fn build_decoder_layer(
-    g:   &mut Graph,
-    x:   sapient_ir::node::NodeId,
+    g: &mut Graph,
+    x: sapient_ir::node::NodeId,
     info: &ModelInfo,
-    idx:  usize,
+    idx: usize,
 ) -> sapient_ir::node::NodeId {
     let pfx = format!("layers.{idx}");
     let eps = OrderedFloat(info.rms_norm_eps);
@@ -81,19 +78,40 @@ fn build_decoder_layer(
     );
 
     // QKV projections (separate, as in HF implementation).
-    let q = g.add_op(OpType::MatMul, vec![attn_norm], 1, Some(format!("{pfx}.self_attn.q_proj")));
-    let k = g.add_op(OpType::MatMul, vec![attn_norm], 1, Some(format!("{pfx}.self_attn.k_proj")));
-    let v = g.add_op(OpType::MatMul, vec![attn_norm], 1, Some(format!("{pfx}.self_attn.v_proj")));
+    let q = g.add_op(
+        OpType::MatMul,
+        vec![attn_norm],
+        1,
+        Some(format!("{pfx}.self_attn.q_proj")),
+    );
+    let k = g.add_op(
+        OpType::MatMul,
+        vec![attn_norm],
+        1,
+        Some(format!("{pfx}.self_attn.k_proj")),
+    );
+    let v = g.add_op(
+        OpType::MatMul,
+        vec![attn_norm],
+        1,
+        Some(format!("{pfx}.self_attn.v_proj")),
+    );
 
     // RoPE applied to Q and K.
     let q_rope = g.add_op(
-        OpType::RotaryEmbedding { base: OrderedFloat(info.rope_theta), dim: info.head_dim },
+        OpType::RotaryEmbedding {
+            base: OrderedFloat(info.rope_theta),
+            dim: info.head_dim,
+        },
         vec![q],
         1,
         Some(format!("{pfx}.self_attn.q_rope")),
     );
     let k_rope = g.add_op(
-        OpType::RotaryEmbedding { base: OrderedFloat(info.rope_theta), dim: info.head_dim },
+        OpType::RotaryEmbedding {
+            base: OrderedFloat(info.rope_theta),
+            dim: info.head_dim,
+        },
         vec![k],
         1,
         Some(format!("{pfx}.self_attn.k_rope")),
@@ -102,10 +120,10 @@ fn build_decoder_layer(
     // GQA (or MHA if n_kv_heads == n_heads).
     let attn_out = g.add_op(
         OpType::GroupedQueryAttention {
-            n_heads:    info.num_attention_heads,
+            n_heads: info.num_attention_heads,
             n_kv_heads: info.num_key_value_heads,
-            head_dim:   info.head_dim,
-            causal:     true,
+            head_dim: info.head_dim,
+            causal: true,
         },
         vec![q_rope, k_rope, v],
         1,
@@ -121,7 +139,12 @@ fn build_decoder_layer(
     );
 
     // Residual.
-    let x = g.add_op(OpType::Add, vec![x, o_proj], 1, Some(format!("{pfx}.attn_residual")));
+    let x = g.add_op(
+        OpType::Add,
+        vec![x, o_proj],
+        1,
+        Some(format!("{pfx}.attn_residual")),
+    );
 
     // ── Feed-forward sub-layer (SwiGLU) ───────────────────────────────────────
     // Pre-norm.
@@ -133,18 +156,43 @@ fn build_decoder_layer(
     );
 
     // Gate and Up projections.
-    let gate = g.add_op(OpType::MatMul, vec![ffn_norm], 1, Some(format!("{pfx}.mlp.gate_proj")));
-    let up   = g.add_op(OpType::MatMul, vec![ffn_norm], 1, Some(format!("{pfx}.mlp.up_proj")));
+    let gate = g.add_op(
+        OpType::MatMul,
+        vec![ffn_norm],
+        1,
+        Some(format!("{pfx}.mlp.gate_proj")),
+    );
+    let up = g.add_op(
+        OpType::MatMul,
+        vec![ffn_norm],
+        1,
+        Some(format!("{pfx}.mlp.up_proj")),
+    );
 
     // SwiGLU: SiLU(gate) * up.
     let gate_act = g.add_op(OpType::Silu, vec![gate], 1, Some(format!("{pfx}.mlp.silu")));
-    let ffn_mid  = g.add_op(OpType::Mul, vec![gate_act, up], 1, Some(format!("{pfx}.mlp.gate_mul")));
+    let ffn_mid = g.add_op(
+        OpType::Mul,
+        vec![gate_act, up],
+        1,
+        Some(format!("{pfx}.mlp.gate_mul")),
+    );
 
     // Down projection.
-    let down = g.add_op(OpType::MatMul, vec![ffn_mid], 1, Some(format!("{pfx}.mlp.down_proj")));
+    let down = g.add_op(
+        OpType::MatMul,
+        vec![ffn_mid],
+        1,
+        Some(format!("{pfx}.mlp.down_proj")),
+    );
 
     // Residual.
-    g.add_op(OpType::Add, vec![x, down], 1, Some(format!("{pfx}.ffn_residual")))
+    g.add_op(
+        OpType::Add,
+        vec![x, down],
+        1,
+        Some(format!("{pfx}.ffn_residual")),
+    )
 }
 
 #[cfg(test)]

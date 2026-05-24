@@ -3,8 +3,8 @@
 //! `matrixmultiply` provides a pure-Rust, BLAS-free, AVX2-optimised SGEMM.
 //! It beats a naive loop by ~10-30× on modern CPUs.
 
-use sapient_core::{DType, Shape, Tensor};
 use sapient_core::error::{Result, SapientError};
+use sapient_core::{Shape, Tensor};
 
 // ── matmul ───────────────────────────────────────────────────────────────────
 
@@ -58,12 +58,20 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         // SAFETY: raw pointers derived from Vec<f32> — valid, non-overlapping.
         unsafe {
             matrixmultiply::sgemm(
-                m, k, n,
+                m,
+                k,
+                n,
                 1.0,
-                a_data[a_off..].as_ptr(), k as isize, 1,
-                b_data[b_off..].as_ptr(), n as isize, 1,
+                a_data[a_off..].as_ptr(),
+                k as isize,
+                1,
+                b_data[b_off..].as_ptr(),
+                n as isize,
+                1,
                 0.0,
-                out_data[c_off..].as_mut_ptr(), n as isize, 1,
+                out_data[c_off..].as_mut_ptr(),
+                n as isize,
+                1,
             );
         }
     }
@@ -117,12 +125,20 @@ pub fn gemm(
 
     unsafe {
         matrixmultiply::sgemm(
-            m, k, n,
+            m,
+            k,
+            n,
             alpha,
-            a_data.as_ptr(), k as isize, 1,
-            b_data.as_ptr(), n as isize, 1,
+            a_data.as_ptr(),
+            k as isize,
+            1,
+            b_data.as_ptr(),
+            n as isize,
+            1,
             0.0,
-            out.as_mut_ptr(), n as isize, 1,
+            out.as_mut_ptr(),
+            n as isize,
+            1,
         );
     }
 
@@ -139,7 +155,11 @@ pub fn gemm(
         }
         for i in 0..m {
             for j in 0..n {
-                let bv = if b_len == 1 { bias_data[0] } else { bias_data[j] };
+                let bv = if b_len == 1 {
+                    bias_data[0]
+                } else {
+                    bias_data[j]
+                };
                 out[i * n + j] += beta * bv;
             }
         }
@@ -151,6 +171,7 @@ pub fn gemm(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sapient_core::DType;
 
     #[test]
     fn matmul_2x2() {

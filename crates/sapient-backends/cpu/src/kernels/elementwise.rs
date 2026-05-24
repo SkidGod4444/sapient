@@ -3,8 +3,8 @@
 //! All kernels operate on F32 tensors. Binary ops support same-shape operands
 //! only (broadcasting handled by the dispatch layer after shape inference).
 
-use sapient_core::{DType, Shape, Tensor};
 use sapient_core::error::{Result, SapientError};
+use sapient_core::{DType, Tensor};
 
 // ── Helper ────────────────────────────────────────────────────────────────────
 
@@ -27,7 +27,11 @@ fn binary_f32<F: Fn(f32, f32) -> f32>(a: &Tensor, b: &Tensor, f: F) -> Result<Te
     let b_data = b.as_f32_slice();
 
     let (out, shape) = if a_data.len() == b_data.len() {
-        let out: Vec<f32> = a_data.iter().zip(b_data.iter()).map(|(&x, &y)| f(x, y)).collect();
+        let out: Vec<f32> = a_data
+            .iter()
+            .zip(b_data.iter())
+            .map(|(&x, &y)| f(x, y))
+            .collect();
         (out, a.shape().clone())
     } else if b_data.len() == 1 {
         let scalar = b_data[0];
@@ -49,21 +53,49 @@ fn binary_f32<F: Fn(f32, f32) -> f32>(a: &Tensor, b: &Tensor, f: F) -> Result<Te
 
 // ── Arithmetic ────────────────────────────────────────────────────────────────
 
-pub fn add(a: &Tensor, b: &Tensor) -> Result<Tensor> { binary_f32(a, b, |x, y| x + y) }
-pub fn sub(a: &Tensor, b: &Tensor) -> Result<Tensor> { binary_f32(a, b, |x, y| x - y) }
-pub fn mul(a: &Tensor, b: &Tensor) -> Result<Tensor> { binary_f32(a, b, |x, y| x * y) }
-pub fn div(a: &Tensor, b: &Tensor) -> Result<Tensor> { binary_f32(a, b, |x, y| x / y) }
-pub fn pow(a: &Tensor, b: &Tensor) -> Result<Tensor> { binary_f32(a, b, |x, y| x.powf(y)) }
+pub fn add(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    binary_f32(a, b, |x, y| x + y)
+}
+pub fn sub(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    binary_f32(a, b, |x, y| x - y)
+}
+pub fn mul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    binary_f32(a, b, |x, y| x * y)
+}
+pub fn div(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    binary_f32(a, b, |x, y| x / y)
+}
+pub fn pow(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    binary_f32(a, b, |x, y| x.powf(y))
+}
 
-pub fn neg(x: &Tensor)  -> Result<Tensor> { unary_f32(x, |v| -v) }
-pub fn abs(x: &Tensor)  -> Result<Tensor> { unary_f32(x, |v| v.abs()) }
-pub fn sqrt(x: &Tensor) -> Result<Tensor> { unary_f32(x, |v| v.sqrt()) }
-pub fn exp(x: &Tensor)  -> Result<Tensor> { unary_f32(x, |v| v.exp()) }
-pub fn log(x: &Tensor)  -> Result<Tensor> { unary_f32(x, |v| v.ln()) }
-pub fn erf(x: &Tensor)  -> Result<Tensor> { unary_f32(x, erf_approx) }
-pub fn floor(x: &Tensor) -> Result<Tensor> { unary_f32(x, |v| v.floor()) }
-pub fn ceil(x: &Tensor)  -> Result<Tensor> { unary_f32(x, |v| v.ceil()) }
-pub fn round(x: &Tensor) -> Result<Tensor> { unary_f32(x, |v| v.round()) }
+pub fn neg(x: &Tensor) -> Result<Tensor> {
+    unary_f32(x, |v| -v)
+}
+pub fn abs(x: &Tensor) -> Result<Tensor> {
+    unary_f32(x, |v| v.abs())
+}
+pub fn sqrt(x: &Tensor) -> Result<Tensor> {
+    unary_f32(x, |v| v.sqrt())
+}
+pub fn exp(x: &Tensor) -> Result<Tensor> {
+    unary_f32(x, |v| v.exp())
+}
+pub fn log(x: &Tensor) -> Result<Tensor> {
+    unary_f32(x, |v| v.ln())
+}
+pub fn erf(x: &Tensor) -> Result<Tensor> {
+    unary_f32(x, erf_approx)
+}
+pub fn floor(x: &Tensor) -> Result<Tensor> {
+    unary_f32(x, |v| v.floor())
+}
+pub fn ceil(x: &Tensor) -> Result<Tensor> {
+    unary_f32(x, |v| v.ceil())
+}
+pub fn round(x: &Tensor) -> Result<Tensor> {
+    unary_f32(x, |v| v.round())
+}
 
 // ── Activations ───────────────────────────────────────────────────────────────
 
@@ -119,11 +151,7 @@ fn erf_approx(x: f32) -> f32 {
     let t = 1.0 / (1.0 + 0.327_591_1 * x);
     let y = 1.0
         - (0.254_829_59
-            + (-0.284_496_74
-                + (1.421_413_74
-                    + (-1.453_152_03 + 1.061_405_43 * t) * t)
-                    * t)
-                * t)
+            + (-0.284_496_74 + (1.421_413_74 + (-1.453_152_03 + 1.061_405_43 * t) * t) * t) * t)
             * t
             * (-x * x).exp();
     sign * y
@@ -138,15 +166,37 @@ mod tests {
     }
 
     #[test]
-    fn test_add()     { assert!((add(&t(&[1.0, 2.0]), &t(&[3.0, 4.0])).unwrap().as_f32_slice()[0] - 4.0).abs() < 1e-6); }
+    fn test_add() {
+        assert!(
+            (add(&t(&[1.0, 2.0]), &t(&[3.0, 4.0]))
+                .unwrap()
+                .as_f32_slice()[0]
+                - 4.0)
+                .abs()
+                < 1e-6
+        );
+    }
     #[test]
-    fn test_relu()    { let r = relu(&t(&[-1.0, 0.0, 1.0])).unwrap(); let d = r.as_f32_slice(); assert_eq!(d, &[0.0, 0.0, 1.0]); }
+    fn test_relu() {
+        let r = relu(&t(&[-1.0, 0.0, 1.0])).unwrap();
+        let d = r.as_f32_slice();
+        assert_eq!(d, &[0.0, 0.0, 1.0]);
+    }
     #[test]
-    fn test_sigmoid() { let v = sigmoid(&t(&[0.0])).unwrap().as_f32_slice()[0]; assert!((v - 0.5).abs() < 1e-6); }
+    fn test_sigmoid() {
+        let v = sigmoid(&t(&[0.0])).unwrap().as_f32_slice()[0];
+        assert!((v - 0.5).abs() < 1e-6);
+    }
     #[test]
-    fn test_gelu()    { let v = gelu(&t(&[0.0])).unwrap().as_f32_slice()[0]; assert!(v.abs() < 1e-5); }
+    fn test_gelu() {
+        let v = gelu(&t(&[0.0])).unwrap().as_f32_slice()[0];
+        assert!(v.abs() < 1e-5);
+    }
     #[test]
-    fn test_erf()     { let v = erf_approx(0.0); assert!(v.abs() < 1e-6, "erf(0) should be ~0, got {v}"); }
+    fn test_erf() {
+        let v = erf_approx(0.0);
+        assert!(v.abs() < 1e-6, "erf(0) should be ~0, got {v}");
+    }
     #[test]
     fn test_scalar_broadcast() {
         let a = t(&[1.0, 2.0, 3.0]);

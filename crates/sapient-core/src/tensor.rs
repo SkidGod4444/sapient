@@ -3,28 +3,25 @@
 //! A `Tensor` owns its shape and dtype metadata, and holds a reference-counted
 //! `BufferHandle` for the raw bytes.  Layout is always row-major (C order).
 
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
 use serde::{Deserializer, Serializer};
 
-use crate::buffer::{Buffer, BufferHandle, CpuBuffer};
+use crate::buffer::{BufferHandle, CpuBuffer};
 use crate::dtype::DType;
 use crate::error::{Result, SapientError};
 use crate::shape::Shape;
-
 
 // ── Tensor ────────────────────────────────────────────────────────────────────
 
 /// A multi-dimensional tensor with reference-counted buffer ownership.
 #[derive(Debug, Clone)]
 pub struct Tensor {
-    shape:   Shape,
-    dtype:   DType,
-    strides: Vec<usize>,  // row-major by default
-    buffer:  BufferHandle,
+    shape: Shape,
+    dtype: DType,
+    strides: Vec<usize>, // row-major by default
+    buffer: BufferHandle,
     // Byte offset into the buffer where element [0,0,...,0] lives.
-    offset:  usize,
+    offset: usize,
 }
 
 impl Tensor {
@@ -37,7 +34,13 @@ impl Tensor {
         let numel = shape.numel();
         let strides = shape.strides();
         let buffer = BufferHandle::new(CpuBuffer::zeros(numel, dtype)?);
-        Ok(Self { shape, dtype, strides, buffer, offset: 0 })
+        Ok(Self {
+            shape,
+            dtype,
+            strides,
+            buffer,
+            offset: 0,
+        })
     }
 
     /// Create a tensor from a flat `f32` slice (CPU, row-major).
@@ -52,7 +55,13 @@ impl Tensor {
         }
         let strides = shape.strides();
         let buffer = BufferHandle::new(CpuBuffer::from_f32_slice(data)?);
-        Ok(Self { shape, dtype: DType::F32, strides, buffer, offset: 0 })
+        Ok(Self {
+            shape,
+            dtype: DType::F32,
+            strides,
+            buffer,
+            offset: 0,
+        })
     }
 
     /// Create a scalar tensor from a single `f32`.
@@ -77,21 +86,43 @@ impl Tensor {
             });
         }
         let strides = shape.strides();
-        Ok(Self { shape, dtype, strides, buffer, offset })
+        Ok(Self {
+            shape,
+            dtype,
+            strides,
+            buffer,
+            offset,
+        })
     }
 
     // ── Accessors ────────────────────────────────────────────────────────────
 
-    pub fn shape(&self) -> &Shape { &self.shape }
-    pub fn dtype(&self) -> DType  { self.dtype }
-    pub fn ndim(&self) -> usize   { self.shape.ndim() }
-    pub fn numel(&self) -> usize  { self.shape.numel() }
-    pub fn strides(&self) -> &[usize] { &self.strides }
-    pub fn buffer(&self) -> &BufferHandle { &self.buffer }
-    pub fn offset(&self) -> usize { self.offset }
+    pub fn shape(&self) -> &Shape {
+        &self.shape
+    }
+    pub fn dtype(&self) -> DType {
+        self.dtype
+    }
+    pub fn ndim(&self) -> usize {
+        self.shape.ndim()
+    }
+    pub fn numel(&self) -> usize {
+        self.shape.numel()
+    }
+    pub fn strides(&self) -> &[usize] {
+        &self.strides
+    }
+    pub fn buffer(&self) -> &BufferHandle {
+        &self.buffer
+    }
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
 
     /// True if the tensor has a single element.
-    pub fn is_scalar(&self) -> bool { self.shape.is_scalar() || self.numel() == 1 }
+    pub fn is_scalar(&self) -> bool {
+        self.shape.is_scalar() || self.numel() == 1
+    }
 
     /// True if the buffer is row-major contiguous (normal case).
     pub fn is_contiguous(&self) -> bool {
@@ -136,7 +167,7 @@ impl Tensor {
         if self.ndim() != 2 {
             return Err(SapientError::internal("t() requires a 2-D tensor"));
         }
-        let mut dims  = self.shape.dims().to_vec();
+        let mut dims = self.shape.dims().to_vec();
         let mut strides = self.strides.clone();
         dims.swap(0, 1);
         strides.swap(0, 1);
@@ -159,8 +190,13 @@ impl Tensor {
 
 impl std::fmt::Display for Tensor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Tensor(shape={}, dtype={}, device={})",
-            self.shape, self.dtype, self.buffer.0.device())
+        write!(
+            f,
+            "Tensor(shape={}, dtype={}, device={})",
+            self.shape,
+            self.dtype,
+            self.buffer.0.device()
+        )
     }
 }
 
@@ -182,8 +218,12 @@ impl Serialize for Tensor {
         } else {
             vec![] // non-f32 tensors: zero data (future work)
         };
-        TensorProxy { shape: self.shape.clone(), dtype: self.dtype, data }
-            .serialize(serializer)
+        TensorProxy {
+            shape: self.shape.clone(),
+            dtype: self.dtype,
+            data,
+        }
+        .serialize(serializer)
     }
 }
 
@@ -191,11 +231,9 @@ impl<'de> Deserialize<'de> for Tensor {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
         let proxy = TensorProxy::deserialize(deserializer)?;
         if proxy.data.is_empty() {
-            Tensor::zeros(proxy.shape, proxy.dtype)
-                .map_err(serde::de::Error::custom)
+            Tensor::zeros(proxy.shape, proxy.dtype).map_err(serde::de::Error::custom)
         } else {
-            Tensor::from_f32(&proxy.data, proxy.shape)
-                .map_err(serde::de::Error::custom)
+            Tensor::from_f32(&proxy.data, proxy.shape).map_err(serde::de::Error::custom)
         }
     }
 }
@@ -209,7 +247,10 @@ pub struct TensorMeta {
 
 impl From<&Tensor> for TensorMeta {
     fn from(t: &Tensor) -> Self {
-        Self { shape: t.shape.clone(), dtype: t.dtype }
+        Self {
+            shape: t.shape.clone(),
+            dtype: t.dtype,
+        }
     }
 }
 

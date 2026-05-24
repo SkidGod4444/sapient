@@ -21,11 +21,18 @@ pub enum SamplingStrategy {
     /// Nucleus sampling — sample from the minimum set covering probability p.
     TopP { p: f32, temperature: f32 },
     /// Combined top-k + top-p + temperature.
-    Combined { top_k: usize, top_p: f32, temperature: f32, repetition_penalty: f32 },
+    Combined {
+        top_k: usize,
+        top_p: f32,
+        temperature: f32,
+        repetition_penalty: f32,
+    },
 }
 
 impl Default for SamplingStrategy {
-    fn default() -> Self { Self::Greedy }
+    fn default() -> Self {
+        Self::Greedy
+    }
 }
 
 // ── Sampler ───────────────────────────────────────────────────────────────────
@@ -42,11 +49,19 @@ impl Sampler {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(42);
-        Self { strategy, rng_seed: seed, counter: 0 }
+        Self {
+            strategy,
+            rng_seed: seed,
+            counter: 0,
+        }
     }
 
     pub fn with_seed(strategy: SamplingStrategy, seed: u64) -> Self {
-        Self { strategy, rng_seed: seed, counter: 0 }
+        Self {
+            strategy,
+            rng_seed: seed,
+            counter: 0,
+        }
     }
 
     /// Sample the next token from `logits` — shape: (vocab_size,).
@@ -78,7 +93,12 @@ impl Sampler {
                 Ok(self.random_sample(&probs))
             }
 
-            SamplingStrategy::Combined { top_k, top_p, temperature, repetition_penalty } => {
+            SamplingStrategy::Combined {
+                top_k,
+                top_p,
+                temperature,
+                repetition_penalty,
+            } => {
                 let (k, p, t, rp) = (*top_k, *top_p, *temperature, *repetition_penalty);
                 let mut penalized = apply_repetition_penalty(logits, prev_tokens, rp);
                 penalized = scale_logits(&penalized, t);
@@ -93,7 +113,9 @@ impl Sampler {
     /// Simple xorshift RNG for sampling without an external rand crate.
     fn random_u64(&mut self) -> u64 {
         self.counter += 1;
-        let mut x = self.rng_seed.wrapping_add(self.counter.wrapping_mul(6364136223846793005));
+        let mut x = self
+            .rng_seed
+            .wrapping_add(self.counter.wrapping_mul(6364136223846793005));
         x ^= x >> 30;
         x = x.wrapping_mul(0xbf58476d1ce4e5b9);
         x ^= x >> 27;
@@ -122,7 +144,9 @@ impl Sampler {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 pub fn argmax(logits: &[f32]) -> u32 {
-    logits.iter().enumerate()
+    logits
+        .iter()
+        .enumerate()
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(i, _)| i as u32)
         .unwrap_or(0)
@@ -144,11 +168,16 @@ fn scale_logits(logits: &[f32], temperature: f32) -> Vec<f32> {
 }
 
 fn top_k_filter(logits: &[f32], k: usize) -> Vec<f32> {
-    if k == 0 || k >= logits.len() { return logits.to_vec(); }
+    if k == 0 || k >= logits.len() {
+        return logits.to_vec();
+    }
     let mut indexed: Vec<(usize, f32)> = logits.iter().cloned().enumerate().collect();
     indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     let threshold = indexed[k - 1].1;
-    logits.iter().map(|&x| if x >= threshold { x } else { f32::NEG_INFINITY }).collect()
+    logits
+        .iter()
+        .map(|&x| if x >= threshold { x } else { f32::NEG_INFINITY })
+        .collect()
 }
 
 fn top_p_filter(logits: &[f32], p: f32) -> Vec<f32> {
@@ -169,12 +198,25 @@ fn top_p_filter(logits: &[f32], p: f32) -> Vec<f32> {
         }
     }
 
-    let keep: std::collections::HashSet<usize> = sorted_probs[..cutoff_idx].iter().map(|(i, _)| *i).collect();
-    logits.iter().enumerate().map(|(i, &x)| if keep.contains(&i) { x } else { f32::NEG_INFINITY }).collect()
+    let keep: std::collections::HashSet<usize> =
+        sorted_probs[..cutoff_idx].iter().map(|(i, _)| *i).collect();
+    logits
+        .iter()
+        .enumerate()
+        .map(|(i, &x)| {
+            if keep.contains(&i) {
+                x
+            } else {
+                f32::NEG_INFINITY
+            }
+        })
+        .collect()
 }
 
 fn apply_repetition_penalty(logits: &[f32], prev_tokens: &[u32], penalty: f32) -> Vec<f32> {
-    if (penalty - 1.0).abs() < 1e-6 { return logits.to_vec(); }
+    if (penalty - 1.0).abs() < 1e-6 {
+        return logits.to_vec();
+    }
     let mut out = logits.to_vec();
     for &tok in prev_tokens {
         let idx = tok as usize;

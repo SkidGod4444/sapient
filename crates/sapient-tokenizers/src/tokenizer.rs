@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tokenizers::Tokenizer;
 
 // ── TokenizerOptions ──────────────────────────────────────────────────────────
@@ -19,7 +19,11 @@ pub struct TokenizerOptions {
 
 impl Default for TokenizerOptions {
     fn default() -> Self {
-        Self { add_bos: true, add_eos: false, max_length: 0 }
+        Self {
+            add_bos: true,
+            add_eos: false,
+            max_length: 0,
+        }
     }
 }
 
@@ -43,10 +47,19 @@ impl SapientTokenizer {
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {e}"))?;
 
         let bos_id = Self::special_token_id(&inner, &["<s>", "<bos>", "[BOS]"]);
-        let eos_id = Self::special_token_id(&inner, &["</s>", "<eos>", "[EOS]", "<|endoftext|>", "<|im_end|>"]);
+        let eos_id = Self::special_token_id(
+            &inner,
+            &["</s>", "<eos>", "[EOS]", "<|endoftext|>", "<|im_end|>"],
+        );
         let pad_id = Self::special_token_id(&inner, &["<pad>", "[PAD]"]);
 
-        Ok(Self { inner, bos_id, eos_id, pad_id, opts })
+        Ok(Self {
+            inner,
+            bos_id,
+            eos_id,
+            pad_id,
+            opts,
+        })
     }
 
     /// Load from a HuggingFace model ID string (uses the HF Hub cache).
@@ -55,15 +68,24 @@ impl SapientTokenizer {
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer for '{model_id}': {e}"))?;
 
         let bos_id = Self::special_token_id(&inner, &["<s>", "<bos>"]);
-        let eos_id = Self::special_token_id(&inner, &["</s>", "<eos>", "<|endoftext|>", "<|im_end|>"]);
+        let eos_id =
+            Self::special_token_id(&inner, &["</s>", "<eos>", "<|endoftext|>", "<|im_end|>"]);
         let pad_id = Self::special_token_id(&inner, &["<pad>"]);
 
-        Ok(Self { inner, bos_id, eos_id, pad_id, opts: TokenizerOptions::default() })
+        Ok(Self {
+            inner,
+            bos_id,
+            eos_id,
+            pad_id,
+            opts: TokenizerOptions::default(),
+        })
     }
 
     /// Encode a text string to token IDs.
     pub fn encode(&self, text: &str) -> Result<Vec<u32>> {
-        let encoding = self.inner.encode(text, true)
+        let encoding = self
+            .inner
+            .encode(text, true)
             .map_err(|e| anyhow::anyhow!("Tokenizer encode error: {e}"))?;
 
         let mut ids = encoding.get_ids().to_vec();
@@ -94,7 +116,8 @@ impl SapientTokenizer {
 
     /// Decode token IDs back to a string.
     pub fn decode(&self, ids: &[u32], skip_special: bool) -> Result<String> {
-        self.inner.decode(ids, skip_special)
+        self.inner
+            .decode(ids, skip_special)
             .map_err(|e| anyhow::anyhow!("Tokenizer decode error: {e}"))
     }
 

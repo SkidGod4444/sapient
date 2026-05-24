@@ -4,8 +4,8 @@
 //! are generated. At decode step `t`, the cache holds K and V for
 //! positions [0, t-1], so only the new token's QKV needs to be computed.
 
-use std::collections::HashMap;
 use sapient_core::Tensor;
+use std::collections::HashMap;
 
 // ── LayerKVCache ──────────────────────────────────────────────────────────────
 
@@ -13,14 +13,17 @@ use sapient_core::Tensor;
 #[derive(Debug, Clone)]
 pub struct LayerKVCache {
     /// Accumulated keys — shape grows as (batch, n_kv_heads, seq_k, head_dim).
-    pub keys:   Vec<Tensor>,
+    pub keys: Vec<Tensor>,
     /// Accumulated values — same shape.
     pub values: Vec<Tensor>,
 }
 
 impl LayerKVCache {
     pub fn empty() -> Self {
-        Self { keys: Vec::new(), values: Vec::new() }
+        Self {
+            keys: Vec::new(),
+            values: Vec::new(),
+        }
     }
 
     /// Append a new key/value slice and return the current sequence length.
@@ -53,11 +56,17 @@ pub struct KVCache {
 impl KVCache {
     /// Create an empty KV cache for `n_layers` decoder layers.
     pub fn new(n_layers: usize) -> Self {
-        Self { layers: (0..n_layers).map(|_| LayerKVCache::empty()).collect() }
+        Self {
+            layers: (0..n_layers).map(|_| LayerKVCache::empty()).collect(),
+        }
     }
 
-    pub fn layer(&self, idx: usize) -> &LayerKVCache { &self.layers[idx] }
-    pub fn layer_mut(&mut self, idx: usize) -> &mut LayerKVCache { &mut self.layers[idx] }
+    pub fn layer(&self, idx: usize) -> &LayerKVCache {
+        &self.layers[idx]
+    }
+    pub fn layer_mut(&mut self, idx: usize) -> &mut LayerKVCache {
+        &mut self.layers[idx]
+    }
 
     /// Sequence length of the first layer (all layers have the same length).
     pub fn seq_len(&self) -> usize {
@@ -66,11 +75,15 @@ impl KVCache {
 
     /// Clear the entire cache (new conversation / context reset).
     pub fn clear(&mut self) {
-        for l in &mut self.layers { l.clear(); }
+        for l in &mut self.layers {
+            l.clear();
+        }
     }
 
     /// Number of layers in the cache.
-    pub fn n_layers(&self) -> usize { self.layers.len() }
+    pub fn n_layers(&self) -> usize {
+        self.layers.len()
+    }
 }
 
 #[cfg(test)]

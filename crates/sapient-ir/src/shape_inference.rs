@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 
-use sapient_core::{DType, Shape};
 use sapient_core::error::{Result, SapientError};
+use sapient_core::{DType, Shape};
 
 use crate::graph::Graph;
 use crate::node::{Node, NodeId};
@@ -65,7 +65,12 @@ impl<'g> ShapeRegistry<'g> {
                 self.dtypes.insert((id, 0), value.dtype());
             }
 
-            Node::Operator { op, inputs, num_outputs, .. } => {
+            Node::Operator {
+                op,
+                inputs,
+                num_outputs,
+                ..
+            } => {
                 // Collect input shapes/dtypes.
                 let in_shapes: Vec<Option<Shape>> = inputs
                     .iter()
@@ -91,8 +96,11 @@ impl<'g> ShapeRegistry<'g> {
                 }
 
                 // Write back inferred shapes/dtypes into the graph node.
-                if let Some(Node::Operator { output_shapes, output_dtypes, .. }) =
-                    self.graph.get_mut(id)
+                if let Some(Node::Operator {
+                    output_shapes,
+                    output_dtypes,
+                    ..
+                }) = self.graph.get_mut(id)
                 {
                     *output_shapes = out_shapes;
                     *output_dtypes = out_dtypes;
@@ -124,6 +132,7 @@ impl<'g> ShapeRegistry<'g> {
 
     // ── Per-op shape rules ────────────────────────────────────────────────────
 
+    #[allow(clippy::type_complexity)]
     fn infer_op(
         &self,
         op: &OpType,
@@ -131,22 +140,39 @@ impl<'g> ShapeRegistry<'g> {
         in_dtypes: &[Option<DType>],
         num_outputs: usize,
     ) -> Result<(Vec<Option<Shape>>, Vec<Option<DType>>)> {
-        let dtype = in_dtypes.first().copied().flatten();
+        let _dtype = in_dtypes.first().copied().flatten();
 
         let shapes = match op {
-            OpType::Identity | OpType::Relu | OpType::Sigmoid | OpType::Tanh
-            | OpType::Gelu | OpType::Silu | OpType::HardSwish | OpType::Neg
-            | OpType::Abs | OpType::Sqrt | OpType::Exp | OpType::Log
-            | OpType::Floor | OpType::Ceil | OpType::Round | OpType::Sign
+            OpType::Identity
+            | OpType::Relu
+            | OpType::Sigmoid
+            | OpType::Tanh
+            | OpType::Gelu
+            | OpType::Silu
+            | OpType::HardSwish
+            | OpType::Neg
+            | OpType::Abs
+            | OpType::Sqrt
+            | OpType::Exp
+            | OpType::Log
+            | OpType::Floor
+            | OpType::Ceil
+            | OpType::Round
+            | OpType::Sign
             | OpType::Erf => {
                 // Unary — same shape as input.
                 vec![in_shapes.first().cloned().flatten()]
             }
 
-            OpType::Add | OpType::Sub | OpType::Mul | OpType::Div
-            | OpType::Pow | OpType::And | OpType::Or => {
+            OpType::Add
+            | OpType::Sub
+            | OpType::Mul
+            | OpType::Div
+            | OpType::Pow
+            | OpType::And
+            | OpType::Or => {
                 // Binary — broadcast.
-                let s0 = in_shapes.get(0).cloned().flatten();
+                let s0 = in_shapes.first().cloned().flatten();
                 let s1 = in_shapes.get(1).cloned().flatten();
                 match (s0, s1) {
                     (Some(a), Some(b)) => vec![Some(a.broadcast_with(&b)?)],
@@ -156,7 +182,7 @@ impl<'g> ShapeRegistry<'g> {
             }
 
             OpType::MatMul => {
-                let s0 = in_shapes.get(0).cloned().flatten();
+                let s0 = in_shapes.first().cloned().flatten();
                 let s1 = in_shapes.get(1).cloned().flatten();
                 match (s0, s1) {
                     (Some(a), Some(b)) => {
@@ -167,11 +193,13 @@ impl<'g> ShapeRegistry<'g> {
                 }
             }
 
-            OpType::Gemm { trans_a, trans_b, .. } => {
-                let s0 = in_shapes.get(0).cloned().flatten();
+            OpType::Gemm {
+                trans_a, trans_b, ..
+            } => {
+                let s0 = in_shapes.first().cloned().flatten();
                 let s1 = in_shapes.get(1).cloned().flatten();
                 match (s0, s1) {
-                    (Some(mut a), Some(mut b)) => {
+                    (Some(a), Some(b)) => {
                         let a_dims = a.dims().to_vec();
                         let b_dims = b.dims().to_vec();
                         if a_dims.len() == 2 && b_dims.len() == 2 {
@@ -186,10 +214,14 @@ impl<'g> ShapeRegistry<'g> {
                 }
             }
 
-            OpType::Softmax { .. } | OpType::LogSoftmax { .. }
-            | OpType::LayerNorm { .. } | OpType::BatchNorm { .. }
-            | OpType::RmsNorm { .. } | OpType::Dropout { .. }
-            | OpType::LeakyRelu { .. } | OpType::Clip { .. } => {
+            OpType::Softmax { .. }
+            | OpType::LogSoftmax { .. }
+            | OpType::LayerNorm { .. }
+            | OpType::BatchNorm { .. }
+            | OpType::RmsNorm { .. }
+            | OpType::Dropout { .. }
+            | OpType::LeakyRelu { .. }
+            | OpType::Clip { .. } => {
                 // Same shape as first input.
                 vec![in_shapes.first().cloned().flatten()]
             }
@@ -203,8 +235,7 @@ impl<'g> ShapeRegistry<'g> {
                 let s = in_shapes.first().cloned().flatten();
                 match s {
                     Some(s) if s.ndim() == perm.len() => {
-                        let new_dims: Vec<usize> =
-                            perm.iter().map(|&p| s.dims()[p]).collect();
+                        let new_dims: Vec<usize> = perm.iter().map(|&p| s.dims()[p]).collect();
                         vec![Some(Shape::new(new_dims))]
                     }
                     other => vec![other],
@@ -227,8 +258,7 @@ impl<'g> ShapeRegistry<'g> {
 
             OpType::Concat { axis } => {
                 let ax = *axis;
-                let valid: Vec<Shape> =
-                    in_shapes.iter().filter_map(|s| s.clone()).collect();
+                let valid: Vec<Shape> = in_shapes.iter().filter_map(|s| s.clone()).collect();
                 if valid.is_empty() {
                     vec![None]
                 } else {
@@ -259,7 +289,11 @@ impl<'g> ShapeRegistry<'g> {
                     Some(s) => {
                         let mut dims = s.dims().to_vec();
                         let ax = normalise_axis(*axis, s.ndim() as i64) as usize;
-                        if *keep_dims { dims[ax] = 1; } else { dims.remove(ax); }
+                        if *keep_dims {
+                            dims[ax] = 1;
+                        } else {
+                            dims.remove(ax);
+                        }
                         vec![Some(Shape(dims))]
                     }
                     None => vec![None],
@@ -271,15 +305,22 @@ impl<'g> ShapeRegistry<'g> {
                 return Ok((vec![shape], vec![Some(*to)]));
             }
 
-            OpType::Conv2d { kernel_shape, pads, strides, .. } => {
+            OpType::Conv2d {
+                kernel_shape,
+                pads,
+                strides,
+                ..
+            } => {
                 let s = in_shapes.first().cloned().flatten();
                 let w = in_shapes.get(1).cloned().flatten();
                 match (s, w) {
                     (Some(s), Some(w)) if s.ndim() == 4 && w.ndim() == 4 => {
                         let (n, _, h, ww) = (s.dims()[0], s.dims()[1], s.dims()[2], s.dims()[3]);
                         let c_out = w.dims()[0];
-                        let kh = kernel_shape[0]; let kw = kernel_shape[1];
-                        let ph = pads[0] + pads[2]; let pw = pads[1] + pads[3];
+                        let kh = kernel_shape[0];
+                        let kw = kernel_shape[1];
+                        let ph = pads[0] + pads[2];
+                        let pw = pads[1] + pads[3];
                         let out_h = (h + ph - kh) / strides[0] + 1;
                         let out_w = (ww + pw - kw) / strides[1] + 1;
                         vec![Some(Shape::new([n, c_out, out_h, out_w]))]
@@ -310,7 +351,10 @@ fn infer_matmul_shape(a: &Shape, b: &Shape) -> Result<Shape> {
             let (m, k1) = (a.dims()[0], a.dims()[1]);
             let (k2, n) = (b.dims()[0], b.dims()[1]);
             if k1 != k2 {
-                return Err(SapientError::ShapeMismatch { expected: vec![m, k1], got: vec![k2, n] });
+                return Err(SapientError::ShapeMismatch {
+                    expected: vec![m, k1],
+                    got: vec![k2, n],
+                });
             }
             Ok(Shape::new([m, n]))
         }
@@ -328,7 +372,10 @@ fn infer_matmul_shape(a: &Shape, b: &Shape) -> Result<Shape> {
             dims.push(n);
             Ok(Shape(dims))
         }
-        _ => Err(SapientError::RankMismatch { expected: 2, got: a.ndim() }),
+        _ => Err(SapientError::RankMismatch {
+            expected: 2,
+            got: a.ndim(),
+        }),
     }
 }
 
@@ -347,7 +394,11 @@ fn reduce_shape(s: &Shape, axes: &[i64], keep_dims: bool) -> Shape {
         .enumerate()
         .filter_map(|(i, &d)| {
             if reduced.contains(&i) {
-                if keep_dims { Some(1) } else { None }
+                if keep_dims {
+                    Some(1)
+                } else {
+                    None
+                }
             } else {
                 Some(d)
             }
@@ -357,7 +408,11 @@ fn reduce_shape(s: &Shape, axes: &[i64], keep_dims: bool) -> Shape {
 }
 
 fn normalise_axis(axis: i64, rank: i64) -> i64 {
-    if axis < 0 { rank + axis } else { axis }
+    if axis < 0 {
+        rank + axis
+    } else {
+        axis
+    }
 }
 
 #[cfg(test)]
@@ -374,7 +429,7 @@ mod tests {
             Some("W".into()),
         );
         let mm = g.add_op(OpType::MatMul, vec![x, w], 1, None);
-        let r  = g.add_op(OpType::Relu, vec![mm], 1, None);
+        let r = g.add_op(OpType::Relu, vec![mm], 1, None);
         g.mark_output(r, "out");
         g
     }

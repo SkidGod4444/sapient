@@ -41,17 +41,19 @@ impl ArchType {
     /// Detect arch from the `architectures` field in `config.json`.
     pub fn from_hf_arch_name(name: &str) -> Self {
         match name {
-            n if n.contains("Llama") || n.contains("Mistral") || n.contains("CodeLlama") => Self::Llama,
-            n if n.contains("Phi")    => Self::Phi,
-            n if n.contains("Gemma")  => Self::Gemma,
+            n if n.contains("Llama") || n.contains("Mistral") || n.contains("CodeLlama") => {
+                Self::Llama
+            }
+            n if n.contains("Phi") => Self::Phi,
+            n if n.contains("Gemma") => Self::Gemma,
             n if n.contains("GPT2") || n.contains("Gpt2") => Self::Gpt2,
             n if n.contains("Bert") || n.contains("Roberta") => Self::Bert,
-            n if n.contains("Qwen")   => Self::Qwen,
+            n if n.contains("Qwen") => Self::Qwen,
             n if n.contains("Mixtral") => Self::Mixtral,
             n if n.contains("Falcon") => Self::Falcon,
-            n if n.contains("MPT")    => Self::Mpt,
-            n if n.contains("Bloom")  => Self::Bloom,
-            n if n.contains("T5")     => Self::T5,
+            n if n.contains("MPT") => Self::Mpt,
+            n if n.contains("Bloom") => Self::Bloom,
+            n if n.contains("T5") => Self::T5,
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -97,22 +99,25 @@ pub struct ModelInfo {
 impl ModelInfo {
     /// Parse from a `config.json` file on disk.
     pub fn from_config_file(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .context("Failed to read config.json")?;
+        let text = std::fs::read_to_string(path).context("Failed to read config.json")?;
         Self::from_json_str(&text)
     }
 
     /// Parse from a JSON string.
     pub fn from_json_str(json: &str) -> Result<Self> {
-        let raw: serde_json::Value = serde_json::from_str(json)
-            .context("Invalid config.json")?;
+        let raw: serde_json::Value = serde_json::from_str(json).context("Invalid config.json")?;
 
         let arch_names: Vec<String> = raw["architectures"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
 
-        let arch = arch_names.first()
+        let arch = arch_names
+            .first()
             .map(|n| ArchType::from_hf_arch_name(n))
             .unwrap_or(ArchType::Unknown("unknown".into()));
 
@@ -122,11 +127,12 @@ impl ModelInfo {
         let num_hidden_layers = raw["num_hidden_layers"].as_u64().unwrap_or(32) as usize;
         let num_attention_heads = raw["num_attention_heads"].as_u64().unwrap_or(32) as usize;
         // GQA: fall back to num_attention_heads if not specified.
-        let num_key_value_heads = raw["num_key_value_heads"].as_u64()
+        let num_key_value_heads = raw["num_key_value_heads"]
+            .as_u64()
             .unwrap_or(num_attention_heads as u64) as usize;
         let intermediate_size = raw["intermediate_size"].as_u64().unwrap_or(11008) as usize;
-        let max_position_embeddings = raw["max_position_embeddings"].as_u64()
-            .unwrap_or(4096) as usize;
+        let max_position_embeddings =
+            raw["max_position_embeddings"].as_u64().unwrap_or(4096) as usize;
         let rms_norm_eps = raw["rms_norm_eps"].as_f64().unwrap_or(1e-5);
         let hidden_act = raw["hidden_act"].as_str().unwrap_or("silu").to_owned();
         let rope_theta = raw["rope_theta"].as_f64().unwrap_or(10000.0);
@@ -186,8 +192,8 @@ mod tests {
     fn parse_llama_config() {
         let info = ModelInfo::from_json_str(LLAMA_CONFIG).unwrap();
         assert_eq!(info.arch, ArchType::Llama);
-        assert_eq!(info.num_key_value_heads, 8);  // GQA
-        assert_eq!(info.head_dim, 128);            // 4096 / 32
+        assert_eq!(info.num_key_value_heads, 8); // GQA
+        assert_eq!(info.head_dim, 128); // 4096 / 32
     }
 
     #[test]

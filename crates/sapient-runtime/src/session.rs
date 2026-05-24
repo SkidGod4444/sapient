@@ -10,12 +10,10 @@ use std::time::Instant;
 
 use tracing::{debug, info, instrument};
 
-use sapient_core::{Tensor};
-use sapient_core::error::{Result, SapientError};
 use sapient_backends_cpu::backend::{CpuBackend, ExecutionBackend};
-use sapient_scheduler::{
-    Batcher, DynamicBatchScheduler, Executor, Request, Response,
-};
+use sapient_core::error::{Result, SapientError};
+use sapient_core::Tensor;
+use sapient_scheduler::{Batcher, DynamicBatchScheduler, Executor, Request, Response};
 use sapient_telemetry::{ConsoleTelemetry, NoOpTelemetry, Telemetry};
 
 use crate::model::{Model, ModelConfig};
@@ -46,17 +44,16 @@ impl Default for SessionOptions {
 
 /// Thread-safe inference session.
 pub struct InferenceSession {
-    model:    Arc<Model>,
-    backend:  Arc<dyn ExecutionBackend>,
+    model: Arc<Model>,
+    backend: Arc<dyn ExecutionBackend>,
     telemetry: Arc<dyn Telemetry>,
-    opts:     SessionOptions,
+    opts: SessionOptions,
 }
 
 impl InferenceSession {
     /// Create a new session from a loaded model.
     pub fn new(model: Model, opts: SessionOptions) -> Result<Self> {
-        let backend: Arc<dyn ExecutionBackend> =
-            Arc::new(CpuBackend::new(opts.cpu_pool_bytes));
+        let backend: Arc<dyn ExecutionBackend> = Arc::new(CpuBackend::new(opts.cpu_pool_bytes));
 
         let telemetry: Arc<dyn Telemetry> = if opts.telemetry {
             Arc::new(ConsoleTelemetry)
@@ -93,10 +90,7 @@ impl InferenceSession {
     /// Run a batch of input maps, merging and splitting automatically.
     ///
     /// Returns one `Vec<Tensor>` per request.
-    pub fn run_batch(
-        &self,
-        batch: Vec<HashMap<String, Tensor>>,
-    ) -> Result<Vec<Vec<Tensor>>> {
+    pub fn run_batch(&self, batch: Vec<HashMap<String, Tensor>>) -> Result<Vec<Vec<Tensor>>> {
         let batch_size = batch.len();
         let start = Instant::now();
         self.telemetry.on_batch_formed(batch_size, 0);
@@ -118,10 +112,14 @@ impl InferenceSession {
     }
 
     /// Reference to the underlying model.
-    pub fn model(&self) -> &Model { &self.model }
+    pub fn model(&self) -> &Model {
+        &self.model
+    }
 
     /// Backend name.
-    pub fn backend_name(&self) -> &str { self.backend.name() }
+    pub fn backend_name(&self) -> &str {
+        self.backend.name()
+    }
 }
 
 impl std::fmt::Debug for InferenceSession {

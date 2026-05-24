@@ -67,8 +67,8 @@ impl BufferHandle {
 /// Uses Rust's global allocator directly to guarantee alignment, which
 /// `Vec<u8>` cannot guarantee beyond its element alignment (1 byte).
 pub struct CpuBuffer {
-    ptr:   NonNull<u8>,
-    len:   usize,
+    ptr: NonNull<u8>,
+    len: usize,
     align: usize,
     layout: Layout,
 }
@@ -103,7 +103,12 @@ impl CpuBuffer {
                 .map_err(|_| SapientError::AllocationFailed { bytes, align })?;
             let ptr = unsafe { alloc::alloc_zeroed(layout) };
             let ptr = NonNull::new(ptr).ok_or(SapientError::AllocationFailed { bytes, align })?;
-            return Ok(Self { ptr, len: 0, align, layout });
+            return Ok(Self {
+                ptr,
+                len: 0,
+                align,
+                layout,
+            });
         }
 
         let layout = Layout::from_size_align(bytes, align)
@@ -113,20 +118,21 @@ impl CpuBuffer {
         let raw = unsafe { alloc::alloc_zeroed(layout) };
         let ptr = NonNull::new(raw).ok_or(SapientError::AllocationFailed { bytes, align })?;
 
-        Ok(Self { ptr, len: bytes, align, layout })
+        Ok(Self {
+            ptr,
+            len: bytes,
+            align,
+            layout,
+        })
     }
 
     /// Wrap existing `f32` data.
     pub fn from_f32_slice(data: &[f32]) -> Result<Self> {
         let bytes = data.len() * 4;
-        let mut buf = Self::with_capacity(bytes, 64)?;
+        let buf = Self::with_capacity(bytes, 64)?;
         // SAFETY: sizes are consistent and both regions are valid.
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                data.as_ptr() as *const u8,
-                buf.ptr.as_ptr(),
-                bytes,
-            );
+            std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, buf.ptr.as_ptr(), bytes);
         }
         Ok(buf)
     }

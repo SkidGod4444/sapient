@@ -87,18 +87,19 @@ impl Graph {
         dtype: Option<sapient_core::DType>,
     ) -> NodeId {
         let id = self.next_id();
-        let node = Node::Input { id, name: name.into(), shape, dtype };
+        let node = Node::Input {
+            id,
+            name: name.into(),
+            shape,
+            dtype,
+        };
         self.add_node(node);
         self.inputs.push(id);
         id
     }
 
     /// Convenience: add a Constant node.
-    pub fn add_constant(
-        &mut self,
-        value: sapient_core::Tensor,
-        name: Option<String>,
-    ) -> NodeId {
+    pub fn add_constant(&mut self, value: sapient_core::Tensor, name: Option<String>) -> NodeId {
         let id = self.next_id();
         let node = Node::Constant { id, value, name };
         self.add_node(node)
@@ -138,7 +139,11 @@ impl Graph {
     /// Mark a node as a graph output.
     pub fn mark_output(&mut self, source: NodeId, name: impl Into<String>) -> NodeId {
         let id = self.next_id();
-        let node = Node::Output { id, name: name.into(), source };
+        let node = Node::Output {
+            id,
+            name: name.into(),
+            source,
+        };
         self.add_node(node);
         self.outputs.push(id);
         id
@@ -161,7 +166,9 @@ impl Graph {
         &self.nodes
     }
 
-    pub fn node_count(&self) -> usize { self.nodes.len() }
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
 
     // ── Traversal ────────────────────────────────────────────────────────────
 
@@ -222,7 +229,7 @@ impl Graph {
         // All referenced input IDs must exist.
         for node in &self.nodes {
             for &dep in node.input_ids() {
-                if self.id_to_idx.get(&dep).is_none() {
+                if !self.id_to_idx.contains_key(&dep) {
                     return Err(SapientError::NodeNotFound(format!("{dep}")));
                 }
             }
@@ -242,25 +249,29 @@ impl Graph {
     // ── Serialisation ────────────────────────────────────────────────────────
 
     pub fn to_json(&self) -> Result<String> {
-        serde_json::to_string_pretty(self)
-            .map_err(|e| SapientError::internal(e.to_string()))
+        serde_json::to_string_pretty(self).map_err(|e| SapientError::internal(e.to_string()))
     }
 
     pub fn from_json(s: &str) -> Result<Self> {
-        serde_json::from_str(s)
-            .map_err(|e| SapientError::internal(e.to_string()))
+        serde_json::from_str(s).map_err(|e| SapientError::internal(e.to_string()))
     }
 
     /// DOT (Graphviz) format for visualisation.
     pub fn to_dot(&self) -> String {
-        let mut s = format!("digraph {} {{\n  rankdir=TB;\n", self.name.replace(' ', "_"));
+        let mut s = format!(
+            "digraph {} {{\n  rankdir=TB;\n",
+            self.name.replace(' ', "_")
+        );
         for node in &self.nodes {
             let label = match node {
                 Node::Operator { op, name, .. } => {
                     format!("{} [{}]", op, name.as_deref().unwrap_or(""))
                 }
                 Node::Constant { name, value, .. } => {
-                    format!("Const:{}", name.as_deref().unwrap_or(&value.shape().to_string()))
+                    format!(
+                        "Const:{}",
+                        name.as_deref().unwrap_or(&value.shape().to_string())
+                    )
                 }
                 Node::Input { name, .. } => format!("Input:{name}"),
                 Node::Output { name, .. } => format!("Output:{name}"),
@@ -275,7 +286,6 @@ impl Graph {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,13 +294,13 @@ mod tests {
 
     fn simple_mlp() -> Graph {
         let mut g = Graph::new("mlp");
-        let x  = g.add_input("x", None, Some(DType::F32));
-        let w  = g.add_constant(
+        let x = g.add_input("x", None, Some(DType::F32));
+        let w = g.add_constant(
             Tensor::zeros(vec![4, 4], DType::F32).unwrap(),
             Some("W".into()),
         );
         let mm = g.add_op(OpType::MatMul, vec![x, w], 1, Some("mm".into()));
-        let r  = g.add_op(OpType::Relu, vec![mm], 1, Some("relu".into()));
+        let r = g.add_op(OpType::Relu, vec![mm], 1, Some("relu".into()));
         g.mark_output(r, "output");
         g
     }
@@ -314,20 +324,43 @@ mod tests {
         let a = g.next_id();
         let b = g.next_id();
         g.nodes.push(Node::Operator {
-            id: a, op: OpType::Identity, inputs: vec![b],
-            num_outputs: 1, attrs: Default::default(),
-            name: None, output_shapes: vec![None], output_dtypes: vec![None],
+            id: a,
+            op: OpType::Identity,
+            inputs: vec![b],
+            num_outputs: 1,
+            attrs: Default::default(),
+            name: None,
+            output_shapes: vec![None],
+            output_dtypes: vec![None],
         });
         g.nodes.push(Node::Operator {
-            id: b, op: OpType::Identity, inputs: vec![a],
-            num_outputs: 1, attrs: Default::default(),
-            name: None, output_shapes: vec![None], output_dtypes: vec![None],
+            id: b,
+            op: OpType::Identity,
+            inputs: vec![a],
+            num_outputs: 1,
+            attrs: Default::default(),
+            name: None,
+            output_shapes: vec![None],
+            output_dtypes: vec![None],
         });
         g.id_to_idx.insert(a, 0);
         g.id_to_idx.insert(b, 1);
-        g.edges.push(Edge { src: a, src_output: 0, dst: b, dst_input: 0 });
-        g.edges.push(Edge { src: b, src_output: 0, dst: a, dst_input: 0 });
-        assert!(matches!(g.topological_order(), Err(SapientError::CyclicGraph)));
+        g.edges.push(Edge {
+            src: a,
+            src_output: 0,
+            dst: b,
+            dst_input: 0,
+        });
+        g.edges.push(Edge {
+            src: b,
+            src_output: 0,
+            dst: a,
+            dst_input: 0,
+        });
+        assert!(matches!(
+            g.topological_order(),
+            Err(SapientError::CyclicGraph)
+        ));
     }
 
     #[test]

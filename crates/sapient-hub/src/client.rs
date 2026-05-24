@@ -36,11 +36,7 @@ impl Default for LoadOptions {
     fn default() -> Self {
         Self {
             token: None,
-            formats: vec![
-                "gguf".into(),
-                "safetensors".into(),
-                "bin".into(),
-            ],
+            formats: vec!["gguf".into(), "safetensors".into(), "bin".into()],
             force_download: false,
             max_size_bytes: 0,
             revision: "main".into(),
@@ -64,7 +60,9 @@ impl HubClient {
 
     /// Create a new client with custom options.
     pub fn with_options(opts: LoadOptions) -> Result<Self> {
-        let token = opts.token.clone()
+        let token = opts
+            .token
+            .clone()
             .or_else(|| std::env::var("HF_TOKEN").ok())
             .or_else(Self::read_cached_token);
 
@@ -72,7 +70,9 @@ impl HubClient {
         if let Some(t) = token {
             builder = builder.with_token(Some(t));
         }
-        let api = builder.build().context("Failed to build HF Hub API client")?;
+        let api = builder
+            .build()
+            .context("Failed to build HF Hub API client")?;
         Ok(Self { api, opts })
     }
 
@@ -89,7 +89,9 @@ impl HubClient {
     /// Fetch model info / architecture type from the Hub (reads `config.json`).
     pub async fn model_info(&self, model_id: &str) -> Result<ModelInfo> {
         let repo = self.api.model(model_id.to_owned());
-        let config_path = repo.get("config.json").await
+        let config_path = repo
+            .get("config.json")
+            .await
             .context("Failed to fetch config.json")?;
         ModelInfo::from_config_file(&config_path)
     }
@@ -98,7 +100,9 @@ impl HubClient {
 
     async fn resolve_files(&self, repo: &ApiRepo, model_id: &str) -> Result<ModelFiles> {
         // Always fetch config.json and tokenizer.json.
-        let config_path = repo.get("config.json").await
+        let config_path = repo
+            .get("config.json")
+            .await
             .context("config.json not found — is this a valid model repo?")?;
         debug!("config.json cached at: {}", config_path.display());
 
@@ -146,15 +150,17 @@ impl HubClient {
                     // Multi-shard: model-00001-of-NNNNN.safetensors
                     let mut shards = Vec::new();
                     for i in 1..=100usize {
-                        let name = format!("model-{i:05}-of-{i:05}.safetensors");
+                        let _name = format!("model-{i:05}-of-{i:05}.safetensors");
                         // Try first shard to detect pattern.
                         if i == 1 {
-                            match repo.get("model-00001-of-00001.safetensors").await {
-                                Ok(p) => { return Ok(vec![p]); }
-                                Err(_) => {}
+                            if let Ok(p) = repo.get("model-00001-of-00001.safetensors").await {
+                                return Ok(vec![p]);
                             }
                         }
-                        match repo.get(&format!("model-{i:05}-of-{:05}.safetensors", 100)).await {
+                        match repo
+                            .get(&format!("model-{i:05}-of-{:05}.safetensors", 100))
+                            .await
+                        {
                             Ok(p) => shards.push(p),
                             Err(_) => break,
                         }
@@ -180,6 +186,8 @@ impl HubClient {
 
     fn read_cached_token() -> Option<String> {
         let path = dirs::home_dir()?.join(".cache/huggingface/token");
-        std::fs::read_to_string(path).ok().map(|s| s.trim().to_owned())
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|s| s.trim().to_owned())
     }
 }

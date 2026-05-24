@@ -13,17 +13,19 @@ use std::collections::HashMap;
 
 use tracing::debug;
 
-use sapient_core::error::Result;
 use crate::graph::Graph;
 use crate::node::{Node, NodeId};
 use crate::op::OpType;
 use crate::passes::Pass;
+use sapient_core::error::Result;
 
 #[derive(Debug)]
 pub struct OperatorFusionPass;
 
 impl Pass for OperatorFusionPass {
-    fn name(&self) -> &str { "operator-fusion" }
+    fn name(&self) -> &str {
+        "operator-fusion"
+    }
 
     fn run(&self, graph: &mut Graph) -> Result<()> {
         let order = graph.topological_order()?;
@@ -37,7 +39,12 @@ impl Pass for OperatorFusionPass {
 
         for &id in &order {
             // Pattern: MatMul → Add  (with the Add having only one other input, the bias)
-            if let Some(Node::Operator { op: OpType::Add, inputs, .. }) = graph.get(id) {
+            if let Some(Node::Operator {
+                op: OpType::Add,
+                inputs,
+                ..
+            }) = graph.get(id)
+            {
                 let inp0 = inputs.first().copied();
                 let inp1 = inputs.get(1).copied();
 
@@ -47,8 +54,7 @@ impl Pass for OperatorFusionPass {
                         && successors.get(&a).map_or(0, |v| v.len()) == 1
                     {
                         (a, b)
-                    } else if is_matmul(graph, b)
-                        && successors.get(&b).map_or(0, |v| v.len()) == 1
+                    } else if is_matmul(graph, b) && successors.get(&b).map_or(0, |v| v.len()) == 1
                     {
                         (b, a)
                     } else {
@@ -63,10 +69,17 @@ impl Pass for OperatorFusionPass {
                     let mut new_inputs = mm_inputs;
                     new_inputs.push(bias_id);
 
-                    if let Some(Node::Operator { op, inputs, attrs, name, .. }) = graph.get_mut(id) {
+                    if let Some(Node::Operator {
+                        op,
+                        inputs,
+                        attrs,
+                        name,
+                        ..
+                    }) = graph.get_mut(id)
+                    {
                         *op = OpType::Gemm {
                             alpha: ordered_float::OrderedFloat(1.0),
-                            beta:  ordered_float::OrderedFloat(1.0),
+                            beta: ordered_float::OrderedFloat(1.0),
                             trans_a: false,
                             trans_b: false,
                         };
@@ -92,5 +105,11 @@ impl Pass for OperatorFusionPass {
 }
 
 fn is_matmul(graph: &Graph, id: NodeId) -> bool {
-    matches!(graph.get(id), Some(Node::Operator { op: OpType::MatMul, .. }))
+    matches!(
+        graph.get(id),
+        Some(Node::Operator {
+            op: OpType::MatMul,
+            ..
+        })
+    )
 }

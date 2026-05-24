@@ -7,15 +7,15 @@ use std::collections::HashMap;
 
 use parking_lot::Mutex;
 
+use sapient_core::buffer::BufferHandle;
 use sapient_core::DType;
-use sapient_core::buffer::{BufferHandle, CpuBuffer};
 
 // ── Entry ────────────────────────────────────────────────────────────────────
 
 struct PoolEntry {
-    handle:    BufferHandle,
+    handle: BufferHandle,
     last_used: std::time::Instant,
-    capacity:  usize,
+    capacity: usize,
 }
 
 // ── PoolAllocator ─────────────────────────────────────────────────────────────

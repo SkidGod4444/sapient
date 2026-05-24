@@ -10,7 +10,7 @@ use crate::architectures::{bert, gemma, gpt2, llama, mixtral, phi, qwen};
 /// A fully-built model graph ready for execution.
 pub struct ModelGraph {
     pub graph: Graph,
-    pub info:  ModelInfo,
+    pub info: ModelInfo,
 }
 
 /// Build a SAPIENT `Graph` from a parsed `ModelInfo`.
@@ -24,14 +24,14 @@ pub struct ModelGraph {
 /// - `"logits"` — (batch, seq_len, vocab_size) f32
 pub fn build_graph(info: &ModelInfo) -> Result<ModelGraph> {
     let graph = match &info.arch {
-        ArchType::Llama   => llama::build(info)?,
-        ArchType::Phi     => phi::build(info)?,
-        ArchType::Gemma   => gemma::build(info)?,
-        ArchType::Gpt2    => gpt2::build(info)?,
-        ArchType::Bert    => bert::build(info)?,
-        ArchType::Qwen    => qwen::build(info)?,
+        ArchType::Llama => llama::build(info)?,
+        ArchType::Phi => phi::build(info)?,
+        ArchType::Gemma => gemma::build(info)?,
+        ArchType::Gpt2 => gpt2::build(info)?,
+        ArchType::Bert => bert::build(info)?,
+        ArchType::Qwen => qwen::build(info)?,
         ArchType::Mixtral => mixtral::build(info)?,
-        ArchType::Falcon  => {
+        ArchType::Falcon => {
             // Falcon uses a Llama-like architecture with ALiBi — use Llama builder.
             llama::build(info)?
         }
@@ -42,5 +42,8 @@ pub fn build_graph(info: &ModelInfo) -> Result<ModelGraph> {
         _ => bail!("Architecture {:?} not yet implemented", info.arch),
     };
 
-    Ok(ModelGraph { graph, info: info.clone() })
+    Ok(ModelGraph {
+        graph,
+        info: info.clone(),
+    })
 }

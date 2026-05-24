@@ -1,6 +1,6 @@
 //! `Telemetry` trait and implementations.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::{debug, info};
 
 // ── TelemetryConfig ───────────────────────────────────────────────────────────
@@ -22,7 +22,10 @@ pub enum TelemetryMode {
 
 impl Default for TelemetryConfig {
     fn default() -> Self {
-        Self { mode: TelemetryMode::None, otlp_endpoint: None }
+        Self {
+            mode: TelemetryMode::None,
+            otlp_endpoint: None,
+        }
     }
 }
 

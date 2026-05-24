@@ -4,15 +4,15 @@ pub mod gguf;
 pub mod onnx;
 pub mod safetensors;
 
-pub use onnx::OnnxLoader;
 pub use gguf::GgufLoader;
+pub use onnx::OnnxLoader;
 pub use safetensors::SafetensorsLoader;
 
+use sapient_core::error::{Result, SapientError};
+use sapient_core::Tensor;
+use sapient_ir::graph::Graph;
 use std::collections::HashMap;
 use std::path::Path;
-use sapient_core::Tensor;
-use sapient_core::error::{Result, SapientError};
-use sapient_ir::graph::Graph;
 
 /// Auto-detect format by file extension and load the graph IR.
 pub fn load_graph(path: &Path) -> Result<Graph> {

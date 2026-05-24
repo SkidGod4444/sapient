@@ -9,16 +9,16 @@ use std::path::Path;
 use memmap2::Mmap;
 use serde::Deserialize;
 
-use sapient_core::{DType, Shape, Tensor};
 use sapient_core::error::{Result, SapientError};
+use sapient_core::{DType, Shape, Tensor};
 use sapient_ir::graph::Graph;
 
 // ── Safetensors header structs ────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct StMeta {
-    dtype:        String,
-    shape:        Vec<usize>,
+    dtype: String,
+    shape: Vec<usize>,
     data_offsets: [usize; 2],
 }
 
@@ -34,8 +34,7 @@ impl SafetensorsLoader {
             .map_err(|e| SapientError::ModelNotFound(format!("{}: {e}", path.display())))?;
         // SAFETY: we don't mutate the mmap and hold it for the duration.
         let mmap = unsafe {
-            Mmap::map(&file)
-                .map_err(|e| SapientError::SafetensorsParseError(e.to_string()))?
+            Mmap::map(&file).map_err(|e| SapientError::SafetensorsParseError(e.to_string()))?
         };
         Self::from_bytes(&mmap)
     }
@@ -50,7 +49,9 @@ impl SafetensorsLoader {
         let header_end = 8 + header_len;
 
         if header_end > bytes.len() {
-            return Err(SapientError::SafetensorsParseError("header overflows file".into()));
+            return Err(SapientError::SafetensorsParseError(
+                "header overflows file".into(),
+            ));
         }
 
         let header_json = std::str::from_utf8(&bytes[8..header_end])
@@ -63,26 +64,30 @@ impl SafetensorsLoader {
         let mut tensors = HashMap::new();
 
         for (name, meta) in &header {
-            if name == "__metadata__" { continue; }
+            if name == "__metadata__" {
+                continue;
+            }
 
             let dtype = match meta.dtype.as_str() {
-                "F32"  => DType::F32,
-                "F16"  => DType::F16,
+                "F32" => DType::F32,
+                "F16" => DType::F16,
                 "BF16" => DType::BF16,
-                "I32"  => DType::I32,
-                "I64"  => DType::I64,
-                "U8"   => DType::U8,
+                "I32" => DType::I32,
+                "I64" => DType::I64,
+                "U8" => DType::U8,
                 "BOOL" => DType::Bool,
-                other  => return Err(SapientError::SafetensorsParseError(
-                    format!("unknown dtype '{other}'")
-                )),
+                other => {
+                    return Err(SapientError::SafetensorsParseError(format!(
+                        "unknown dtype '{other}'"
+                    )))
+                }
             };
 
             let [start, end] = meta.data_offsets;
             if end > data_section.len() {
-                return Err(SapientError::SafetensorsParseError(
-                    format!("tensor '{name}' data out of bounds")
-                ));
+                return Err(SapientError::SafetensorsParseError(format!(
+                    "tensor '{name}' data out of bounds"
+                )));
             }
 
             let raw = &data_section[start..end];

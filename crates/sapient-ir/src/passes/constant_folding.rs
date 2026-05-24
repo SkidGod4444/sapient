@@ -5,17 +5,19 @@ use std::collections::HashSet;
 
 use tracing::debug;
 
-use sapient_core::error::Result;
 use crate::graph::Graph;
 use crate::node::{Node, NodeId};
 use crate::op::OpType;
 use crate::passes::Pass;
+use sapient_core::error::Result;
 
 #[derive(Debug)]
 pub struct ConstantFoldingPass;
 
 impl Pass for ConstantFoldingPass {
-    fn name(&self) -> &str { "constant-folding" }
+    fn name(&self) -> &str {
+        "constant-folding"
+    }
 
     fn run(&self, graph: &mut Graph) -> Result<()> {
         let order = graph.topological_order()?;
@@ -23,9 +25,8 @@ impl Pass for ConstantFoldingPass {
 
         // Collect all constant / input nodes first.
         for id in &order {
-            match graph.get(*id) {
-                Some(Node::Constant { .. }) => { const_nodes.insert(*id); }
-                _ => {}
+            if let Some(Node::Constant { .. }) = graph.get(*id) {
+                const_nodes.insert(*id);
             }
         }
 
@@ -41,7 +42,11 @@ impl Pass for ConstantFoldingPass {
                         let name = Some(format!("folded_{}", id.0));
                         let id_copy = *id;
                         if let Some(node) = graph.get_mut(id_copy) {
-                            *node = Node::Constant { id: id_copy, value: result, name };
+                            *node = Node::Constant {
+                                id: id_copy,
+                                value: result,
+                                name,
+                            };
                             const_nodes.insert(id_copy);
                             folded += 1;
                         }
@@ -58,11 +63,7 @@ impl Pass for ConstantFoldingPass {
 }
 
 /// Attempt to fold a simple op given all-constant inputs.
-fn try_fold(
-    op: &OpType,
-    inputs: &[NodeId],
-    graph: &Graph,
-) -> Option<sapient_core::Tensor> {
+fn try_fold(op: &OpType, inputs: &[NodeId], graph: &Graph) -> Option<sapient_core::Tensor> {
     use sapient_core::{DType, Tensor};
 
     let get_f32 = |id: NodeId| -> Option<Vec<f32>> {
@@ -85,7 +86,9 @@ fn try_fold(
         OpType::Add if inputs.len() == 2 => {
             let a = get_f32(inputs[0])?;
             let b = get_f32(inputs[1])?;
-            if a.len() != b.len() { return None; }
+            if a.len() != b.len() {
+                return None;
+            }
             let out: Vec<f32> = a.iter().zip(b.iter()).map(|(x, y)| x + y).collect();
             let shape = get_shape(inputs[0])?;
             Tensor::from_f32(&out, shape).ok()
@@ -93,7 +96,9 @@ fn try_fold(
         OpType::Mul if inputs.len() == 2 => {
             let a = get_f32(inputs[0])?;
             let b = get_f32(inputs[1])?;
-            if a.len() != b.len() { return None; }
+            if a.len() != b.len() {
+                return None;
+            }
             let out: Vec<f32> = a.iter().zip(b.iter()).map(|(x, y)| x * y).collect();
             let shape = get_shape(inputs[0])?;
             Tensor::from_f32(&out, shape).ok()

@@ -14,31 +14,36 @@ use serde::Serialize;
 
 #[derive(Debug, Clone)]
 pub struct Span {
-    pub name:     String,
+    pub name: String,
     pub category: String,
     pub start_us: u64,
-    pub dur_us:   u64,
-    pub pid:      u32,
-    pub tid:      u64,
+    pub dur_us: u64,
+    pub pid: u32,
+    pub tid: u64,
 }
 
 impl Span {
-    pub fn new(name: impl Into<String>, category: impl Into<String>, start: Instant, dur: Duration) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        category: impl Into<String>,
+        start: Instant,
+        dur: Duration,
+    ) -> Self {
         Self {
-            name:     name.into(),
+            name: name.into(),
             category: category.into(),
             start_us: start.elapsed().as_micros() as u64,
-            dur_us:   dur.as_micros() as u64,
-            pid:      std::process::id(),
-            tid:      thread_id(),
+            dur_us: dur.as_micros() as u64,
+            pid: std::process::id(),
+            tid: thread_id(),
         }
     }
 }
 
 fn thread_id() -> u64 {
     // Stable numeric thread ID via hash of OS thread ID string.
-    use std::hash::{Hash, Hasher};
     use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
     format!("{:?}", std::thread::current().id()).hash(&mut h);
     h.finish()
@@ -63,12 +68,12 @@ impl ChromeTracer {
 
     pub fn record_now(&self, name: impl Into<String>, category: impl Into<String>, dur: Duration) {
         self.record(Span {
-            name:     name.into(),
+            name: name.into(),
             category: category.into(),
             start_us: 0, // simplified: real implementation uses a monotonic base
-            dur_us:   dur.as_micros() as u64,
-            pid:      std::process::id(),
-            tid:      thread_id(),
+            dur_us: dur.as_micros() as u64,
+            pid: std::process::id(),
+            tid: thread_id(),
         });
     }
 
@@ -77,12 +82,12 @@ impl ChromeTracer {
         #[derive(Serialize)]
         struct TraceEvent {
             name: String,
-            cat:  String,
-            ph:   char,
-            ts:   u64,
-            dur:  u64,
-            pid:  u32,
-            tid:  u64,
+            cat: String,
+            ph: char,
+            ts: u64,
+            dur: u64,
+            pid: u32,
+            tid: u64,
         }
 
         let spans = self.spans.lock().unwrap();
@@ -90,19 +95,24 @@ impl ChromeTracer {
             .iter()
             .map(|s| TraceEvent {
                 name: s.name.clone(),
-                cat:  s.category.clone(),
-                ph:   'X', // complete events
-                ts:   s.start_us,
-                dur:  s.dur_us,
-                pid:  s.pid,
-                tid:  s.tid,
+                cat: s.category.clone(),
+                ph: 'X', // complete events
+                ts: s.start_us,
+                dur: s.dur_us,
+                pid: s.pid,
+                tid: s.tid,
             })
             .collect();
 
         #[derive(Serialize)]
-        struct TraceFile { traceEvents: Vec<TraceEvent> }
-        let json = serde_json::to_string_pretty(&TraceFile { traceEvents: events })
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        struct TraceFile {
+            #[serde(rename = "traceEvents")]
+            trace_events: Vec<TraceEvent>,
+        }
+        let json = serde_json::to_string_pretty(&TraceFile {
+            trace_events: events,
+        })
+        .map_err(std::io::Error::other)?;
 
         fs::write(path, json)
     }

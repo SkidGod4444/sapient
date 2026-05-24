@@ -123,16 +123,33 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
-        Commands::Run { model, input, output, backend, telemetry } => {
+        Commands::Run {
+            model,
+            input,
+            output,
+            backend,
+            telemetry,
+        } => {
             run_command(model, input, output, backend, telemetry)?;
         }
-        Commands::Bench { model, batch_sizes, backend, warmup, iters } => {
+        Commands::Bench {
+            model,
+            batch_sizes,
+            backend,
+            warmup,
+            iters,
+        } => {
             bench_command(model, &batch_sizes, backend, warmup, iters)?;
         }
         Commands::Inspect { model, output } => {
             inspect_command(model, output)?;
         }
-        Commands::Serve { model, port, backend, workers } => {
+        Commands::Serve {
+            model,
+            port,
+            backend,
+            workers,
+        } => {
             server::serve(model, port, backend, workers).await?;
         }
     }
@@ -149,9 +166,15 @@ fn run_command(
     backend: String,
     telemetry: bool,
 ) -> Result<()> {
-    let config = ModelConfig { backend: backend.clone(), ..Default::default() };
+    let config = ModelConfig {
+        backend: backend.clone(),
+        ..Default::default()
+    };
     let model = Model::load(&model_path, config).context("failed to load model")?;
-    let opts = SessionOptions { telemetry, ..Default::default() };
+    let opts = SessionOptions {
+        telemetry,
+        ..Default::default()
+    };
     let session = InferenceSession::new(model, opts).context("failed to create session")?;
 
     // Load inputs.
@@ -198,7 +221,11 @@ fn bench_command(
         .filter_map(|s| s.trim().parse().ok())
         .collect();
 
-    let config = ModelConfig { backend: backend.clone(), optimize: true, ..Default::default() };
+    let config = ModelConfig {
+        backend: backend.clone(),
+        optimize: true,
+        ..Default::default()
+    };
     let model = Model::load(&model_path, config).context("failed to load model")?;
     let session = InferenceSession::new(model, SessionOptions::default())?;
 
@@ -225,8 +252,8 @@ fn bench_command(
 
         latencies_us.sort_unstable();
         let median_ms = latencies_us[latencies_us.len() / 2] as f64 / 1000.0;
-        let p99_ms    = latencies_us[latencies_us.len() * 99 / 100] as f64 / 1000.0;
-        let tps       = bs as f64 / (median_ms / 1000.0);
+        let p99_ms = latencies_us[latencies_us.len() * 99 / 100] as f64 / 1000.0;
+        let tps = bs as f64 / (median_ms / 1000.0);
 
         println!(
             "│ {:11} │ {:14.2} │ {:13.2} │ {:13.0} │",
@@ -241,7 +268,11 @@ fn bench_command(
 // ── inspect ───────────────────────────────────────────────────────────────────
 
 fn inspect_command(model_path: PathBuf, output_path: Option<PathBuf>) -> Result<()> {
-    let config = ModelConfig { optimize: false, infer_shapes: false, ..Default::default() };
+    let config = ModelConfig {
+        optimize: false,
+        infer_shapes: false,
+        ..Default::default()
+    };
     let model = Model::load(&model_path, config).context("loading model")?;
 
     let dot = model.graph.to_dot();
@@ -253,7 +284,11 @@ fn inspect_command(model_path: PathBuf, output_path: Option<PathBuf>) -> Result<
         print!("{dot}");
     }
 
-    println!("\nGraph: {} nodes, {} edges", model.graph.node_count(), model.graph.edges.len());
+    println!(
+        "\nGraph: {} nodes, {} edges",
+        model.graph.node_count(),
+        model.graph.edges.len()
+    );
     Ok(())
 }
 
@@ -263,11 +298,11 @@ fn parse_input_json(json: &str) -> Result<HashMap<String, Tensor>> {
     #[derive(serde::Deserialize)]
     struct InputSpec {
         shape: Vec<usize>,
-        data:  Vec<f32>,
+        data: Vec<f32>,
     }
 
-    let map: HashMap<String, InputSpec> = serde_json::from_str(json)
-        .context("invalid input JSON format")?;
+    let map: HashMap<String, InputSpec> =
+        serde_json::from_str(json).context("invalid input JSON format")?;
 
     let mut tensors = HashMap::new();
     for (name, spec) in map {
@@ -281,11 +316,13 @@ fn serialise_outputs(outputs: &[Tensor]) -> String {
     use serde_json::json;
     let arr: Vec<serde_json::Value> = outputs
         .iter()
-        .map(|t| json!({
-            "shape": t.shape().dims(),
-            "dtype": t.dtype().to_string(),
-            "data": t.as_f32_slice(),
-        }))
+        .map(|t| {
+            json!({
+                "shape": t.shape().dims(),
+                "dtype": t.dtype().to_string(),
+                "data": t.as_f32_slice(),
+            })
+        })
         .collect();
     serde_json::to_string_pretty(&arr).unwrap_or_default()
 }
@@ -295,8 +332,13 @@ fn make_dummy_inputs(session: &InferenceSession, _batch_size: usize) -> HashMap<
     let mut inputs = HashMap::new();
     for &id in &session.model().graph.inputs {
         use sapient_ir::node::Node;
-        if let Some(Node::Input { name, shape, dtype, .. }) = session.model().graph.get(id) {
-            let shape = shape.clone().unwrap_or_else(|| sapient_core::Shape::new([1]));
+        if let Some(Node::Input {
+            name, shape, dtype, ..
+        }) = session.model().graph.get(id)
+        {
+            let shape = shape
+                .clone()
+                .unwrap_or_else(|| sapient_core::Shape::new([1]));
             let dtype = dtype.unwrap_or(sapient_core::DType::F32);
             if let Ok(t) = Tensor::zeros(shape, dtype) {
                 inputs.insert(name.clone(), t);

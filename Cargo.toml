@@ -72,7 +72,7 @@ memmap2 = "0.9"
 prost   = "0.12"
 
 # HuggingFace ecosystem
-hf-hub     = { version = "0.3", features = ["tokio"] }
+hf-hub     = { version = "0.4.0", default-features = false, features = ["tokio", "rustls-tls"] }
 tokenizers = { version = "0.19", features = ["http"] }
 minijinja  = "2.0"
 
@@ -86,7 +86,7 @@ dirs      = "5.0"
 tracing                     = "0.1"
 tracing-subscriber          = { version = "0.3", features = ["env-filter", "json"] }
 metrics                     = "0.22"
-metrics-exporter-prometheus = "0.13"
+metrics-exporter-prometheus = { version = "0.13", default-features = false, features = ["http-listener"] }
 opentelemetry               = { version = "0.22", features = ["trace"] }
 opentelemetry_sdk           = { version = "0.22", features = ["rt-tokio"] }
 opentelemetry-otlp          = { version = "0.15", features = ["tonic"] }

@@ -3,8 +3,8 @@
 
 use std::collections::HashMap;
 
-use sapient_core::{DType, Shape, Tensor};
 use sapient_core::error::{Result, SapientError};
+use sapient_core::{DType, Shape, Tensor};
 
 use crate::request::{Batch, Request};
 
@@ -47,10 +47,7 @@ impl Batcher {
     ///
     /// All requests must have the same input keys and compatible shapes (only
     /// the batch dimension is stacked).
-    pub fn merge_inputs(
-        &self,
-        batch: &Batch,
-    ) -> Result<HashMap<String, Tensor>> {
+    pub fn merge_inputs(&self, batch: &Batch) -> Result<HashMap<String, Tensor>> {
         if batch.is_empty() {
             return Ok(HashMap::new());
         }
@@ -65,9 +62,7 @@ impl Batcher {
                 .iter()
                 .map(|r| {
                     r.inputs.get(key).ok_or_else(|| {
-                        SapientError::internal(format!(
-                            "request missing input key '{key}'"
-                        ))
+                        SapientError::internal(format!("request missing input key '{key}'"))
                     })
                 })
                 .collect::<Result<_>>()?;
@@ -96,7 +91,10 @@ impl Batcher {
 
             let mut out_dims = vec![batch_size];
             out_dims.extend_from_slice(&elem_shape);
-            merged.insert(key.clone(), Tensor::from_f32(&stacked, Shape::new(out_dims))?);
+            merged.insert(
+                key.clone(),
+                Tensor::from_f32(&stacked, Shape::new(out_dims))?,
+            );
         }
 
         Ok(merged)

@@ -27,11 +27,11 @@ impl ModelFiles {
         match self.weight_paths.first() {
             None => WeightFormat::Unknown,
             Some(p) => match p.extension().and_then(|e| e.to_str()) {
-                Some("gguf")         => WeightFormat::Gguf,
-                Some("safetensors")  => WeightFormat::Safetensors,
-                Some("bin")          => WeightFormat::PyTorchBin,
-                _                    => WeightFormat::Unknown,
-            }
+                Some("gguf") => WeightFormat::Gguf,
+                Some("safetensors") => WeightFormat::Safetensors,
+                Some("bin") => WeightFormat::PyTorchBin,
+                _ => WeightFormat::Unknown,
+            },
         }
     }
 }

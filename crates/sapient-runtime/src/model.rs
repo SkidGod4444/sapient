@@ -1,7 +1,7 @@
 //! `Model` — loaded model metadata and compiled IR.
 
-use std::path::Path;
 use std::collections::HashMap;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -75,7 +75,11 @@ impl Model {
             "model loaded and compiled"
         );
 
-        Ok(Self { name, graph, config })
+        Ok(Self {
+            name,
+            graph,
+            config,
+        })
     }
 
     /// Load a model from raw ONNX bytes.
@@ -89,17 +93,29 @@ impl Model {
             PassManager::standard().run_all(&mut graph)?;
         }
 
-        Ok(Self { name: "onnx_model".into(), graph, config })
+        Ok(Self {
+            name: "onnx_model".into(),
+            graph,
+            config,
+        })
     }
 
     /// Build a model from an already-constructed graph (e.g. in tests).
-    pub fn from_graph(name: impl Into<String>, mut graph: Graph, config: ModelConfig) -> Result<Self> {
+    pub fn from_graph(
+        name: impl Into<String>,
+        mut graph: Graph,
+        config: ModelConfig,
+    ) -> Result<Self> {
         if config.infer_shapes {
             ShapeRegistry::new(&mut graph).infer()?;
         }
         if config.optimize {
             PassManager::standard().run_all(&mut graph)?;
         }
-        Ok(Self { name: name.into(), graph, config })
+        Ok(Self {
+            name: name.into(),
+            graph,
+            config,
+        })
     }
 }

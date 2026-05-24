@@ -2,14 +2,18 @@
 //!
 //! Uses the log-sum-exp trick: subtract max before exp to prevent overflow.
 
-use sapient_core::{Tensor};
 use sapient_core::error::{Result, SapientError};
+use sapient_core::Tensor;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Normalise an axis index (negative = count from end).
 fn normalise_axis(axis: i64, ndim: usize) -> usize {
-    if axis < 0 { (ndim as i64 + axis) as usize } else { axis as usize }
+    if axis < 0 {
+        (ndim as i64 + axis) as usize
+    } else {
+        axis as usize
+    }
 }
 
 // ── Softmax ───────────────────────────────────────────────────────────────────
@@ -26,8 +30,8 @@ pub fn log_softmax(x: &Tensor, axis: i64) -> Result<Tensor> {
 
 fn apply_softmax_impl(x: &Tensor, axis: i64, log_mode: bool) -> Result<Tensor> {
     let shape = x.shape();
-    let ndim  = shape.ndim();
-    let ax    = normalise_axis(axis, ndim);
+    let ndim = shape.ndim();
+    let ax = normalise_axis(axis, ndim);
 
     if ax >= ndim {
         return Err(SapientError::internal(format!(
@@ -40,7 +44,7 @@ fn apply_softmax_impl(x: &Tensor, axis: i64, log_mode: bool) -> Result<Tensor> {
 
     // We iterate over slices along the `ax` dimension.
     let outer: usize = shape.dims()[..ax].iter().product();
-    let dim_size     = shape.dims()[ax];
+    let dim_size = shape.dims()[ax];
     let inner: usize = shape.dims()[ax + 1..].iter().product();
 
     for o in 0..outer {
@@ -88,7 +92,9 @@ mod tests {
         let y = softmax(&x, 1).unwrap();
         let d = y.as_f32_slice();
         // Should be ~[0.09, 0.24, 0.67] — no NaN/Inf.
-        for &v in d { assert!(v.is_finite(), "non-finite: {v}"); }
+        for &v in d {
+            assert!(v.is_finite(), "non-finite: {v}");
+        }
         let sum: f32 = d.iter().sum();
         assert!((sum - 1.0).abs() < 1e-5, "sum = {sum}");
     }
@@ -97,6 +103,8 @@ mod tests {
     fn log_softmax_finite() {
         let x = Tensor::from_f32(&[1.0, 2.0, 3.0], vec![1, 3]).unwrap();
         let y = log_softmax(&x, 1).unwrap();
-        for &v in y.as_f32_slice() { assert!(v.is_finite()); }
+        for &v in y.as_f32_slice() {
+            assert!(v.is_finite());
+        }
     }
 }

@@ -49,7 +49,7 @@ struct BatchInferRequest {
 #[derive(Debug, Deserialize)]
 struct TensorSpec {
     shape: Vec<usize>,
-    data:  Vec<f32>,
+    data: Vec<f32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,7 +62,7 @@ struct InferResponse {
 struct TensorOut {
     shape: Vec<usize>,
     dtype: String,
-    data:  Vec<f32>,
+    data: Vec<f32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,10 +82,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
-async fn infer(
-    State(state): State<AppState>,
-    Json(req): Json<InferRequest>,
-) -> impl IntoResponse {
+async fn infer(State(state): State<AppState>, Json(req): Json<InferRequest>) -> impl IntoResponse {
     let start = std::time::Instant::now();
 
     let inputs: Result<HashMap<String, Tensor>, _> = req
@@ -104,7 +101,8 @@ async fn infer(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "error": e })),
-            ).into_response();
+            )
+                .into_response();
         }
     };
 
@@ -120,7 +118,8 @@ async fn infer(
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -150,7 +149,8 @@ async fn batch_infer(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "error": e })),
-            ).into_response();
+            )
+                .into_response();
         }
     };
 
@@ -166,38 +166,47 @@ async fn batch_infer(
                     })
                 })
                 .collect();
-            (StatusCode::OK, Json(serde_json::json!({
-                "batch_size": batch_size,
-                "latency_ms": latency_ms,
-                "results": results,
-            }))).into_response()
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "batch_size": batch_size,
+                    "latency_ms": latency_ms,
+                    "results": results,
+                })),
+            )
+                .into_response()
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
 async fn metrics_handler() -> impl IntoResponse {
     // Simple text response — integrate with metrics-exporter-prometheus for
     // full Prometheus scraping.
-    (StatusCode::OK, "# SAPIENT metrics\n# (enable 'prometheus' feature for full export)\n")
+    (
+        StatusCode::OK,
+        "# SAPIENT metrics\n# (enable 'prometheus' feature for full export)\n",
+    )
 }
 
 // ── Server entry point ────────────────────────────────────────────────────────
 
-pub async fn serve(
-    model_path: PathBuf,
-    port: u16,
-    backend: String,
-    _workers: usize,
-) -> Result<()> {
-    let config = ModelConfig { backend: backend.clone(), ..Default::default() };
+pub async fn serve(model_path: PathBuf, port: u16, backend: String, _workers: usize) -> Result<()> {
+    let config = ModelConfig {
+        backend: backend.clone(),
+        ..Default::default()
+    };
     let model = Model::load(&model_path, config)?;
     let session = InferenceSession::new(
         model,
-        SessionOptions { telemetry: true, ..Default::default() },
+        SessionOptions {
+            telemetry: true,
+            ..Default::default()
+        },
     )?;
 
     let state = AppState {
@@ -205,10 +214,10 @@ pub async fn serve(
     };
 
     let app = Router::new()
-        .route("/v1/health",       get(health))
-        .route("/v1/infer",        post(infer))
-        .route("/v1/batch_infer",  post(batch_infer))
-        .route("/v1/metrics",      get(metrics_handler))
+        .route("/v1/health", get(health))
+        .route("/v1/infer", post(infer))
+        .route("/v1/batch_infer", post(batch_infer))
+        .route("/v1/metrics", get(metrics_handler))
         .with_state(state)
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive());
@@ -228,7 +237,7 @@ fn tensor_to_out(t: &Tensor) -> TensorOut {
     TensorOut {
         shape: t.shape().dims().to_vec(),
         dtype: t.dtype().to_string(),
-        data:  if t.dtype() == sapient_core::DType::F32 {
+        data: if t.dtype() == sapient_core::DType::F32 {
             t.as_f32_slice().to_vec()
         } else {
             vec![]

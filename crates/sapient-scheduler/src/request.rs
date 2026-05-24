@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use sapient_core::{Tensor};
 use sapient_core::error::SapientError;
+use sapient_core::Tensor;
 
 // ── Request ───────────────────────────────────────────────────────────────────
 
@@ -65,11 +65,19 @@ pub struct Response {
 
 impl Response {
     pub fn ok(request_id: Uuid, outputs: Vec<Tensor>, latency_us: u64) -> Self {
-        Self { request_id, outputs: Ok(outputs), latency_us }
+        Self {
+            request_id,
+            outputs: Ok(outputs),
+            latency_us,
+        }
     }
 
     pub fn err(request_id: Uuid, error: SapientError, latency_us: u64) -> Self {
-        Self { request_id, outputs: Err(error), latency_us }
+        Self {
+            request_id,
+            outputs: Err(error),
+            latency_us,
+        }
     }
 }
 
@@ -84,9 +92,16 @@ pub struct Batch {
 
 impl Batch {
     pub fn new(requests: Vec<Request>) -> Self {
-        Self { requests, formed_at: Instant::now() }
+        Self {
+            requests,
+            formed_at: Instant::now(),
+        }
     }
 
-    pub fn len(&self) -> usize { self.requests.len() }
-    pub fn is_empty(&self) -> bool { self.requests.is_empty() }
+    pub fn len(&self) -> usize {
+        self.requests.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.requests.is_empty()
+    }
 }

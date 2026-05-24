@@ -4,9 +4,9 @@ use std::collections::HashMap;
 
 use tracing::{debug, instrument};
 
-use sapient_core::{DType, Shape, Tensor};
 use sapient_core::buffer::{BufferHandle, CpuBuffer};
 use sapient_core::error::{Result, SapientError};
+use sapient_core::{DType, Tensor};
 use sapient_ir::graph::Graph;
 use sapient_ir::node::{Node, NodeId};
 use sapient_ir::op::OpType;
@@ -29,17 +29,16 @@ pub trait ExecutionBackend: Send + Sync {
 
     /// Execute the graph, returning output tensors in the order of
     /// `graph.outputs`.
-    fn execute(
-        &self,
-        graph: &Graph,
-        inputs: HashMap<String, Tensor>,
-    ) -> Result<Vec<Tensor>>;
+    fn execute(&self, graph: &Graph, inputs: HashMap<String, Tensor>) -> Result<Vec<Tensor>>;
 
     /// Whether this backend can execute the given op natively.
     fn supports_op(&self, op: &OpType) -> bool;
 
     /// True if this backend is available on the current system.
-    fn is_available() -> bool where Self: Sized {
+    fn is_available() -> bool
+    where
+        Self: Sized,
+    {
         true
     }
 }
@@ -73,7 +72,9 @@ impl CpuBackend {
 }
 
 impl ExecutionBackend for CpuBackend {
-    fn name(&self) -> &str { "cpu" }
+    fn name(&self) -> &str {
+        "cpu"
+    }
 
     fn allocate(&self, shape: &[usize], dtype: DType) -> Result<BufferHandle> {
         let numel: usize = shape.iter().product();
@@ -86,11 +87,7 @@ impl ExecutionBackend for CpuBackend {
     }
 
     #[instrument(skip_all, fields(graph = %graph.name))]
-    fn execute(
-        &self,
-        graph: &Graph,
-        inputs: HashMap<String, Tensor>,
-    ) -> Result<Vec<Tensor>> {
+    fn execute(&self, graph: &Graph, inputs: HashMap<String, Tensor>) -> Result<Vec<Tensor>> {
         // Topological execution order.
         let order = graph.topological_order()?;
 
@@ -114,22 +111,23 @@ impl ExecutionBackend for CpuBackend {
                 Some(Node::Input { .. }) => {
                     // Already seeded above.
                 }
-                Some(Node::Operator { op, inputs: inp_ids, num_outputs, .. }) => {
+                Some(Node::Operator {
+                    op,
+                    inputs: inp_ids,
+                    num_outputs,
+                    ..
+                }) => {
                     let op = op.clone();
                     let inp_ids = inp_ids.clone();
-                    let num_outputs = *num_outputs;
+                    let _num_outputs = *num_outputs;
 
                     // Collect input tensors.
                     let input_tensors: Vec<Tensor> = inp_ids
                         .iter()
                         .map(|&inp| {
-                            values.get(&(inp, 0))
-                                .cloned()
-                                .ok_or_else(|| {
-                                    SapientError::internal(format!(
-                                        "missing value for node {inp}"
-                                    ))
-                                })
+                            values.get(&(inp, 0)).cloned().ok_or_else(|| {
+                                SapientError::internal(format!("missing value for node {inp}"))
+                            })
                         })
                         .collect::<Result<Vec<_>>>()?;
 
@@ -155,13 +153,17 @@ impl ExecutionBackend for CpuBackend {
             .outputs
             .iter()
             .map(|&oid| {
-                values.get(&(oid, 0))
+                values
+                    .get(&(oid, 0))
                     .cloned()
                     .ok_or_else(|| SapientError::internal(format!("output {oid} not computed")))
             })
             .collect::<Result<Vec<_>>>()?;
 
-        debug!(outputs = out_tensors.len(), "CpuBackend: execution complete");
+        debug!(
+            outputs = out_tensors.len(),
+            "CpuBackend: execution complete"
+        );
         Ok(out_tensors)
     }
 
@@ -200,42 +202,81 @@ impl CpuBackend {
         let out = match op {
             // ── Linear algebra ────────────────────────────────────────────
             OpType::MatMul => {
-                let a = inputs.get(0).ok_or_else(|| SapientError::internal("MatMul: missing a"))?;
-                let b = inputs.get(1).ok_or_else(|| SapientError::internal("MatMul: missing b"))?;
+                let a = inputs
+                    .get(0)
+                    .ok_or_else(|| SapientError::internal("MatMul: missing a"))?;
+                let b = inputs
+                    .get(1)
+                    .ok_or_else(|| SapientError::internal("MatMul: missing b"))?;
                 vec![kernels::matmul::matmul(a, b)?]
             }
-            OpType::Gemm { alpha, beta, trans_a, trans_b } => {
-                let a = inputs.get(0).ok_or_else(|| SapientError::internal("Gemm: missing a"))?;
-                let b = inputs.get(1).ok_or_else(|| SapientError::internal("Gemm: missing b"))?;
+            OpType::Gemm {
+                alpha,
+                beta,
+                trans_a,
+                trans_b,
+            } => {
+                let a = inputs
+                    .get(0)
+                    .ok_or_else(|| SapientError::internal("Gemm: missing a"))?;
+                let b = inputs
+                    .get(1)
+                    .ok_or_else(|| SapientError::internal("Gemm: missing b"))?;
                 let c = inputs.get(2);
-                vec![kernels::matmul::gemm(a, b, c, alpha.0 as f32, beta.0 as f32, *trans_a, *trans_b)?]
+                vec![kernels::matmul::gemm(
+                    a,
+                    b,
+                    c,
+                    alpha.0 as f32,
+                    beta.0 as f32,
+                    *trans_a,
+                    *trans_b,
+                )?]
             }
 
             // ── Element-wise ──────────────────────────────────────────────
-            OpType::Add  => vec![kernels::elementwise::add(inputs.get(0).unwrap(), inputs.get(1).unwrap())?],
-            OpType::Sub  => vec![kernels::elementwise::sub(inputs.get(0).unwrap(), inputs.get(1).unwrap())?],
-            OpType::Mul  => vec![kernels::elementwise::mul(inputs.get(0).unwrap(), inputs.get(1).unwrap())?],
-            OpType::Div  => vec![kernels::elementwise::div(inputs.get(0).unwrap(), inputs.get(1).unwrap())?],
-            OpType::Pow  => vec![kernels::elementwise::pow(inputs.get(0).unwrap(), inputs.get(1).unwrap())?],
-            OpType::Neg  => vec![kernels::elementwise::neg(inputs.get(0).unwrap())?],
-            OpType::Abs  => vec![kernels::elementwise::abs(inputs.get(0).unwrap())?],
+            OpType::Add => vec![kernels::elementwise::add(
+                inputs.get(0).unwrap(),
+                inputs.get(1).unwrap(),
+            )?],
+            OpType::Sub => vec![kernels::elementwise::sub(
+                inputs.get(0).unwrap(),
+                inputs.get(1).unwrap(),
+            )?],
+            OpType::Mul => vec![kernels::elementwise::mul(
+                inputs.get(0).unwrap(),
+                inputs.get(1).unwrap(),
+            )?],
+            OpType::Div => vec![kernels::elementwise::div(
+                inputs.get(0).unwrap(),
+                inputs.get(1).unwrap(),
+            )?],
+            OpType::Pow => vec![kernels::elementwise::pow(
+                inputs.get(0).unwrap(),
+                inputs.get(1).unwrap(),
+            )?],
+            OpType::Neg => vec![kernels::elementwise::neg(inputs.get(0).unwrap())?],
+            OpType::Abs => vec![kernels::elementwise::abs(inputs.get(0).unwrap())?],
             OpType::Sqrt => vec![kernels::elementwise::sqrt(inputs.get(0).unwrap())?],
-            OpType::Exp  => vec![kernels::elementwise::exp(inputs.get(0).unwrap())?],
-            OpType::Log  => vec![kernels::elementwise::log(inputs.get(0).unwrap())?],
-            OpType::Erf  => vec![kernels::elementwise::erf(inputs.get(0).unwrap())?],
+            OpType::Exp => vec![kernels::elementwise::exp(inputs.get(0).unwrap())?],
+            OpType::Log => vec![kernels::elementwise::log(inputs.get(0).unwrap())?],
+            OpType::Erf => vec![kernels::elementwise::erf(inputs.get(0).unwrap())?],
             OpType::Floor => vec![kernels::elementwise::floor(inputs.get(0).unwrap())?],
-            OpType::Ceil  => vec![kernels::elementwise::ceil(inputs.get(0).unwrap())?],
+            OpType::Ceil => vec![kernels::elementwise::ceil(inputs.get(0).unwrap())?],
             OpType::Round => vec![kernels::elementwise::round(inputs.get(0).unwrap())?],
 
             // ── Activations ───────────────────────────────────────────────
-            OpType::Relu    => vec![kernels::elementwise::relu(inputs.get(0).unwrap())?],
+            OpType::Relu => vec![kernels::elementwise::relu(inputs.get(0).unwrap())?],
             OpType::Sigmoid => vec![kernels::elementwise::sigmoid(inputs.get(0).unwrap())?],
-            OpType::Tanh    => vec![kernels::elementwise::tanh_act(inputs.get(0).unwrap())?],
-            OpType::Gelu    => vec![kernels::elementwise::gelu(inputs.get(0).unwrap())?],
-            OpType::Silu    => vec![kernels::elementwise::silu(inputs.get(0).unwrap())?],
+            OpType::Tanh => vec![kernels::elementwise::tanh_act(inputs.get(0).unwrap())?],
+            OpType::Gelu => vec![kernels::elementwise::gelu(inputs.get(0).unwrap())?],
+            OpType::Silu => vec![kernels::elementwise::silu(inputs.get(0).unwrap())?],
             OpType::HardSwish => vec![kernels::elementwise::hard_swish(inputs.get(0).unwrap())?],
             OpType::LeakyRelu { alpha } => {
-                vec![kernels::elementwise::leaky_relu(inputs.get(0).unwrap(), alpha.0 as f32)?]
+                vec![kernels::elementwise::leaky_relu(
+                    inputs.get(0).unwrap(),
+                    alpha.0 as f32,
+                )?]
             }
             OpType::Clip { min, max } => {
                 vec![kernels::elementwise::clip(
@@ -250,29 +291,51 @@ impl CpuBackend {
                 vec![kernels::softmax::softmax(inputs.get(0).unwrap(), *axis)?]
             }
             OpType::LogSoftmax { axis } => {
-                vec![kernels::softmax::log_softmax(inputs.get(0).unwrap(), *axis)?]
+                vec![kernels::softmax::log_softmax(
+                    inputs.get(0).unwrap(),
+                    *axis,
+                )?]
             }
             OpType::LayerNorm { axis, epsilon } => {
                 let weight = inputs.get(1);
-                let bias   = inputs.get(2);
+                let bias = inputs.get(2);
                 vec![kernels::layernorm::layer_norm(
-                    inputs.get(0).unwrap(), weight, bias, *axis, epsilon.0 as f32,
+                    inputs.get(0).unwrap(),
+                    weight,
+                    bias,
+                    *axis,
+                    epsilon.0 as f32,
                 )?]
             }
             OpType::RmsNorm { epsilon } => {
                 let weight = inputs.get(1);
                 vec![kernels::layernorm::rms_norm(
-                    inputs.get(0).unwrap(), weight, epsilon.0 as f32,
+                    inputs.get(0).unwrap(),
+                    weight,
+                    epsilon.0 as f32,
                 )?]
             }
 
             // ── Convolution ────────────────────────────────────────────────
-            OpType::Conv2d { kernel_shape, pads, strides, dilations, groups } => {
+            OpType::Conv2d {
+                kernel_shape,
+                pads,
+                strides,
+                dilations,
+                groups,
+            } => {
                 let x = inputs.get(0).unwrap();
                 let w = inputs.get(1).unwrap();
                 let b = inputs.get(2);
                 vec![kernels::conv2d::conv2d(
-                    x, w, b, *kernel_shape, *pads, *strides, *dilations, *groups,
+                    x,
+                    w,
+                    b,
+                    *kernel_shape,
+                    *pads,
+                    *strides,
+                    *dilations,
+                    *groups,
                 )?]
             }
 
@@ -288,13 +351,25 @@ impl CpuBackend {
 
             // ── Reduce ────────────────────────────────────────────────────
             OpType::ReduceSum { axes, keep_dims } => {
-                vec![kernels::reduce::reduce_sum(inputs.get(0).unwrap(), axes, *keep_dims)?]
+                vec![kernels::reduce::reduce_sum(
+                    inputs.get(0).unwrap(),
+                    axes,
+                    *keep_dims,
+                )?]
             }
             OpType::ReduceMean { axes, keep_dims } => {
-                vec![kernels::reduce::reduce_mean(inputs.get(0).unwrap(), axes, *keep_dims)?]
+                vec![kernels::reduce::reduce_mean(
+                    inputs.get(0).unwrap(),
+                    axes,
+                    *keep_dims,
+                )?]
             }
             OpType::ReduceMax { axes, keep_dims } => {
-                vec![kernels::reduce::reduce_max(inputs.get(0).unwrap(), axes, *keep_dims)?]
+                vec![kernels::reduce::reduce_max(
+                    inputs.get(0).unwrap(),
+                    axes,
+                    *keep_dims,
+                )?]
             }
 
             // ── LLM ops ───────────────────────────────────────────────────
@@ -309,10 +384,21 @@ impl CpuBackend {
             }
 
             // Grouped-Query Attention — calls the attention kernel.
-            OpType::GroupedQueryAttention { n_heads, n_kv_heads, head_dim, causal } => {
-                let q = inputs.get(0).ok_or_else(|| SapientError::internal("GQA: missing Q"))?;
-                let k = inputs.get(1).ok_or_else(|| SapientError::internal("GQA: missing K"))?;
-                let v = inputs.get(2).ok_or_else(|| SapientError::internal("GQA: missing V"))?;
+            OpType::GroupedQueryAttention {
+                n_heads: _,
+                n_kv_heads,
+                head_dim: _,
+                causal,
+            } => {
+                let q = inputs
+                    .get(0)
+                    .ok_or_else(|| SapientError::internal("GQA: missing Q"))?;
+                let k = inputs
+                    .get(1)
+                    .ok_or_else(|| SapientError::internal("GQA: missing K"))?;
+                let v = inputs
+                    .get(2)
+                    .ok_or_else(|| SapientError::internal("GQA: missing V"))?;
                 let mask = if *causal {
                     let seq_q = q.shape().dims().get(2).copied().unwrap_or(1);
                     let seq_k = k.shape().dims().get(2).copied().unwrap_or(1);
@@ -321,28 +407,53 @@ impl CpuBackend {
                     None
                 };
                 vec![kernels::attention::scaled_dot_product_attention(
-                    q, k, v, mask.as_ref(), None, *n_kv_heads,
+                    q,
+                    k,
+                    v,
+                    mask.as_ref(),
+                    None,
+                    *n_kv_heads,
                 )?]
             }
 
             // Multi-head attention (non-GQA, n_kv_heads = n_heads).
-            OpType::MultiHeadAttention { num_heads, head_dim, causal, .. } => {
-                let q = inputs.get(0).ok_or_else(|| SapientError::internal("MHA: missing Q"))?;
-                let k = inputs.get(1).ok_or_else(|| SapientError::internal("MHA: missing K"))?;
-                let v = inputs.get(2).ok_or_else(|| SapientError::internal("MHA: missing V"))?;
+            OpType::MultiHeadAttention {
+                num_heads,
+                head_dim: _,
+                causal,
+                scale,
+            } => {
+                let q = inputs
+                    .get(0)
+                    .ok_or_else(|| SapientError::internal("MHA: missing Q"))?;
+                let k = inputs
+                    .get(1)
+                    .ok_or_else(|| SapientError::internal("MHA: missing K"))?;
+                let v = inputs
+                    .get(2)
+                    .ok_or_else(|| SapientError::internal("MHA: missing V"))?;
                 let mask = if *causal {
                     let sq = q.shape().dims().get(2).copied().unwrap_or(1);
                     let sk = k.shape().dims().get(2).copied().unwrap_or(1);
                     Some(kernels::attention::causal_mask(sq, sk))
-                } else { None };
+                } else {
+                    None
+                };
                 vec![kernels::attention::scaled_dot_product_attention(
-                    q, k, v, mask.as_ref(), None, *num_heads,
+                    q,
+                    k,
+                    v,
+                    mask.as_ref(),
+                    scale.map(|s| s.0 as f32),
+                    *num_heads,
                 )?]
             }
 
             // RoPE — apply rotary embeddings to Q or K.
             OpType::RotaryEmbedding { base, dim: _ } => {
-                let x = inputs.get(0).ok_or_else(|| SapientError::internal("RoPE: missing input"))?;
+                let x = inputs
+                    .get(0)
+                    .ok_or_else(|| SapientError::internal("RoPE: missing input"))?;
                 let seq_len = x.shape().dims().get(2).copied().unwrap_or(1);
                 let positions: Vec<usize> = (0..seq_len).collect();
                 vec![kernels::rope::apply_rope(x, &positions, base.0 as f32)?]
@@ -350,7 +461,10 @@ impl CpuBackend {
 
             // Causal mask generation.
             OpType::CausalMask => {
-                let seq = inputs.get(0).map(|t| t.shape().dims().get(1).copied().unwrap_or(1)).unwrap_or(1);
+                let seq = inputs
+                    .get(0)
+                    .map(|t| t.shape().dims().get(1).copied().unwrap_or(1))
+                    .unwrap_or(1);
                 vec![kernels::attention::causal_mask(seq, seq)]
             }
 

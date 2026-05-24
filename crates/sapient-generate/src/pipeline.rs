@@ -10,9 +10,9 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, warn};
 
-use sapient_hub::{HubClient, LoadOptions as HubOptions, ModelFiles};
 use sapient_hub::model_info::{ArchType, ModelInfo};
 use sapient_hub::resolver::WeightFormat;
+use sapient_hub::{HubClient, LoadOptions as HubOptions, ModelFiles};
 use sapient_io::{load_gguf, load_safetensors};
 use sapient_models::build_graph;
 use sapient_tokenizers::{
@@ -21,7 +21,7 @@ use sapient_tokenizers::{
 };
 
 use crate::kv_cache::KVCache;
-use crate::sampler::{SamplingStrategy, Sampler};
+use crate::sampler::{Sampler, SamplingStrategy};
 
 // ── GenerationConfig ──────────────────────────────────────────────────────────
 
@@ -97,15 +97,14 @@ impl Pipeline {
     }
 
     /// Load with custom hub and generation options.
-    pub async fn from_pretrained_with_opts(
-        model_id: &str,
-        opts: LoadOptions,
-    ) -> Result<Self> {
+    pub async fn from_pretrained_with_opts(model_id: &str, opts: LoadOptions) -> Result<Self> {
         info!("Loading model: {model_id}");
 
         // 1. Download all model files from the Hub.
         let hub = HubClient::with_options(opts.hub)?;
-        let model_files = hub.download(model_id).await
+        let model_files = hub
+            .download(model_id)
+            .await
             .with_context(|| format!("Failed to download model '{model_id}'"))?;
 
         // 2. Parse config.json to detect architecture.
@@ -114,23 +113,32 @@ impl Pipeline {
         info!("Detected architecture: {:?}", model_info.arch);
 
         // 3. Load tokenizer.
-        let tok_opts = TokenizerOptions { add_bos: true, ..Default::default() };
+        let tok_opts = TokenizerOptions {
+            add_bos: true,
+            ..Default::default()
+        };
         let tokenizer = if let Some(tok_path) = &model_files.tokenizer_path {
-            Arc::new(SapientTokenizer::from_file(tok_path, tok_opts)
-                .context("Failed to load tokenizer")?)
+            Arc::new(
+                SapientTokenizer::from_file(tok_path, tok_opts)
+                    .context("Failed to load tokenizer")?,
+            )
         } else {
             // GGUF models embed the tokenizer — fall back to pretrained loading.
-            Arc::new(SapientTokenizer::from_pretrained(model_id)
-                .context("Failed to load tokenizer from Hub")?)
+            Arc::new(
+                SapientTokenizer::from_pretrained(model_id)
+                    .context("Failed to load tokenizer from Hub")?,
+            )
         };
 
         // 4. Load chat template from tokenizer_config.json.
-        let chat_template = model_files.tokenizer_config_path.as_ref().and_then(|p| {
-            ChatTemplate::from_tokenizer_config(p).ok()
-        }).or_else(|| {
-            // Fall back to built-in template based on architecture.
-            Some(builtin_template_for(&model_info.arch))
-        });
+        let chat_template = model_files
+            .tokenizer_config_path
+            .as_ref()
+            .and_then(|p| ChatTemplate::from_tokenizer_config(p).ok())
+            .or_else(|| {
+                // Fall back to built-in template based on architecture.
+                Some(builtin_template_for(&model_info.arch))
+            });
 
         // 5. Set EOS from tokenizer.
         let mut config = opts.generation;
@@ -138,9 +146,18 @@ impl Pipeline {
             config.eos_token_id = tokenizer.eos_id;
         }
 
-        info!("Pipeline ready — vocab_size={} layers={}", model_info.vocab_size, model_info.num_hidden_layers);
+        info!(
+            "Pipeline ready — vocab_size={} layers={}",
+            model_info.vocab_size, model_info.num_hidden_layers
+        );
 
-        Ok(Self { tokenizer, chat_template, model_info, model_files, config })
+        Ok(Self {
+            tokenizer,
+            chat_template,
+            model_info,
+            model_files,
+            config,
+        })
     }
 
     /// Load a GGUF model directly from a local file path.
@@ -161,9 +178,15 @@ impl Pipeline {
     }
 
     /// Generate with a custom generation config.
-    pub async fn generate_with_config(&self, prompt: &str, config: &GenerationConfig) -> Result<String> {
+    pub async fn generate_with_config(
+        &self,
+        prompt: &str,
+        config: &GenerationConfig,
+    ) -> Result<String> {
         let input_ids = self.tokenizer.encode(prompt)?;
-        let output_ids = self.generate_from_tokens_with_config(input_ids, config).await?;
+        let output_ids = self
+            .generate_from_tokens_with_config(input_ids, config)
+            .await?;
         self.tokenizer.decode(&output_ids, true)
     }
 
@@ -174,7 +197,8 @@ impl Pipeline {
                 .context("Failed to render chat template")?
         } else {
             // Fallback: concatenate messages without template.
-            messages.iter()
+            messages
+                .iter()
                 .map(|m| format!("{}: {}", m.role, m.content))
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -183,10 +207,7 @@ impl Pipeline {
     }
 
     /// Stream tokens as they are generated.
-    pub async fn generate_stream(
-        &self,
-        prompt: &str,
-    ) -> ReceiverStream<String> {
+    pub async fn generate_stream(&self, prompt: &str) -> ReceiverStream<String> {
         let (tx, rx) = mpsc::channel(64);
         let input_ids = self.tokenizer.encode(prompt).unwrap_or_default();
         let eos = self.config.eos_token_id;
@@ -198,7 +219,9 @@ impl Pipeline {
         tokio::spawn(async move {
             for i in 0..max_new.min(10) {
                 let token_text = format!("<token_{i}> ");
-                if tx.send(token_text).await.is_err() { break; }
+                if tx.send(token_text).await.is_err() {
+                    break;
+                }
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             }
         });
@@ -219,7 +242,8 @@ impl Pipeline {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     async fn generate_from_tokens(&self, input_ids: Vec<u32>) -> Result<Vec<u32>> {
-        self.generate_from_tokens_with_config(input_ids, &self.config).await
+        self.generate_from_tokens_with_config(input_ids, &self.config)
+            .await
     }
 
     async fn generate_from_tokens_with_config(
@@ -243,7 +267,9 @@ impl Pipeline {
             // In a full implementation: run graph forward pass here.
             // For now, sample from a uniform distribution as a structural test.
             let vocab = self.model_info.vocab_size;
-            let logits: Vec<f32> = (0..vocab).map(|i| if i == 42 { 10.0 } else { 0.1 }).collect();
+            let logits: Vec<f32> = (0..vocab)
+                .map(|i| if i == 42 { 10.0 } else { 0.1 })
+                .collect();
 
             let next_token = sampler.sample(&logits, &all_tokens)?;
             generated.push(next_token);
@@ -258,7 +284,11 @@ impl Pipeline {
             // Check stop sequences.
             if !config.stop_sequences.is_empty() {
                 let decoded = self.tokenizer.decode(&generated, true).unwrap_or_default();
-                if config.stop_sequences.iter().any(|s| decoded.contains(s.as_str())) {
+                if config
+                    .stop_sequences
+                    .iter()
+                    .any(|s| decoded.contains(s.as_str()))
+                {
                     break;
                 }
             }
@@ -269,9 +299,15 @@ impl Pipeline {
 
     // ── Accessors ─────────────────────────────────────────────────────────────
 
-    pub fn tokenizer(&self) -> &SapientTokenizer { &self.tokenizer }
-    pub fn model_info(&self) -> &ModelInfo { &self.model_info }
-    pub fn arch(&self) -> &ArchType { &self.model_info.arch }
+    pub fn tokenizer(&self) -> &SapientTokenizer {
+        &self.tokenizer
+    }
+    pub fn model_info(&self) -> &ModelInfo {
+        &self.model_info
+    }
+    pub fn arch(&self) -> &ArchType {
+        &self.model_info.arch
+    }
 }
 
 // ── Built-in template selection ───────────────────────────────────────────────
@@ -279,9 +315,9 @@ impl Pipeline {
 fn builtin_template_for(arch: &ArchType) -> ChatTemplate {
     match arch {
         ArchType::Llama => ChatTemplate::from_template(builtin::LLAMA3),
-        ArchType::Phi   => ChatTemplate::from_template(builtin::CHATML),
+        ArchType::Phi => ChatTemplate::from_template(builtin::CHATML),
         ArchType::Gemma => ChatTemplate::from_template(builtin::GEMMA),
-        ArchType::Qwen  => ChatTemplate::from_template(builtin::CHATML),
-        _               => ChatTemplate::from_template(builtin::CHATML),
+        ArchType::Qwen => ChatTemplate::from_template(builtin::CHATML),
+        _ => ChatTemplate::from_template(builtin::CHATML),
     }
 }

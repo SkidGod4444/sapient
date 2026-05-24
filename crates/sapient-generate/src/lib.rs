@@ -1,3 +1,11 @@
+#![allow(
+    unused_imports,
+    unused_variables,
+    unused_mut,
+    dead_code,
+    clippy::derivable_impls
+)]
+
 //! `sapient-generate` — LLM text generation pipeline.
 //!
 //! The main entry point is [`Pipeline`], which provides a dead-simple API
@@ -36,6 +44,6 @@ pub mod kv_cache;
 pub mod pipeline;
 pub mod sampler;
 
-pub use pipeline::{GenerationConfig, LoadOptions, Pipeline};
-pub use sampler::{SamplingStrategy, Sampler};
 pub use kv_cache::KVCache;
+pub use pipeline::{GenerationConfig, LoadOptions, Pipeline};
+pub use sampler::{Sampler, SamplingStrategy};

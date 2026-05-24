@@ -5,11 +5,10 @@
 //!
 //! Supports: Llama 3 / ChatML / Mistral / Phi / Gemma / Qwen / Zephyr templates.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use minijinja::{Environment, Value};
+use minijinja::Environment;
 use serde::{Deserialize, Serialize};
 
 // ── ChatRole ──────────────────────────────────────────────────────────────────
@@ -26,10 +25,10 @@ pub enum ChatRole {
 impl std::fmt::Display for ChatRole {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ChatRole::System    => f.write_str("system"),
-            ChatRole::User      => f.write_str("user"),
+            ChatRole::System => f.write_str("system"),
+            ChatRole::User => f.write_str("user"),
             ChatRole::Assistant => f.write_str("assistant"),
-            ChatRole::Tool      => f.write_str("tool"),
+            ChatRole::Tool => f.write_str("tool"),
         }
     }
 }
@@ -38,19 +37,28 @@ impl std::fmt::Display for ChatRole {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
-    pub role:    ChatRole,
+    pub role: ChatRole,
     pub content: String,
 }
 
 impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: ChatRole::System, content: content.into() }
+        Self {
+            role: ChatRole::System,
+            content: content.into(),
+        }
     }
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: ChatRole::User, content: content.into() }
+        Self {
+            role: ChatRole::User,
+            content: content.into(),
+        }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: ChatRole::Assistant, content: content.into() }
+        Self {
+            role: ChatRole::Assistant,
+            content: content.into(),
+        }
     }
 }
 
@@ -65,10 +73,9 @@ pub struct ChatTemplate {
 impl ChatTemplate {
     /// Load from a `tokenizer_config.json` file.
     pub fn from_tokenizer_config(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .context("Failed to read tokenizer_config.json")?;
-        let config: serde_json::Value = serde_json::from_str(&text)
-            .context("Invalid tokenizer_config.json")?;
+        let text = std::fs::read_to_string(path).context("Failed to read tokenizer_config.json")?;
+        let config: serde_json::Value =
+            serde_json::from_str(&text).context("Invalid tokenizer_config.json")?;
 
         let template_src = config["chat_template"]
             .as_str()
@@ -80,7 +87,9 @@ impl ChatTemplate {
 
     /// Build with a raw Jinja2 template string.
     pub fn from_template(template: impl Into<String>) -> Self {
-        Self { template_src: template.into() }
+        Self {
+            template_src: template.into(),
+        }
     }
 
     /// Render a list of chat messages to a prompt string.
@@ -94,16 +103,20 @@ impl ChatTemplate {
         env.add_template("chat", &self.template_src)
             .map_err(|e| anyhow::anyhow!("Template parse error: {e}"))?;
 
-        let tmpl = env.get_template("chat")
+        let tmpl = env
+            .get_template("chat")
             .map_err(|e| anyhow::anyhow!("Template load error: {e}"))?;
 
         // Build context — same variable names as HF Python.
-        let messages_val: Vec<serde_json::Value> = messages.iter().map(|m| {
-            serde_json::json!({
-                "role": m.role.to_string(),
-                "content": m.content,
+        let messages_val: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "role": m.role.to_string(),
+                    "content": m.content,
+                })
             })
-        }).collect();
+            .collect();
 
         let ctx = serde_json::json!({
             "messages": messages_val,

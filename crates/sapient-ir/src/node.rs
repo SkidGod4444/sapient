@@ -41,8 +41,8 @@ pub enum AttrValue {
 pub enum Node {
     /// A compute operator consuming inputs and producing outputs.
     Operator {
-        id:     NodeId,
-        op:     OpType,
+        id: NodeId,
+        op: OpType,
         /// Names of input tensors/nodes in order.
         inputs: Vec<NodeId>,
         /// Number of output tensors this op produces.
@@ -59,23 +59,23 @@ pub enum Node {
 
     /// A constant tensor (model weights, biases, etc.).
     Constant {
-        id:    NodeId,
+        id: NodeId,
         value: Tensor,
-        name:  Option<String>,
+        name: Option<String>,
     },
 
     /// A graph input placeholder.
     Input {
-        id:    NodeId,
-        name:  String,
+        id: NodeId,
+        name: String,
         shape: Option<Shape>,
         dtype: Option<DType>,
     },
 
     /// A graph output marker.
     Output {
-        id:     NodeId,
-        name:   String,
+        id: NodeId,
+        name: String,
         source: NodeId,
     },
 }
@@ -84,10 +84,10 @@ impl Node {
     /// The unique identifier of this node.
     pub fn id(&self) -> NodeId {
         match self {
-            Node::Operator { id, .. }  => *id,
-            Node::Constant { id, .. }  => *id,
-            Node::Input    { id, .. }  => *id,
-            Node::Output   { id, .. }  => *id,
+            Node::Operator { id, .. } => *id,
+            Node::Constant { id, .. } => *id,
+            Node::Input { id, .. } => *id,
+            Node::Output { id, .. } => *id,
         }
     }
 
@@ -100,7 +100,7 @@ impl Node {
             Node::Constant { name, id, .. } => {
                 name.clone().unwrap_or_else(|| format!("const_{}", id.0))
             }
-            Node::Input { name, .. }  => name.clone(),
+            Node::Input { name, .. } => name.clone(),
             Node::Output { name, .. } => name.clone(),
         }
     }
@@ -110,8 +110,8 @@ impl Node {
         match self {
             Node::Operator { .. } => "operator",
             Node::Constant { .. } => "constant",
-            Node::Input    { .. } => "input",
-            Node::Output   { .. } => "output",
+            Node::Input { .. } => "input",
+            Node::Output { .. } => "output",
         }
     }
 
@@ -119,7 +119,7 @@ impl Node {
     pub fn input_ids(&self) -> &[NodeId] {
         match self {
             Node::Operator { inputs, .. } => inputs,
-            Node::Output   { .. }         => std::slice::from_ref(match self {
+            Node::Output { .. } => std::slice::from_ref(match self {
                 Node::Output { source, .. } => source,
                 _ => unreachable!(),
             }),

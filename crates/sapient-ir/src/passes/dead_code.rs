@@ -4,16 +4,18 @@ use std::collections::{HashSet, VecDeque};
 
 use tracing::debug;
 
-use sapient_core::error::Result;
 use crate::graph::Graph;
 use crate::node::{Node, NodeId};
 use crate::passes::Pass;
+use sapient_core::error::Result;
 
 #[derive(Debug)]
 pub struct DeadCodeEliminationPass;
 
 impl Pass for DeadCodeEliminationPass {
-    fn name(&self) -> &str { "dead-code-elimination" }
+    fn name(&self) -> &str {
+        "dead-code-elimination"
+    }
 
     fn run(&self, graph: &mut Graph) -> Result<()> {
         // BFS backward from all output nodes.
@@ -44,7 +46,10 @@ impl Pass for DeadCodeEliminationPass {
 
         let dead = before - live_nodes.len();
         if dead > 0 {
-            debug!(dead, "dead-code-elimination: removed {} unreachable node(s)", dead);
+            debug!(
+                dead,
+                "dead-code-elimination: removed {} unreachable node(s)", dead
+            );
 
             // Rebuild id_to_idx and node list.
             // SAFETY: we use a helper that reconstructs internal bookkeeping.
@@ -57,8 +62,8 @@ impl Pass for DeadCodeEliminationPass {
 
 /// Replace the graph's node list with `nodes`, rebuilding `id_to_idx` and edges.
 fn rebuild_graph(graph: &mut Graph, nodes: Vec<Node>) {
-    use std::collections::HashMap;
     use crate::graph::Edge;
+    use std::collections::HashMap;
 
     let mut id_to_idx = HashMap::new();
     for (i, n) in nodes.iter().enumerate() {

@@ -4,11 +4,11 @@
 
 pub mod constant_folding;
 pub mod dead_code;
-pub mod layout;
 pub mod fusion;
+pub mod layout;
 
-use sapient_core::error::Result;
 use crate::graph::Graph;
+use sapient_core::error::Result;
 
 // ── Pass trait ────────────────────────────────────────────────────────────────
 
@@ -53,9 +53,9 @@ impl PassManager {
     pub fn standard() -> Self {
         let mut pm = Self::new();
         pm.add(constant_folding::ConstantFoldingPass)
-          .add(dead_code::DeadCodeEliminationPass)
-          .add(layout::LayoutOptimizationPass)
-          .add(fusion::OperatorFusionPass);
+            .add(dead_code::DeadCodeEliminationPass)
+            .add(layout::LayoutOptimizationPass)
+            .add(fusion::OperatorFusionPass);
         pm
     }
 }

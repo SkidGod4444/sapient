@@ -32,7 +32,10 @@ pub struct StaticBatchScheduler {
 impl StaticBatchScheduler {
     pub fn new(batch_size: usize) -> Self {
         assert!(batch_size > 0, "batch_size must be > 0");
-        Self { batch_size, queue: Vec::new() }
+        Self {
+            batch_size,
+            queue: Vec::new(),
+        }
     }
 }
 
@@ -102,7 +105,9 @@ impl BatchScheduler for DynamicBatchScheduler {
 
     fn try_form_batch(&mut self) -> Option<Batch> {
         let should_emit = self.queue.len() >= self.max_batch_size
-            || self.window_start.map_or(false, |t| t.elapsed() >= self.max_wait);
+            || self
+                .window_start
+                .map_or(false, |t| t.elapsed() >= self.max_wait);
 
         if should_emit && !self.queue.is_empty() {
             let size = self.queue.len().min(self.max_batch_size);

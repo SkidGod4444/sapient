@@ -72,8 +72,16 @@ impl Shape {
         let len = a.len().max(b.len());
         let mut out = vec![0usize; len];
         for i in 0..len {
-            let ai = if i < len - a.len() { 1 } else { a[i - (len - a.len())] };
-            let bi = if i < len - b.len() { 1 } else { b[i - (len - b.len())] };
+            let ai = if i < len - a.len() {
+                1
+            } else {
+                a[i - (len - a.len())]
+            };
+            let bi = if i < len - b.len() {
+                1
+            } else {
+                b[i - (len - b.len())]
+            };
             if ai == bi {
                 out[i] = ai;
             } else if ai == 1 {
@@ -208,6 +216,6 @@ mod tests {
     #[test]
     fn flat_index() {
         let s = Shape::new([2, 3, 4]);
-        assert_eq!(s.flat_index(&[1, 2, 3]).unwrap(), 1 * 12 + 2 * 4 + 3);
+        assert_eq!(s.flat_index(&[1, 2, 3]).unwrap(), 12 + 8 + 3);
     }
 }

@@ -12,25 +12,18 @@ pub mod metrics;
 pub mod profiler;
 pub mod telemetry;
 
-pub use telemetry::{ConsoleTelemetry, NoOpTelemetry, Telemetry, TelemetryConfig};
 pub use profiler::{ChromeTracer, Span};
+pub use telemetry::{ConsoleTelemetry, NoOpTelemetry, Telemetry, TelemetryConfig};
 
 /// Initialise a global `tracing` subscriber (JSON or pretty).
 pub fn init_tracing(json: bool) {
     use tracing_subscriber::{fmt, EnvFilter};
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     if json {
-        fmt()
-            .with_env_filter(filter)
-            .json()
-            .init();
+        fmt().with_env_filter(filter).json().init();
     } else {
-        fmt()
-            .with_env_filter(filter)
-            .pretty()
-            .init();
+        fmt().with_env_filter(filter).pretty().init();
     }
 }

@@ -1,3 +1,5 @@
+#![allow(unused_imports, dead_code)]
+
 //! SAPIENT runtime — model loading and session management.
 
 pub mod model;

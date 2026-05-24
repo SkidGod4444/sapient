@@ -1,3 +1,10 @@
+#![allow(
+    unused_imports,
+    unused_variables,
+    clippy::implied_bounds_in_impls,
+    clippy::unnecessary_map_or
+)]
+
 //! SAPIENT batching scheduler and async executor.
 
 pub mod batcher;

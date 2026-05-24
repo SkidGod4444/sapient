@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! GGUF format parser and dequantization.
 //!
 //! GGUF (GPT-Generated Unified Format) is the binary format used by llama.cpp.
@@ -6,11 +8,11 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::Path;
 
-use sapient_core::{DType, Shape, Tensor};
 use sapient_core::error::{Result, SapientError};
+use sapient_core::{Shape, Tensor};
 use sapient_ir::graph::Graph;
 
 // ── GGUF Constants ────────────────────────────────────────────────────────────
@@ -22,8 +24,8 @@ const GGUF_VERSION: u32 = 3;
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GgmlType {
-    F32  = 0,
-    F16  = 1,
+    F32 = 0,
+    F16 = 1,
     Q4_0 = 2,
     Q4_1 = 3,
     Q5_0 = 6,
@@ -51,7 +53,7 @@ impl GgmlType {
 
     fn block_size(self) -> usize {
         match self {
-            Self::F32  | Self::F16 | Self::BF16 => 1,
+            Self::F32 | Self::F16 | Self::BF16 => 1,
             Self::Q4_0 => 32,
             Self::Q4_1 => 32,
             Self::Q5_0 => 32,
@@ -63,14 +65,14 @@ impl GgmlType {
 
     fn type_size(self) -> usize {
         match self {
-            Self::F32  => 4,
+            Self::F32 => 4,
             Self::F16 | Self::BF16 => 2,
-            Self::Q4_0 => 18,  // sizeof(block_q4_0): 2 (scale) + 16 (nibbles)
-            Self::Q4_1 => 20,  // 2+2+16
-            Self::Q5_0 => 22,  // 2+4+16
-            Self::Q5_1 => 24,  // 2+2+4+16
-            Self::Q8_0 => 34,  // 2+32
-            Self::Q8_1 => 36,  // 2+2+32
+            Self::Q4_0 => 18, // sizeof(block_q4_0): 2 (scale) + 16 (nibbles)
+            Self::Q4_1 => 20, // 2+2+16
+            Self::Q5_0 => 22, // 2+4+16
+            Self::Q5_1 => 24, // 2+2+4+16
+            Self::Q8_0 => 34, // 2+32
+            Self::Q8_1 => 36, // 2+2+32
         }
     }
 }
@@ -78,9 +80,9 @@ impl GgmlType {
 // ── Tensor info ───────────────────────────────────────────────────────────────
 
 struct GgufTensorInfo {
-    name:   String,
-    dims:   Vec<usize>,
-    kind:   GgmlType,
+    name: String,
+    dims: Vec<usize>,
+    kind: GgmlType,
     offset: u64,
 }
 
@@ -99,8 +101,12 @@ fn dequantize_q4_0(data: &[u8], numel: usize) -> Vec<f32> {
             let lo = (byte & 0x0f) as i8 - 8;
             let hi = ((byte >> 4) & 0x0f) as i8 - 8;
             let idx = b * block_size + i * 2;
-            if idx < numel     { out[idx]     = lo as f32 * scale; }
-            if idx + 1 < numel { out[idx + 1] = hi as f32 * scale; }
+            if idx < numel {
+                out[idx] = lo as f32 * scale;
+            }
+            if idx + 1 < numel {
+                out[idx + 1] = hi as f32 * scale;
+            }
         }
     }
     out
@@ -148,9 +154,9 @@ impl GgufLoader {
         if magic != GGUF_MAGIC {
             return Err(SapientError::GgufParseError("bad magic".into()));
         }
-        let version = read_u32(&mut cursor)?;
+        let _version = read_u32(&mut cursor)?;
         let tensor_count = read_u64(&mut cursor)? as usize;
-        let kv_count     = read_u64(&mut cursor)? as usize;
+        let kv_count = read_u64(&mut cursor)? as usize;
 
         // Skip key-value metadata.
         for _ in 0..kv_count {
@@ -167,10 +173,16 @@ impl GgufLoader {
                 dims.push(read_u64(&mut cursor)? as usize);
             }
             let kind_raw = read_u32(&mut cursor)?;
-            let kind = GgmlType::from_u32(kind_raw)
-                .ok_or_else(|| SapientError::GgufParseError(format!("unknown ggml type {kind_raw}")))?;
+            let kind = GgmlType::from_u32(kind_raw).ok_or_else(|| {
+                SapientError::GgufParseError(format!("unknown ggml type {kind_raw}"))
+            })?;
             let offset = read_u64(&mut cursor)?;
-            tensor_infos.push(GgufTensorInfo { name, dims, kind, offset });
+            tensor_infos.push(GgufTensorInfo {
+                name,
+                dims,
+                kind,
+                offset,
+            });
         }
 
         // Alignment is at the end of the header section.
@@ -184,18 +196,14 @@ impl GgufLoader {
             let start = data_start + info.offset as usize;
 
             let f32_data: Vec<f32> = match info.kind {
-                GgmlType::F32 => {
-                    bytes[start..start + numel * 4]
-                        .chunks_exact(4)
-                        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-                        .collect()
-                }
-                GgmlType::F16 => {
-                    bytes[start..start + numel * 2]
-                        .chunks_exact(2)
-                        .map(|c| f16_to_f32(u16::from_le_bytes(c.try_into().unwrap())))
-                        .collect()
-                }
+                GgmlType::F32 => bytes[start..start + numel * 4]
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                    .collect(),
+                GgmlType::F16 => bytes[start..start + numel * 2]
+                    .chunks_exact(2)
+                    .map(|c| f16_to_f32(u16::from_le_bytes(c.try_into().unwrap())))
+                    .collect(),
                 GgmlType::Q4_0 => {
                     let blocks = numel / 32;
                     dequantize_q4_0(&bytes[start..start + blocks * 18], numel)
@@ -239,20 +247,30 @@ impl GgufLoader {
         }
         let _version = read_u32(&mut cursor)?;
         let tensor_count = read_u64(&mut cursor)? as usize;
-        let kv_count     = read_u64(&mut cursor)? as usize;
-        for _ in 0..kv_count { skip_kv(&mut cursor, bytes)?; }
+        let kv_count = read_u64(&mut cursor)? as usize;
+        for _ in 0..kv_count {
+            skip_kv(&mut cursor, bytes)?;
+        }
 
         let mut tensor_infos = Vec::with_capacity(tensor_count);
         for _ in 0..tensor_count {
             let name = read_gguf_string(&mut cursor)?;
             let n_dims = read_u32(&mut cursor)? as usize;
             let mut dims = Vec::with_capacity(n_dims);
-            for _ in 0..n_dims { dims.push(read_u64(&mut cursor)? as usize); }
+            for _ in 0..n_dims {
+                dims.push(read_u64(&mut cursor)? as usize);
+            }
             let kind_raw = read_u32(&mut cursor)?;
-            let kind = GgmlType::from_u32(kind_raw)
-                .ok_or_else(|| SapientError::GgufParseError(format!("unknown ggml type {kind_raw}")))?;
+            let kind = GgmlType::from_u32(kind_raw).ok_or_else(|| {
+                SapientError::GgufParseError(format!("unknown ggml type {kind_raw}"))
+            })?;
             let offset = read_u64(&mut cursor)?;
-            tensor_infos.push(GgufTensorInfo { name, dims, kind, offset });
+            tensor_infos.push(GgufTensorInfo {
+                name,
+                dims,
+                kind,
+                offset,
+            });
         }
         let data_start = cursor.position() as usize;
 
@@ -261,15 +279,23 @@ impl GgufLoader {
             let numel: usize = info.dims.iter().product::<usize>().max(1);
             let start = data_start + info.offset as usize;
             let f32_data: Vec<f32> = match info.kind {
-                GgmlType::F32 => bytes[start..start + numel * 4].chunks_exact(4)
-                    .map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect(),
-                GgmlType::F16 => bytes[start..start + numel * 2].chunks_exact(2)
-                    .map(|c| f16_to_f32(u16::from_le_bytes(c.try_into().unwrap()))).collect(),
-                GgmlType::Q4_0 => dequantize_q4_0(&bytes[start..start + (numel/32) * 18], numel),
-                GgmlType::Q8_0 => dequantize_q8_0(&bytes[start..start + (numel/32) * 34], numel),
+                GgmlType::F32 => bytes[start..start + numel * 4]
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                    .collect(),
+                GgmlType::F16 => bytes[start..start + numel * 2]
+                    .chunks_exact(2)
+                    .map(|c| f16_to_f32(u16::from_le_bytes(c.try_into().unwrap())))
+                    .collect(),
+                GgmlType::Q4_0 => dequantize_q4_0(&bytes[start..start + (numel / 32) * 18], numel),
+                GgmlType::Q8_0 => dequantize_q8_0(&bytes[start..start + (numel / 32) * 34], numel),
                 _ => vec![0.0f32; numel],
             };
-            let shape = if info.dims.is_empty() { Shape::new([1]) } else { Shape::new(info.dims.clone()) };
+            let shape = if info.dims.is_empty() {
+                Shape::new([1])
+            } else {
+                Shape::new(info.dims.clone())
+            };
             let tensor = Tensor::from_f32(&f32_data, shape)
                 .map_err(|e| SapientError::GgufParseError(e.to_string()))?;
             map.insert(info.name.clone(), tensor);
@@ -282,20 +308,23 @@ impl GgufLoader {
 
 fn read_u32(c: &mut std::io::Cursor<&[u8]>) -> Result<u32> {
     let mut buf = [0u8; 4];
-    c.read_exact(&mut buf).map_err(|e| SapientError::GgufParseError(e.to_string()))?;
+    c.read_exact(&mut buf)
+        .map_err(|e| SapientError::GgufParseError(e.to_string()))?;
     Ok(u32::from_le_bytes(buf))
 }
 
 fn read_u64(c: &mut std::io::Cursor<&[u8]>) -> Result<u64> {
     let mut buf = [0u8; 8];
-    c.read_exact(&mut buf).map_err(|e| SapientError::GgufParseError(e.to_string()))?;
+    c.read_exact(&mut buf)
+        .map_err(|e| SapientError::GgufParseError(e.to_string()))?;
     Ok(u64::from_le_bytes(buf))
 }
 
 fn read_gguf_string(c: &mut std::io::Cursor<&[u8]>) -> Result<String> {
     let len = read_u64(c)? as usize;
     let mut buf = vec![0u8; len];
-    c.read_exact(&mut buf).map_err(|e| SapientError::GgufParseError(e.to_string()))?;
+    c.read_exact(&mut buf)
+        .map_err(|e| SapientError::GgufParseError(e.to_string()))?;
     String::from_utf8(buf).map_err(|e| SapientError::GgufParseError(e.to_string()))
 }
 
@@ -306,25 +335,50 @@ fn skip_kv(c: &mut std::io::Cursor<&[u8]>, _bytes: &[u8]) -> Result<()> {
     let vtype = read_u32(c)?;
     // Skip value based on type.
     match vtype {
-        0 => { let _ = read_u8(c)?; }   // UINT8
-        1 => { let _ = read_i8(c)?; }   // INT8
-        2 => { let _ = read_u16(c)?; }  // UINT16
-        3 => { let _ = read_i16(c)?; }  // INT16
-        4 => { let _ = read_u32(c)?; }  // UINT32
-        5 => { let _ = read_i32(c)?; }  // INT32
-        6 => { let _ = read_f32(c)?; }  // FLOAT32
-        7 => { let _ = read_u8(c)?; }   // BOOL (1 byte)
-        8 => { let _ = read_gguf_string(c)?; } // STRING
-        9 => {                           // ARRAY
+        0 => {
+            let _ = read_u8(c)?;
+        } // UINT8
+        1 => {
+            let _ = read_i8(c)?;
+        } // INT8
+        2 => {
+            let _ = read_u16(c)?;
+        } // UINT16
+        3 => {
+            let _ = read_i16(c)?;
+        } // INT16
+        4 => {
+            let _ = read_u32(c)?;
+        } // UINT32
+        5 => {
+            let _ = read_i32(c)?;
+        } // INT32
+        6 => {
+            let _ = read_f32(c)?;
+        } // FLOAT32
+        7 => {
+            let _ = read_u8(c)?;
+        } // BOOL (1 byte)
+        8 => {
+            let _ = read_gguf_string(c)?;
+        } // STRING
+        9 => {
+            // ARRAY
             let item_type = read_u32(c)?;
             let count = read_u64(c)? as usize;
             for _ in 0..count {
                 skip_value(c, item_type)?;
             }
         }
-        10 => { let _ = read_u64(c)?; } // UINT64
-        11 => { let _ = read_i64(c)?; } // INT64
-        12 => { let _ = read_f64(c)?; } // FLOAT64
+        10 => {
+            let _ = read_u64(c)?;
+        } // UINT64
+        11 => {
+            let _ = read_i64(c)?;
+        } // INT64
+        12 => {
+            let _ = read_f64(c)?;
+        } // FLOAT64
         _ => {}
     }
     Ok(())
@@ -332,11 +386,21 @@ fn skip_kv(c: &mut std::io::Cursor<&[u8]>, _bytes: &[u8]) -> Result<()> {
 
 fn skip_value(c: &mut std::io::Cursor<&[u8]>, vtype: u32) -> Result<()> {
     match vtype {
-        0 | 1 | 7 => { read_u8(c)?; }
-        2 | 3      => { read_u16(c)?; }
-        4 | 5 | 6  => { read_u32(c)?; }
-        8          => { read_gguf_string(c)?; }
-        10 | 11 | 12 => { read_u64(c)?; }
+        0 | 1 | 7 => {
+            read_u8(c)?;
+        }
+        2 | 3 => {
+            read_u16(c)?;
+        }
+        4..=6 => {
+            read_u32(c)?;
+        }
+        8 => {
+            read_gguf_string(c)?;
+        }
+        10..=12 => {
+            read_u64(c)?;
+        }
         _ => {}
     }
     Ok(())
@@ -344,33 +408,43 @@ fn skip_value(c: &mut std::io::Cursor<&[u8]>, vtype: u32) -> Result<()> {
 
 fn read_u8(c: &mut std::io::Cursor<&[u8]>) -> Result<u8> {
     let mut b = [0u8; 1];
-    c.read_exact(&mut b).map_err(|e| SapientError::GgufParseError(e.to_string()))?;
+    c.read_exact(&mut b)
+        .map_err(|e| SapientError::GgufParseError(e.to_string()))?;
     Ok(b[0])
 }
-fn read_i8(c: &mut std::io::Cursor<&[u8]>) -> Result<i8> { Ok(read_u8(c)? as i8) }
+fn read_i8(c: &mut std::io::Cursor<&[u8]>) -> Result<i8> {
+    Ok(read_u8(c)? as i8)
+}
 fn read_u16(c: &mut std::io::Cursor<&[u8]>) -> Result<u16> {
     let mut b = [0u8; 2];
-    c.read_exact(&mut b).map_err(|e| SapientError::GgufParseError(e.to_string()))?;
+    c.read_exact(&mut b)
+        .map_err(|e| SapientError::GgufParseError(e.to_string()))?;
     Ok(u16::from_le_bytes(b))
 }
-fn read_i16(c: &mut std::io::Cursor<&[u8]>) -> Result<i16> { Ok(read_u16(c)? as i16) }
+fn read_i16(c: &mut std::io::Cursor<&[u8]>) -> Result<i16> {
+    Ok(read_u16(c)? as i16)
+}
 fn read_i32(c: &mut std::io::Cursor<&[u8]>) -> Result<i32> {
     let mut b = [0u8; 4];
-    c.read_exact(&mut b).map_err(|e| SapientError::GgufParseError(e.to_string()))?;
+    c.read_exact(&mut b)
+        .map_err(|e| SapientError::GgufParseError(e.to_string()))?;
     Ok(i32::from_le_bytes(b))
 }
 fn read_f32(c: &mut std::io::Cursor<&[u8]>) -> Result<f32> {
     let mut b = [0u8; 4];
-    c.read_exact(&mut b).map_err(|e| SapientError::GgufParseError(e.to_string()))?;
+    c.read_exact(&mut b)
+        .map_err(|e| SapientError::GgufParseError(e.to_string()))?;
     Ok(f32::from_le_bytes(b))
 }
 fn read_i64(c: &mut std::io::Cursor<&[u8]>) -> Result<i64> {
     let mut b = [0u8; 8];
-    c.read_exact(&mut b).map_err(|e| SapientError::GgufParseError(e.to_string()))?;
+    c.read_exact(&mut b)
+        .map_err(|e| SapientError::GgufParseError(e.to_string()))?;
     Ok(i64::from_le_bytes(b))
 }
 fn read_f64(c: &mut std::io::Cursor<&[u8]>) -> Result<f64> {
     let mut b = [0u8; 8];
-    c.read_exact(&mut b).map_err(|e| SapientError::GgufParseError(e.to_string()))?;
+    c.read_exact(&mut b)
+        .map_err(|e| SapientError::GgufParseError(e.to_string()))?;
     Ok(f64::from_le_bytes(b))
 }

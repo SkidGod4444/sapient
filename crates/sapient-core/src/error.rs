@@ -19,10 +19,7 @@ pub enum SapientError {
     TypeMismatch { expected: String, got: String },
 
     #[error("Incompatible shapes for broadcasting: {lhs:?} and {rhs:?}")]
-    BroadcastError {
-        lhs: Vec<usize>,
-        rhs: Vec<usize>,
-    },
+    BroadcastError { lhs: Vec<usize>, rhs: Vec<usize> },
 
     // ── Graph / IR errors ────────────────────────────────────────────────────
     #[error("Graph contains a cycle — execution is impossible")]

@@ -1,10 +1,8 @@
 //! Criterion benchmarks for CPU ops.
 
-use std::collections::HashMap;
-
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use sapient_core::{DType, Tensor};
-use sapient_backends_cpu::kernels::{matmul, softmax, layernorm};
+use sapient_backends_cpu::kernels::{layernorm, matmul, softmax};
+use sapient_core::Tensor;
 
 fn bench_matmul(c: &mut Criterion) {
     let mut group = c.benchmark_group("matmul");
@@ -12,9 +10,7 @@ fn bench_matmul(c: &mut Criterion) {
         let a = Tensor::from_f32(&vec![1.0f32; size * size], vec![size, size]).unwrap();
         let b = Tensor::from_f32(&vec![1.0f32; size * size], vec![size, size]).unwrap();
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |bencher, _| {
-            bencher.iter(|| {
-                black_box(matmul::matmul(&a, &b).unwrap())
-            });
+            bencher.iter(|| black_box(matmul::matmul(&a, &b).unwrap()));
         });
     }
     group.finish();
@@ -24,11 +20,13 @@ fn bench_softmax(c: &mut Criterion) {
     let mut group = c.benchmark_group("softmax");
     for seq_len in [128usize, 512, 2048] {
         let x = Tensor::from_f32(&vec![0.1f32; seq_len], vec![1, seq_len]).unwrap();
-        group.bench_with_input(BenchmarkId::from_parameter(seq_len), &seq_len, |bencher, _| {
-            bencher.iter(|| {
-                black_box(softmax::softmax(&x, 1).unwrap())
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::from_parameter(seq_len),
+            &seq_len,
+            |bencher, _| {
+                bencher.iter(|| black_box(softmax::softmax(&x, 1).unwrap()));
+            },
+        );
     }
     group.finish();
 }
@@ -39,11 +37,15 @@ fn bench_layernorm(c: &mut Criterion) {
         let x = Tensor::from_f32(&vec![0.5f32; 8 * hidden], vec![8, hidden]).unwrap();
         let w = Tensor::from_f32(&vec![1.0f32; hidden], vec![hidden]).unwrap();
         let b = Tensor::from_f32(&vec![0.0f32; hidden], vec![hidden]).unwrap();
-        group.bench_with_input(BenchmarkId::from_parameter(hidden), &hidden, |bencher, _| {
-            bencher.iter(|| {
-                black_box(layernorm::layer_norm(&x, Some(&w), Some(&b), -1, 1e-5).unwrap())
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::from_parameter(hidden),
+            &hidden,
+            |bencher, _| {
+                bencher.iter(|| {
+                    black_box(layernorm::layer_norm(&x, Some(&w), Some(&b), -1, 1e-5).unwrap())
+                });
+            },
+        );
     }
     group.finish();
 }
