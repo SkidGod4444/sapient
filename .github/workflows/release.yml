@@ -89,15 +89,13 @@ jobs:
       # ── Build ──────────────────────────────────────────────────────────────
       - name: Build (native)
         if: matrix.cross != true
-        run: |
-          cargo build --release --bin ${{ env.BINARY_NAME }} \
-            --target ${{ matrix.target }}
+        shell: bash
+        run: cargo build --release --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }}
 
       - name: Build (cross)
         if: matrix.cross == true
-        run: |
-          cross build --release --bin ${{ env.BINARY_NAME }} \
-            --target ${{ matrix.target }}
+        shell: bash
+        run: cross build --release --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }}
 
       # ── Strip binary (reduces size ~50-70%) ───────────────────────────────
       - name: Strip binary (Linux/macOS)
@@ -128,7 +126,11 @@ jobs:
       - name: Generate SHA256 checksum (Linux/macOS)
         if: runner.os != 'Windows'
         run: |
-          sha256sum "${{ env.ARCHIVE }}" > "${{ env.ARCHIVE }}.sha256"
+          if command -v sha256sum > /dev/null; then
+            sha256sum "${{ env.ARCHIVE }}" > "${{ env.ARCHIVE }}.sha256"
+          else
+            shasum -a 256 "${{ env.ARCHIVE }}" | awk '{print $1, $2}' > "${{ env.ARCHIVE }}.sha256"
+          fi
           cat "${{ env.ARCHIVE }}.sha256"
 
       - name: Generate SHA256 checksum (Windows)
