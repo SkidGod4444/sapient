@@ -24,19 +24,21 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
-  # ── Tests on macOS (arm64 + x86_64) ─────────────────────────────────────────
+  # ── Tests on macOS (arm64 + x86_64 cross-compile) ─────────────────────────────
   test-macos:
     name: Test (macOS)
     strategy:
       matrix:
-        os: [macos-14, macos-13]   # arm64 and x86_64
-    runs-on: ${{ matrix.os }}
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --workspace --target ${{ matrix.target }}
 
   # ── Build on Windows x86_64 ──────────────────────────────────────────────────
   test-windows:
