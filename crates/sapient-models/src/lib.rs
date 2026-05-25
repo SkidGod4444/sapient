@@ -16,6 +16,7 @@
 
 pub mod architectures;
 pub mod forward;
+pub mod gguf_weights;
 pub mod registry;
 pub mod weights;
 

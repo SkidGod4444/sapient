@@ -11,8 +11,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::debug;
 
 use sapient_hub::model_info::{ArchType, ModelInfo};
-use sapient_hub::resolver::{ModelFiles, WeightFormat};
-use sapient_hub::{HubClient, LoadOptions as HubOptions};
+use sapient_hub::resolver::ModelFiles;
+use sapient_hub::{HubClient, LoadOptions as HubOptions, tokenizer_fallback_model};
 use sapient_models::ForwardEngine;
 use sapient_tokenizers::{
     chat::{builtin, ChatMessage, ChatTemplate},
@@ -94,7 +94,7 @@ impl Pipeline {
             .await
             .with_context(|| format!("Failed to download model '{model_id}'"))?;
 
-        ensure_safetensors(&model_files)?;
+        ensure_weights_present(&model_files)?;
 
         let model_info = ModelInfo::from_config_file(&model_files.config_path)
             .context("Failed to parse config.json")?;
@@ -113,6 +113,16 @@ impl Pipeline {
                 SapientTokenizer::from_file(tok_path, tok_opts)
                     .context("Failed to load tokenizer")?,
             )
+        } else if let Some(fallback_id) = tokenizer_fallback_model(model_id) {
+            debug!("No local tokenizer — loading from fallback Hub model '{fallback_id}'");
+            Arc::new(
+                SapientTokenizer::from_pretrained(fallback_id).with_context(|| {
+                    format!(
+                        "Failed to load tokenizer from fallback model '{fallback_id}' \
+                         (GGUF repos often omit tokenizer files)"
+                    )
+                })?,
+            )
         } else {
             Arc::new(
                 SapientTokenizer::from_pretrained(model_id)
@@ -124,9 +134,9 @@ impl Pipeline {
             .tokenizer_config_path
             .as_ref()
             .and_then(|p| ChatTemplate::from_tokenizer_config(p).ok())
-            .or_else(|| Some(builtin_template_for(&model_info.arch)));
+            .or_else(|| Some(builtin_template_for(&model_info.arch, model_id, &model_info.model_type)));
 
-        let engine = ForwardEngine::from_pretrained(model_info.clone(), &model_files.weight_paths)
+        let engine = ForwardEngine::from_weight_paths(model_info.clone(), &model_files.weight_paths)
             .context("Failed to initialize inference engine")?;
 
         let mut config = opts.generation;
@@ -224,7 +234,7 @@ impl Pipeline {
         let weight_paths = self.weight_paths.clone();
 
         tokio::task::spawn_blocking(move || {
-            let mut engine = match ForwardEngine::from_pretrained(model_info, &weight_paths) {
+            let mut engine = match ForwardEngine::from_weight_paths(model_info, &weight_paths) {
                 Ok(e) => e,
                 Err(e) => {
                     let _ = tx.blocking_send(format!("Error: {e}"));
@@ -242,8 +252,7 @@ impl Pipeline {
                 } else {
                     vec![*all_tokens.last().unwrap()]
                 };
-                let use_cache = step > 0;
-                let logits = match engine.forward_logits(&chunk, use_cache) {
+                let logits = match engine.forward_logits(&chunk, true) {
                     Ok(v) => v,
                     Err(e) => {
                         let _ = tx.blocking_send(format!("Error: {e}"));
@@ -311,7 +320,8 @@ impl Pipeline {
 
         engine.reset_cache();
 
-        let logits = engine.forward_logits(&all_tokens, false)?;
+        // Prefill must use the KV cache so decode steps see correct positions and context.
+        let logits = engine.forward_logits(&all_tokens, true)?;
         let mut next = sampler.sample(&logits, &all_tokens)?;
         generated.push(next);
         all_tokens.push(next);
@@ -357,24 +367,26 @@ impl Pipeline {
     }
 }
 
-fn ensure_safetensors(files: &ModelFiles) -> Result<()> {
+fn ensure_weights_present(files: &ModelFiles) -> Result<()> {
     if files.weight_paths.is_empty() {
         anyhow::bail!("No weight files found for this model");
-    }
-    if !matches!(
-        files.format(),
-        WeightFormat::Safetensors | WeightFormat::PyTorchBin
-    ) {
-        anyhow::bail!(
-            "Native inference requires safetensors weights. \
-             Re-download with: sapient pull <model> (without GGUF-only repos)"
-        );
     }
     Ok(())
 }
 
-fn builtin_template_for(arch: &ArchType) -> ChatTemplate {
+fn builtin_template_for(arch: &ArchType, model_id: &str, model_type: &str) -> ChatTemplate {
+    let id = model_id.to_ascii_lowercase();
+    let mt = model_type.to_ascii_lowercase();
     match arch {
+        ArchType::Llama if id.contains("tinyllama") => {
+            ChatTemplate::from_template(builtin::ZEPHYR)
+        }
+        ArchType::Llama if id.contains("llama-2")
+            || id.contains("llama2")
+            || (mt.contains("llama") && !id.contains("llama-3") && !id.contains("llama3")) =>
+        {
+            ChatTemplate::from_template(builtin::LLAMA2)
+        }
         ArchType::Llama => ChatTemplate::from_template(builtin::LLAMA3),
         ArchType::Phi => ChatTemplate::from_template(builtin::CHATML),
         ArchType::Gemma => ChatTemplate::from_template(builtin::GEMMA),

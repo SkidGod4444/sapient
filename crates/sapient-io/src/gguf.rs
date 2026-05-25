@@ -22,6 +22,7 @@ const GGUF_VERSION: u32 = 3;
 
 // GGMLType enum (quantized types we support).
 #[repr(u32)]
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GgmlType {
     F32 = 0,
@@ -32,8 +33,15 @@ enum GgmlType {
     Q5_1 = 7,
     Q8_0 = 8,
     Q8_1 = 9,
+    Q2_K = 10,
+    Q3_K = 11,
+    Q4_K = 12,
+    Q5_K = 13,
+    Q6_K = 14,
     BF16 = 30,
 }
+
+const QK_K: usize = 256;
 
 impl GgmlType {
     fn from_u32(v: u32) -> Option<Self> {
@@ -46,6 +54,11 @@ impl GgmlType {
             7 => Some(Self::Q5_1),
             8 => Some(Self::Q8_0),
             9 => Some(Self::Q8_1),
+            10 => Some(Self::Q2_K),
+            11 => Some(Self::Q3_K),
+            12 => Some(Self::Q4_K),
+            13 => Some(Self::Q5_K),
+            14 => Some(Self::Q6_K),
             30 => Some(Self::BF16),
             _ => None,
         }
@@ -54,12 +67,8 @@ impl GgmlType {
     fn block_size(self) -> usize {
         match self {
             Self::F32 | Self::F16 | Self::BF16 => 1,
-            Self::Q4_0 => 32,
-            Self::Q4_1 => 32,
-            Self::Q5_0 => 32,
-            Self::Q5_1 => 32,
-            Self::Q8_0 => 32,
-            Self::Q8_1 => 32,
+            Self::Q4_0 | Self::Q4_1 | Self::Q5_0 | Self::Q5_1 | Self::Q8_0 | Self::Q8_1 => 32,
+            Self::Q2_K | Self::Q3_K | Self::Q4_K | Self::Q5_K | Self::Q6_K => QK_K,
         }
     }
 
@@ -67,12 +76,17 @@ impl GgmlType {
         match self {
             Self::F32 => 4,
             Self::F16 | Self::BF16 => 2,
-            Self::Q4_0 => 18, // sizeof(block_q4_0): 2 (scale) + 16 (nibbles)
-            Self::Q4_1 => 20, // 2+2+16
-            Self::Q5_0 => 22, // 2+4+16
-            Self::Q5_1 => 24, // 2+2+4+16
-            Self::Q8_0 => 34, // 2+32
-            Self::Q8_1 => 36, // 2+2+32
+            Self::Q4_0 => 18,
+            Self::Q4_1 => 20,
+            Self::Q5_0 => 22,
+            Self::Q5_1 => 24,
+            Self::Q8_0 => 34,
+            Self::Q8_1 => 36,
+            Self::Q2_K => 84,
+            Self::Q3_K => 110,
+            Self::Q4_K => 144,
+            Self::Q5_K => 176,
+            Self::Q6_K => 210,
         }
     }
 }
@@ -128,6 +142,112 @@ fn dequantize_q8_0(data: &[u8], numel: usize) -> Vec<f32> {
         }
     }
     out
+}
+
+fn dequantize_q5_0(data: &[u8], numel: usize) -> Vec<f32> {
+    let block_size = 32usize;
+    let blocks = numel / block_size;
+    let mut out = vec![0.0f32; numel];
+    for b in 0..blocks {
+        let base = b * 22;
+        let scale = f16_to_f32(u16::from_le_bytes([data[base], data[base + 1]]));
+        let qh = u32::from_le_bytes([
+            data[base + 2],
+            data[base + 3],
+            data[base + 4],
+            data[base + 5],
+        ]);
+        for j in 0..16 {
+            let byte = data[base + 6 + j];
+            let xh_0 = ((qh >> j) << 4) & 0x10;
+            let xh_1 = (qh >> (j + 12)) & 0x10;
+            let x0 = ((byte & 0x0F) as u32 | xh_0) as i32 - 16;
+            let x1 = ((byte >> 4) as u32 | xh_1) as i32 - 16;
+            let idx = b * block_size + j;
+            out[idx] = x0 as f32 * scale;
+            out[idx + 16] = x1 as f32 * scale;
+        }
+    }
+    out
+}
+
+fn get_scale_min_k4(j: usize, q: &[u8]) -> (u8, u8) {
+    if j < 4 {
+        (q[j] & 63, q[j + 4] & 63)
+    } else {
+        let d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+        let m = (q[j + 4] >> 4) | ((q[j] >> 6) << 4);
+        (d, m)
+    }
+}
+
+fn dequantize_q4_k(data: &[u8], numel: usize) -> Vec<f32> {
+    let blocks = numel / QK_K;
+    let mut out = vec![0.0f32; numel];
+    let mut out_idx = 0usize;
+    for b in 0..blocks {
+        let base = b * 144;
+        let d = f16_to_f32(u16::from_le_bytes([data[base], data[base + 1]]));
+        let min = f16_to_f32(u16::from_le_bytes([data[base + 2], data[base + 3]]));
+        let scales = &data[base + 4..base + 16];
+        let qs = &data[base + 16..base + 144];
+        let mut q_off = 0usize;
+        let mut is = 0usize;
+        for _ in 0..(QK_K / 64) {
+            let (sc, m) = get_scale_min_k4(is, scales);
+            let d1 = d * sc as f32;
+            let m1 = min * m as f32;
+            let (sc, m) = get_scale_min_k4(is + 1, scales);
+            let d2 = d * sc as f32;
+            let m2 = min * m as f32;
+            for l in 0..32 {
+                out[out_idx] = d1 * (qs[q_off + l] & 0xF) as f32 - m1;
+                out_idx += 1;
+            }
+            for l in 0..32 {
+                out[out_idx] = d2 * (qs[q_off + l] >> 4) as f32 - m2;
+                out_idx += 1;
+            }
+            q_off += 32;
+            is += 2;
+        }
+    }
+    out
+}
+
+fn dequantize_tensor(kind: GgmlType, bytes: &[u8], numel: usize) -> Result<Vec<f32>> {
+    let f32_data = match kind {
+        GgmlType::F32 => bytes[..numel * 4]
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect(),
+        GgmlType::F16 => bytes[..numel * 2]
+            .chunks_exact(2)
+            .map(|c| f16_to_f32(u16::from_le_bytes(c.try_into().unwrap())))
+            .collect(),
+        GgmlType::Q4_0 => dequantize_q4_0(bytes, numel),
+        GgmlType::Q5_0 => dequantize_q5_0(bytes, numel),
+        GgmlType::Q8_0 => dequantize_q8_0(bytes, numel),
+        GgmlType::Q4_K => dequantize_q4_k(bytes, numel),
+        other => {
+            return Err(SapientError::GgufParseError(format!(
+                "unsupported GGUF quantization type {other:?} — \
+                 prefer Q8_0, Q4_0, or Q4_K_M weights from the Hub"
+            )));
+        }
+    };
+    Ok(f32_data)
+}
+
+fn tensor_byte_len(kind: GgmlType, numel: usize) -> usize {
+    if matches!(
+        kind,
+        GgmlType::F32 | GgmlType::F16 | GgmlType::BF16
+    ) {
+        numel * kind.type_size()
+    } else {
+        (numel / kind.block_size()) * kind.type_size()
+    }
 }
 
 fn f16_to_f32(bits: u16) -> f32 {
@@ -194,26 +314,8 @@ impl GgufLoader {
         for info in &tensor_infos {
             let numel: usize = info.dims.iter().product::<usize>().max(1);
             let start = data_start + info.offset as usize;
-
-            let f32_data: Vec<f32> = match info.kind {
-                GgmlType::F32 => bytes[start..start + numel * 4]
-                    .chunks_exact(4)
-                    .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-                    .collect(),
-                GgmlType::F16 => bytes[start..start + numel * 2]
-                    .chunks_exact(2)
-                    .map(|c| f16_to_f32(u16::from_le_bytes(c.try_into().unwrap())))
-                    .collect(),
-                GgmlType::Q4_0 => {
-                    let blocks = numel / 32;
-                    dequantize_q4_0(&bytes[start..start + blocks * 18], numel)
-                }
-                GgmlType::Q8_0 => {
-                    let blocks = numel / 32;
-                    dequantize_q8_0(&bytes[start..start + blocks * 34], numel)
-                }
-                _ => vec![0.0f32; numel], // unsupported → zero (future work)
-            };
+            let byte_len = tensor_byte_len(info.kind, numel);
+            let f32_data = dequantize_tensor(info.kind, &bytes[start..start + byte_len], numel)?;
 
             let shape = if info.dims.is_empty() {
                 Shape::new([1])
@@ -278,19 +380,8 @@ impl GgufLoader {
         for info in &tensor_infos {
             let numel: usize = info.dims.iter().product::<usize>().max(1);
             let start = data_start + info.offset as usize;
-            let f32_data: Vec<f32> = match info.kind {
-                GgmlType::F32 => bytes[start..start + numel * 4]
-                    .chunks_exact(4)
-                    .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-                    .collect(),
-                GgmlType::F16 => bytes[start..start + numel * 2]
-                    .chunks_exact(2)
-                    .map(|c| f16_to_f32(u16::from_le_bytes(c.try_into().unwrap())))
-                    .collect(),
-                GgmlType::Q4_0 => dequantize_q4_0(&bytes[start..start + (numel / 32) * 18], numel),
-                GgmlType::Q8_0 => dequantize_q8_0(&bytes[start..start + (numel / 32) * 34], numel),
-                _ => vec![0.0f32; numel],
-            };
+            let byte_len = tensor_byte_len(info.kind, numel);
+            let f32_data = dequantize_tensor(info.kind, &bytes[start..start + byte_len], numel)?;
             let shape = if info.dims.is_empty() {
                 Shape::new([1])
             } else {

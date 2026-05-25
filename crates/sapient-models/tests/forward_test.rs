@@ -105,7 +105,31 @@ fn tiny_llama_decode_step_uses_cache() {
     let weights = build_tiny_weights(&info);
     let mut fwd = LlamaForward::from_weights(info, weights).unwrap();
 
-    let _ = fwd.forward_logits(&[1, 2, 3], false).unwrap();
+    // Prefill must populate KV cache (use_cache=true), otherwise decode is wrong.
+    let _ = fwd.forward_logits(&[1, 2, 3], true).unwrap();
     let logits = fwd.forward_logits(&[4], true).unwrap();
     assert_eq!(logits.len(), 64);
+}
+
+#[test]
+fn prefill_with_cache_matches_full_forward() {
+    let info = ModelInfo::from_json_str(TINY).unwrap();
+    let weights = build_tiny_weights(&info);
+    let prompt = [1u32, 2, 3, 4];
+
+    let mut cached = LlamaForward::from_weights(info.clone(), weights.clone()).unwrap();
+    cached.reset_cache();
+    let _ = cached.forward_logits(&prompt, true).unwrap();
+    let cached_logits = cached.forward_logits(&[5], true).unwrap();
+
+    let mut full = LlamaForward::from_weights(info, weights).unwrap();
+    full.reset_cache();
+    let full_logits = full.forward_logits(&[1, 2, 3, 4, 5], false).unwrap();
+
+    for (a, b) in cached_logits.iter().zip(full_logits.iter()) {
+        assert!(
+            (a - b).abs() < 1e-4,
+            "cached decode logits diverge from full forward: {a} vs {b}"
+        );
+    }
 }

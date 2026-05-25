@@ -175,6 +175,20 @@ pub mod builtin {
         "{% endfor %}",
         "{% if add_generation_prompt %}<start_of_turn>model\n{% endif %}",
     );
+
+    /// Zephyr / TinyLlama chat format.
+    pub const ZEPHYR: &str = concat!(
+        "{% for message in messages %}",
+        "{% if message['role'] == 'system' %}",
+        "<|system|>\n{{ message['content'] }}</s>\n",
+        "{% elif message['role'] == 'user' %}",
+        "<|user|>\n{{ message['content'] }}</s>\n",
+        "{% elif message['role'] == 'assistant' %}",
+        "<|assistant|>\n{{ message['content'] }}</s>\n",
+        "{% endif %}",
+        "{% endfor %}",
+        "{% if add_generation_prompt %}<|assistant|>\n{% endif %}",
+    );
 }
 
 #[cfg(test)]

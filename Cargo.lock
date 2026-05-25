@@ -2581,7 +2581,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-backends-cpu"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "approx",
  "blas-src",
@@ -2601,7 +2601,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -2633,7 +2633,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "approx",
  "bytemuck",
@@ -2647,7 +2647,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-generate"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2671,7 +2671,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-hub"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -2692,7 +2692,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-io"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "bytemuck",
  "half",
@@ -2709,7 +2709,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-ir"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "bincode",
  "criterion",
@@ -2723,7 +2723,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-models"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "ordered-float",
@@ -2741,7 +2741,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-runtime"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "sapient-backends-cpu",
  "sapient-core",
@@ -2758,7 +2758,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-scheduler"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "flume",
  "metrics",
@@ -2776,7 +2776,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-telemetry"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
@@ -2793,7 +2793,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-tokenizers"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "minijinja",

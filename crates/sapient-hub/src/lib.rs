@@ -24,9 +24,11 @@
 pub mod cache;
 pub mod client;
 pub mod download;
+pub mod gguf;
 pub mod model_info;
 pub mod resolver;
 
 pub use client::{HubClient, LoadOptions};
+pub use gguf::{select_best_gguf, tokenizer_fallback_model};
 pub use model_info::{ArchType, ModelInfo};
-pub use resolver::ModelFiles;
+pub use resolver::{ModelFiles, WeightFormat};

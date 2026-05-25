@@ -9,6 +9,7 @@ use tokio::sync::Semaphore;
 use tracing::debug;
 
 use crate::download::{configure_api_builder, max_parallel_downloads};
+use crate::gguf::select_best_gguf;
 use crate::model_info::ModelInfo;
 use crate::resolver::ModelFiles;
 
@@ -155,14 +156,12 @@ impl HubClient {
         for fmt in &self.opts.formats {
             match fmt.as_str() {
                 "gguf" => {
-                    for name in &filenames {
-                        if name.ends_with(".gguf") {
-                            let path = repo.get(name).await.with_context(|| {
-                                format!("Failed to download GGUF weights '{name}'")
-                            })?;
-                            debug!("Found GGUF weights for model");
-                            return Ok(vec![path]);
-                        }
+                    if let Some(name) = select_best_gguf(&filenames) {
+                        let path = repo.get(name).await.with_context(|| {
+                            format!("Failed to download GGUF weights '{name}'")
+                        })?;
+                        debug!("Found GGUF weights: {}", path.display());
+                        return Ok(vec![path]);
                     }
                 }
                 "safetensors" => {
