@@ -58,30 +58,57 @@ Grab a pre-built binary for your platform from the [**latest release**](https://
 
 ## CLI — 30 Seconds to Running a Model
 
-> **Requires v0.1.1+** — reinstall with the [install script](#macos--linux-one-command) if `chat` or `pull` are missing.
-
 ```bash
-# Interactive chat — just like Ollama
-sapient chat meta-llama/Llama-3.2-1B-Instruct
+# Interactive chat — streaming replies, clean UI
+sapient chat <model>
 
 # One-shot completion (Hub models need --prompt)
-sapient run microsoft/phi-2 --prompt "Explain transformers in simple terms"
+sapient run <model> --prompt "Explain transformers in simple terms"
 
 # Download a model to local cache
-sapient pull TheBloke/Llama-2-7B-GGUF
+sapient pull <model>
 
-# List cached models
+# List / remove cached models
 sapient list
+sapient rm <model>          # remove one model
+sapient reset               # clear entire cache
+
+# Update sapient to the latest release
+sapient update
 
 # Gated models (Llama, Gemma) — set token first
 sapient login
 
 # Start an HTTP inference server (ONNX/GGUF files)
-sapient serve ./model.gguf --port 8080
+sapient serve <model> --port 8080
 
 # Show info about a model
-sapient info google/gemma-2-2b-it
+sapient info <model>
+
+# Verbose mode — show internal logs and file paths
+sapient -v pull <model>
 ```
+
+Use `/exit` or `/quit` to leave chat. Type `/help` for chat commands.
+
+---
+
+## Fast Downloads
+
+Sapient uses parallel HTTP range requests and concurrent shard downloads (via the Rust `hf-hub` client). Fast downloads are **on by default**.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SAPIENT_HUB_MAX_PARALLEL` | `min(CPU cores, 8)` | Concurrent download workers |
+| `SAPIENT_HUB_CHUNK_SIZE` | `10000000` (10 MiB) | HTTP range chunk size |
+| `SAPIENT_FAST_DOWNLOAD` | `1` | Set to `0` to disable parallel mode |
+
+```bash
+# Example: limit workers on a slow connection
+SAPIENT_HUB_MAX_PARALLEL=2 sapient pull <model>
+```
+
+> **Note:** Python-only accelerators like `hf_xet` are not available in the Rust CLI. Sapient achieves similar gains through parallel range requests and concurrent multi-shard downloads.
 
 ---
 
@@ -206,7 +233,7 @@ Built in Rust for maximum performance, zero dependencies on Python, ONNX Runtime
 
 ```
 sapient-generate          ← Pipeline API — from_pretrained, generate, chat, embed, stream
-├── sapient-hub           ← HuggingFace Hub client — download, auth, cache, arch detection
+├── sapient-hub           ← HuggingFace Hub client — parallel downloads, auth, cache
 ├── sapient-tokenizers    ← All HF tokenizer types + Jinja2 chat templates
 ├── sapient-models        ← Llama / Phi / Gemma / GPT-2 / BERT / Qwen / Mixtral builders
 │

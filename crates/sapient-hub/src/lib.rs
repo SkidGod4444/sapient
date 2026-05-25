@@ -4,7 +4,7 @@
 //! - Token authentication (reads `HF_TOKEN` env var or `~/.cache/huggingface/token`)
 //! - XDG-compatible local cache (`~/.cache/sapient/hub/`)
 //! - SHA256 integrity checks
-//! - Progress bars via `indicatif`
+//! - Fast parallel downloads (HTTP range chunks + concurrent shards)
 //! - Automatic architecture detection from `config.json`
 //!
 //! # Example
@@ -23,6 +23,7 @@
 
 pub mod cache;
 pub mod client;
+pub mod download;
 pub mod model_info;
 pub mod resolver;
 

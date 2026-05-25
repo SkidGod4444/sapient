@@ -204,14 +204,14 @@ post_install() {
     printf "  Or:  ${BOLD}${INSTALLED_PATH} --version${RESET}\n\n"
   fi
   printf "  Run your first model:\n\n"
-  printf "    ${BOLD}sapient chat microsoft/phi-2${RESET}\n\n"
+  printf "    ${BOLD}sapient chat <model>${RESET}\n\n"
   printf "  Other useful commands:\n"
-  printf "    ${CYAN}sapient pull TheBloke/Llama-2-7B-GGUF${RESET}   # Download a model\n"
+  printf "    ${CYAN}sapient pull <model>${RESET}                   # Download a model\n"
   printf "    ${CYAN}sapient list${RESET}                             # List cached models\n"
-  printf "    ${CYAN}sapient rm microsoft/phi-2${RESET}               # Remove one cached model\n"
+  printf "    ${CYAN}sapient rm <model>${RESET}                       # Remove one cached model\n"
   printf "    ${CYAN}sapient reset${RESET}                            # Clear all cached models\n"
   printf "    ${CYAN}sapient update${RESET}                           # Update sapient to latest release\n"
-  printf "    ${CYAN}sapient serve microsoft/phi-2 --port 8080${RESET} # Start API server\n"
+  printf "    ${CYAN}sapient serve <model> --port 8080${RESET}         # Start API server\n"
   printf "    ${CYAN}sapient --help${RESET}                           # Full help\n\n"
   printf "  Docs: https://github.com/${REPO}\n\n"
 }

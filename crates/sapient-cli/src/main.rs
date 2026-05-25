@@ -2,6 +2,7 @@
 
 mod hub;
 mod server;
+mod ui;
 mod update;
 
 use std::collections::HashMap;
@@ -11,11 +12,12 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use sapient_generate::Pipeline;
+use futures::StreamExt;
+use sapient_generate::{LoadOptions, Pipeline};
+use sapient_hub::LoadOptions as HubLoadOptions;
 use sapient_runtime::{InferenceSession, Model, ModelConfig, SessionOptions};
 use sapient_telemetry::init_tracing;
 use sapient_tokenizers::ChatMessage;
-use tracing::info;
 
 use sapient_core::Tensor;
 
@@ -173,11 +175,11 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    init_tracing(cli.json_logs);
+    init_tracing(cli.json_logs, cli.verbose);
 
     match cli.command {
-        Commands::Chat { model } => chat_command(&model).await,
-        Commands::Pull { model } => pull_command(&model).await,
+        Commands::Chat { model } => chat_command(&model, cli.verbose).await,
+        Commands::Pull { model } => pull_command(&model, cli.verbose).await,
         Commands::List => list_command(),
         Commands::Rm { model } => rm_command(&model),
         Commands::Reset { model, yes, stale } => reset_command(model.as_deref(), yes, stale),
@@ -190,7 +192,7 @@ async fn main() -> Result<()> {
             output,
             backend,
             telemetry,
-        } => run_command(&model, prompt, input, output, backend, telemetry).await,
+        } => run_command(&model, prompt, input, output, backend, telemetry, cli.verbose).await,
         Commands::Bench {
             model,
             batch_sizes,
@@ -214,19 +216,30 @@ async fn main() -> Result<()> {
 
 // ── Hub commands ──────────────────────────────────────────────────────────────
 
-async fn chat_command(model: &str) -> Result<()> {
-    println!("Loading {model}...");
-    let pipeline = Pipeline::from_pretrained(model)
+async fn chat_command(model: &str, verbose: bool) -> Result<()> {
+    let mut load_opts = LoadOptions::default();
+    load_opts.hub.quiet = !verbose;
+
+    if verbose {
+        eprintln!("Loading {model}…");
+    } else {
+        ui::show_loading("Loading model");
+    }
+
+    let pipeline = Pipeline::from_pretrained_with_opts(model, load_opts)
         .await
         .with_context(|| format!("failed to load model '{model}'"))?;
 
-    let arch = pipeline.arch();
-    println!("Ready — {model} ({arch:?}). Type /exit to quit.\n");
+    if !verbose {
+        ui::clear_status();
+    }
+
+    let arch = format!("{:?}", pipeline.arch());
+    ui::print_chat_banner(model, &arch);
 
     let mut history: Vec<ChatMessage> = Vec::new();
     loop {
-        print!("you> ");
-        io::stdout().flush()?;
+        ui::write_user_prompt()?;
 
         let mut line = String::new();
         let n = io::stdin().read_line(&mut line)?;
@@ -241,29 +254,52 @@ async fn chat_command(model: &str) -> Result<()> {
         if matches!(line, "/exit" | "/quit" | "/q") {
             break;
         }
+        if matches!(line, "/help" | "/?") {
+            ui::print_chat_help();
+            continue;
+        }
 
         history.push(ChatMessage::user(line));
-        print!("sapient> ");
-        io::stdout().flush()?;
+        ui::write_assistant_prompt()?;
 
-        let reply = pipeline.chat(&history).await.context("generation failed")?;
-        println!("{reply}\n");
+        let mut stream = pipeline.chat_stream(&history).await;
+        let mut reply = String::new();
+        while let Some(token) = stream.next().await {
+            print!("{token}");
+            reply.push_str(&token);
+            io::stdout().flush()?;
+        }
+        println!();
         history.push(ChatMessage::assistant(reply));
     }
 
     Ok(())
 }
 
-async fn pull_command(model: &str) -> Result<()> {
-    println!("Pulling {model}...");
-    let files = hub::pull_model(model).await?;
-    println!("✓ Cached {model}");
-    println!("  config:    {}", files.config_path.display());
-    if let Some(tok) = &files.tokenizer_path {
-        println!("  tokenizer: {}", tok.display());
+async fn pull_command(model: &str, verbose: bool) -> Result<()> {
+    if verbose {
+        println!("Pulling {model}…");
+    } else {
+        ui::show_loading(&format!("Downloading {model}"));
     }
-    for w in &files.weight_paths {
-        println!("  weights:   {}", w.display());
+
+    let mut opts = HubLoadOptions::default();
+    opts.quiet = !verbose;
+    let files = hub::pull_model_with_options(model, opts).await?;
+
+    if !verbose {
+        ui::clear_status();
+    }
+
+    println!("✓ Cached {model}");
+    if verbose {
+        println!("  config:    {}", files.config_path.display());
+        if let Some(tok) = &files.tokenizer_path {
+            println!("  tokenizer: {}", tok.display());
+        }
+        for w in &files.weight_paths {
+            println!("  weights:   {}", w.display());
+        }
     }
     Ok(())
 }
@@ -272,7 +308,7 @@ fn list_command() -> Result<()> {
     let models = hub::list_cached_models()?;
     if models.is_empty() {
         println!("No cached models yet. Download one with:");
-        println!("  sapient pull microsoft/phi-2");
+        println!("  sapient pull <model>");
         return Ok(());
     }
     println!("Cached models ({}):", models.len());
@@ -388,6 +424,7 @@ async fn run_command(
     output_path: Option<PathBuf>,
     backend: String,
     telemetry: bool,
+    verbose: bool,
 ) -> Result<()> {
     if hub::looks_like_hub_model_id(model) {
         let prompt = prompt.with_context(|| {
@@ -396,8 +433,17 @@ async fn run_command(
                  For interactive chat use: sapient chat {model}"
             )
         })?;
-        println!("Loading {model}...");
-        let pipeline = Pipeline::from_pretrained(model).await?;
+        let mut load_opts = LoadOptions::default();
+        load_opts.hub.quiet = !verbose;
+        if verbose {
+            eprintln!("Loading {model}…");
+        } else {
+            ui::show_loading("Loading model");
+        }
+        let pipeline = Pipeline::from_pretrained_with_opts(model, load_opts).await?;
+        if !verbose {
+            ui::clear_status();
+        }
         let output = pipeline.generate(&prompt).await?;
         println!("{output}");
         return Ok(());
@@ -422,7 +468,6 @@ async fn run_command(
         HashMap::new()
     };
 
-    info!(backend = %backend, "running inference");
     let start = Instant::now();
     let outputs = session.run(inputs).context("inference failed")?;
     let elapsed_ms = start.elapsed().as_millis();

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 use sapient_hub::model_info::{ArchType, ModelInfo};
 use sapient_hub::resolver::{ModelFiles, WeightFormat};
@@ -80,7 +80,7 @@ impl Pipeline {
 
     /// Load with custom hub and generation options.
     pub async fn from_pretrained_with_opts(model_id: &str, opts: LoadOptions) -> Result<Self> {
-        info!("Loading model: {model_id}");
+        debug!("Loading model: {model_id}");
 
         let mut hub_opts = opts.hub.clone();
         if hub_opts.formats == LoadOptions::default().hub.formats {
@@ -98,12 +98,10 @@ impl Pipeline {
 
         let model_info = ModelInfo::from_config_file(&model_files.config_path)
             .context("Failed to parse config.json")?;
-        info!("Detected architecture: {:?}", model_info.arch);
+        debug!("Detected architecture: {:?}", model_info.arch);
 
         if model_info.raw.get("vision_config").is_some() {
-            warn!(
-                "Model has a vision tower — running text-only mode (image inputs not yet supported)"
-            );
+            debug!("Vision tower present — text-only mode (images not supported yet)");
         }
 
         let tok_opts = TokenizerOptions {
@@ -136,7 +134,7 @@ impl Pipeline {
             config.eos_token_id = tokenizer.eos_id;
         }
 
-        info!(
+        debug!(
             "Pipeline ready — vocab_size={} layers={}",
             model_info.vocab_size, model_info.num_hidden_layers
         );
@@ -181,19 +179,36 @@ impl Pipeline {
         self.tokenizer.decode(&output_ids, true)
     }
 
-    /// Chat with the model (for instruct/chat tuned models).
-    pub async fn chat(&self, messages: &[ChatMessage]) -> Result<String> {
-        let prompt = if let Some(tmpl) = &self.chat_template {
+    /// Render the chat prompt string for a message history.
+    pub fn format_chat_prompt(&self, messages: &[ChatMessage]) -> Result<String> {
+        if let Some(tmpl) = &self.chat_template {
             tmpl.render(messages, true)
-                .context("Failed to render chat template")?
+                .context("Failed to render chat template")
         } else {
-            messages
+            Ok(messages
                 .iter()
                 .map(|m| format!("{}: {}", m.role, m.content))
                 .collect::<Vec<_>>()
-                .join("\n")
-        };
+                .join("\n"))
+        }
+    }
+
+    /// Chat with the model (for instruct/chat tuned models).
+    pub async fn chat(&self, messages: &[ChatMessage]) -> Result<String> {
+        let prompt = self.format_chat_prompt(messages)?;
         self.generate(&prompt).await
+    }
+
+    /// Stream a chat reply token-by-token.
+    pub async fn chat_stream(&self, messages: &[ChatMessage]) -> ReceiverStream<String> {
+        match self.format_chat_prompt(messages) {
+            Ok(prompt) => self.generate_stream(&prompt).await,
+            Err(e) => {
+                let (tx, rx) = mpsc::channel(1);
+                let _ = tx.try_send(format!("Error: {e}"));
+                ReceiverStream::new(rx)
+            }
+        }
     }
 
     /// Stream tokens as they are generated.

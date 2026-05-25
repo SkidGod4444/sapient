@@ -16,14 +16,29 @@ pub use profiler::{ChromeTracer, Span};
 pub use telemetry::{ConsoleTelemetry, NoOpTelemetry, Telemetry, TelemetryConfig};
 
 /// Initialise a global `tracing` subscriber (JSON or pretty).
-pub fn init_tracing(json: bool) {
+///
+/// When `verbose` is false, tracing output is disabled so chat/pull stay clean.
+/// Set `RUST_LOG=info` to override.
+pub fn init_tracing(json: bool, verbose: bool) {
+    use std::io;
     use tracing_subscriber::{fmt, EnvFilter};
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let default = if verbose { "info" } else { "off" };
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
 
     if json {
         fmt().with_env_filter(filter).json().init();
+    } else if verbose {
+        fmt()
+            .with_env_filter(filter)
+            .with_target(true)
+            .with_file(false)
+            .with_line_number(false)
+            .init();
     } else {
-        fmt().with_env_filter(filter).pretty().init();
+        fmt()
+            .with_env_filter(filter)
+            .with_writer(io::sink)
+            .init();
     }
 }

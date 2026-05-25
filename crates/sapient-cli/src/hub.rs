@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use sapient_hub::{HubClient, ModelFiles, ModelInfo};
+use sapient_hub::{HubClient, LoadOptions, ModelFiles, ModelInfo};
 
 /// Returns true for HuggingFace model IDs like `meta-llama/Llama-3.2-1B-Instruct`.
 pub fn looks_like_hub_model_id(s: &str) -> bool {
@@ -19,7 +19,12 @@ pub fn looks_like_hub_model_id(s: &str) -> bool {
 
 /// Download a model from the Hub (same as `sapient pull`).
 pub async fn pull_model(model_id: &str) -> Result<ModelFiles> {
-    let hub = HubClient::new()?;
+    pull_model_with_options(model_id, LoadOptions::default()).await
+}
+
+/// Download a model with custom Hub options.
+pub async fn pull_model_with_options(model_id: &str, opts: LoadOptions) -> Result<ModelFiles> {
+    let hub = HubClient::with_options(opts)?;
     hub.download(model_id)
         .await
         .with_context(|| format!("failed to download '{model_id}'"))
@@ -34,7 +39,9 @@ pub async fn fetch_model_info(model_id: &str) -> Result<ModelInfo> {
 /// Resolve a CLI model argument to a local file path (downloads Hub models first).
 pub async fn resolve_model_path(model: &str) -> Result<PathBuf> {
     if looks_like_hub_model_id(model) {
-        let files = pull_model(model).await?;
+        let mut opts = LoadOptions::default();
+        opts.quiet = true;
+        let files = pull_model_with_options(model, opts).await?;
         pick_graph_weight(&files)
     } else {
         Ok(PathBuf::from(model))
