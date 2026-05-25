@@ -157,9 +157,10 @@ impl HubClient {
             match fmt.as_str() {
                 "gguf" => {
                     if let Some(name) = select_best_gguf(&filenames) {
-                        let path = repo.get(name).await.with_context(|| {
-                            format!("Failed to download GGUF weights '{name}'")
-                        })?;
+                        let path = repo
+                            .get(name)
+                            .await
+                            .with_context(|| format!("Failed to download GGUF weights '{name}'"))?;
                         debug!("Found GGUF weights: {}", path.display());
                         return Ok(vec![path]);
                     }

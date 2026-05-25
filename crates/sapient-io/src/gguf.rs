@@ -240,10 +240,7 @@ fn dequantize_tensor(kind: GgmlType, bytes: &[u8], numel: usize) -> Result<Vec<f
 }
 
 fn tensor_byte_len(kind: GgmlType, numel: usize) -> usize {
-    if matches!(
-        kind,
-        GgmlType::F32 | GgmlType::F16 | GgmlType::BF16
-    ) {
+    if matches!(kind, GgmlType::F32 | GgmlType::F16 | GgmlType::BF16) {
         numel * kind.type_size()
     } else {
         (numel / kind.block_size()) * kind.type_size()

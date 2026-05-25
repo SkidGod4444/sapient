@@ -65,8 +65,9 @@ impl SafetensorsLoader {
             if name == "__metadata__" {
                 continue;
             }
-            let meta: StMeta = serde_json::from_value(value.clone())
-                .map_err(|e| SapientError::SafetensorsParseError(format!("tensor '{name}': {e}")))?;
+            let meta: StMeta = serde_json::from_value(value.clone()).map_err(|e| {
+                SapientError::SafetensorsParseError(format!("tensor '{name}': {e}"))
+            })?;
 
             let dtype = match meta.dtype.as_str() {
                 "F32" => DType::F32,
@@ -106,10 +107,7 @@ impl SafetensorsLoader {
                 DType::F16 => {
                     let f32s: Vec<f32> = raw
                         .chunks_exact(2)
-                        .map(|c| {
-                            half::f16::from_le_bytes(c.try_into().unwrap())
-                                .to_f32()
-                        })
+                        .map(|c| half::f16::from_le_bytes(c.try_into().unwrap()).to_f32())
                         .collect();
                     Tensor::from_f32(&f32s, shape)
                         .map_err(|e| SapientError::SafetensorsParseError(e.to_string()))?
@@ -117,9 +115,7 @@ impl SafetensorsLoader {
                 DType::BF16 => {
                     let f32s: Vec<f32> = raw
                         .chunks_exact(2)
-                        .map(|c| {
-                            f32::from(half::bf16::from_le_bytes(c.try_into().unwrap()))
-                        })
+                        .map(|c| f32::from(half::bf16::from_le_bytes(c.try_into().unwrap())))
                         .collect();
                     Tensor::from_f32(&f32s, shape)
                         .map_err(|e| SapientError::SafetensorsParseError(e.to_string()))?

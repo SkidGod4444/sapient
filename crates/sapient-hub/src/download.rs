@@ -80,8 +80,10 @@ mod tests {
 
     #[test]
     fn fast_download_respects_option() {
-        let mut opts = LoadOptions::default();
-        opts.fast_download = false;
+        let mut opts = LoadOptions {
+            fast_download: false,
+            ..Default::default()
+        };
         // Only assert when env doesn't force enable
         if std::env::var("HF_HUB_ENABLE_HF_TRANSFER").ok().as_deref() != Some("1") {
             assert!(!fast_download_enabled(&opts));

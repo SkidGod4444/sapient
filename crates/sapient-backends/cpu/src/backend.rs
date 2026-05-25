@@ -398,8 +398,7 @@ impl CpuBackend {
                 let mut out = vec![0.0f32; seq_len * hidden];
                 for (i, &id) in ids.iter().enumerate() {
                     let row = id as usize * hidden;
-                    out[i * hidden..(i + 1) * hidden]
-                        .copy_from_slice(&w[row..row + hidden]);
+                    out[i * hidden..(i + 1) * hidden].copy_from_slice(&w[row..row + hidden]);
                 }
                 let batch = if dims.len() >= 2 { dims[0] } else { 1 };
                 let seq = if dims.len() >= 2 { dims[1] } else { seq_len };

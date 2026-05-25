@@ -62,62 +62,74 @@ pub fn split_heads(x: &Tensor, n_heads: usize, head_dim: usize) -> Result<Tensor
 pub fn merge_heads(x: &Tensor) -> Result<Tensor> {
     let d = x.shape().dims();
     let (n_heads, seq, head_dim) = (d[1], d[2], d[3]);
-    permute(x, &[0, 2, 1, 3])?.reshape(vec![1, seq, n_heads * head_dim]).map_err(|e| anyhow::anyhow!("{e}"))
+    permute(x, &[0, 2, 1, 3])?
+        .reshape(vec![1, seq, n_heads * head_dim])
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 pub fn permute(x: &Tensor, order: &[usize]) -> Result<Tensor> {
     let dims = x.shape().dims();
     if order.len() != dims.len() {
-            anyhow::bail!("permute rank mismatch");
-        }
-        let new_dims: Vec<usize> = order.iter().map(|&i| dims[i]).collect();
-        let src = x.as_f32_slice();
-        let mut out = vec![0.0f32; src.len()];
+        anyhow::bail!("permute rank mismatch");
+    }
+    let new_dims: Vec<usize> = order.iter().map(|&i| dims[i]).collect();
+    let src = x.as_f32_slice();
+    let mut out = vec![0.0f32; src.len()];
 
-        fn recurse(
-            dims: &[usize],
-            order: &[usize],
-            src: &[f32],
-            out: &mut [f32],
-            src_strides: &[usize],
-            dst_strides: &[usize],
-            idx: &mut [usize],
-            depth: usize,
-        ) {
-            if depth == dims.len() {
-                let src_off: usize = idx
-                    .iter()
-                    .zip(src_strides.iter())
-                    .map(|(&i, &s)| i * s)
-                    .sum();
-                let dst_off: usize = order
-                    .iter()
-                    .enumerate()
-                    .map(|(dst_ax, &src_ax)| idx[src_ax] * dst_strides[dst_ax])
-                    .sum();
-                out[dst_off] = src[src_off];
-                return;
-            }
-            for i in 0..dims[depth] {
-                idx[depth] = i;
-                recurse(dims, order, src, out, src_strides, dst_strides, idx, depth + 1);
-            }
+    #[allow(clippy::too_many_arguments)]
+    fn recurse(
+        dims: &[usize],
+        order: &[usize],
+        src: &[f32],
+        out: &mut [f32],
+        src_strides: &[usize],
+        dst_strides: &[usize],
+        idx: &mut [usize],
+        depth: usize,
+    ) {
+        if depth == dims.len() {
+            let src_off: usize = idx
+                .iter()
+                .zip(src_strides.iter())
+                .map(|(&i, &s)| i * s)
+                .sum();
+            let dst_off: usize = order
+                .iter()
+                .enumerate()
+                .map(|(dst_ax, &src_ax)| idx[src_ax] * dst_strides[dst_ax])
+                .sum();
+            out[dst_off] = src[src_off];
+            return;
         }
+        for i in 0..dims[depth] {
+            idx[depth] = i;
+            recurse(
+                dims,
+                order,
+                src,
+                out,
+                src_strides,
+                dst_strides,
+                idx,
+                depth + 1,
+            );
+        }
+    }
 
-        let src_strides = strides_for(dims);
-        let dst_strides = strides_for(&new_dims);
-        let mut idx = vec![0usize; dims.len()];
-        recurse(
-            dims,
-            order,
-            src,
-            &mut out,
-            &src_strides,
-            &dst_strides,
-            &mut idx,
-            0,
-        );
-        Tensor::from_f32(&out, Shape::new(new_dims)).map_err(|e| anyhow::anyhow!("{e}"))
+    let src_strides = strides_for(dims);
+    let dst_strides = strides_for(&new_dims);
+    let mut idx = vec![0usize; dims.len()];
+    recurse(
+        dims,
+        order,
+        src,
+        &mut out,
+        &src_strides,
+        &dst_strides,
+        &mut idx,
+        0,
+    );
+    Tensor::from_f32(&out, Shape::new(new_dims)).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn strides_for(dims: &[usize]) -> Vec<usize> {
@@ -203,7 +215,12 @@ pub fn gqa_attention(
         None
     };
     map_err(attention::scaled_dot_product_attention(
-        q, k, v, mask.as_ref(), None, n_kv_heads,
+        q,
+        k,
+        v,
+        mask.as_ref(),
+        None,
+        n_kv_heads,
     ))
 }
 
@@ -214,7 +231,8 @@ pub fn logits_from_hidden(hidden: &Tensor, lm_head: &Tensor) -> Result<Vec<f32>>
     let seq = dims[1];
     let h = hidden.as_f32_slice();
     let last = &h[(seq - 1) * hidden_size..seq * hidden_size];
-    let h_last = Tensor::from_f32(last, Shape::new([1, hidden_size])).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let h_last =
+        Tensor::from_f32(last, Shape::new([1, hidden_size])).map_err(|e| anyhow::anyhow!("{e}"))?;
     let wt = lm_head.t().map_err(|e| anyhow::anyhow!("{e}"))?;
     let logits = map_err(matmul::matmul(&h_last, &wt))?;
     Ok(logits.as_f32_slice().to_vec())

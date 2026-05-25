@@ -12,7 +12,7 @@ use tracing::debug;
 
 use sapient_hub::model_info::{ArchType, ModelInfo};
 use sapient_hub::resolver::ModelFiles;
-use sapient_hub::{HubClient, LoadOptions as HubOptions, tokenizer_fallback_model};
+use sapient_hub::{tokenizer_fallback_model, HubClient, LoadOptions as HubOptions};
 use sapient_models::ForwardEngine;
 use sapient_tokenizers::{
     chat::{builtin, ChatMessage, ChatTemplate},
@@ -134,10 +134,17 @@ impl Pipeline {
             .tokenizer_config_path
             .as_ref()
             .and_then(|p| ChatTemplate::from_tokenizer_config(p).ok())
-            .or_else(|| Some(builtin_template_for(&model_info.arch, model_id, &model_info.model_type)));
+            .or_else(|| {
+                Some(builtin_template_for(
+                    &model_info.arch,
+                    model_id,
+                    &model_info.model_type,
+                ))
+            });
 
-        let engine = ForwardEngine::from_weight_paths(model_info.clone(), &model_files.weight_paths)
-            .context("Failed to initialize inference engine")?;
+        let engine =
+            ForwardEngine::from_weight_paths(model_info.clone(), &model_files.weight_paths)
+                .context("Failed to initialize inference engine")?;
 
         let mut config = opts.generation;
         if config.eos_token_id.is_none() {
@@ -378,12 +385,11 @@ fn builtin_template_for(arch: &ArchType, model_id: &str, model_type: &str) -> Ch
     let id = model_id.to_ascii_lowercase();
     let mt = model_type.to_ascii_lowercase();
     match arch {
-        ArchType::Llama if id.contains("tinyllama") => {
-            ChatTemplate::from_template(builtin::ZEPHYR)
-        }
-        ArchType::Llama if id.contains("llama-2")
-            || id.contains("llama2")
-            || (mt.contains("llama") && !id.contains("llama-3") && !id.contains("llama3")) =>
+        ArchType::Llama if id.contains("tinyllama") => ChatTemplate::from_template(builtin::ZEPHYR),
+        ArchType::Llama
+            if id.contains("llama-2")
+                || id.contains("llama2")
+                || (mt.contains("llama") && !id.contains("llama-3") && !id.contains("llama3")) =>
         {
             ChatTemplate::from_template(builtin::LLAMA2)
         }

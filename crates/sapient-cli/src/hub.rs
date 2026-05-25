@@ -19,7 +19,14 @@ pub fn looks_like_hub_model_id(s: &str) -> bool {
 
 /// Download a model from the Hub (same as `sapient pull`).
 pub async fn pull_model(model_id: &str) -> Result<ModelFiles> {
-    pull_model_with_options(model_id, LoadOptions::default()).await
+    pull_model_with_options(
+        model_id,
+        LoadOptions {
+            quiet: true,
+            ..Default::default()
+        },
+    )
+    .await
 }
 
 /// Download a model with custom Hub options.
@@ -39,9 +46,7 @@ pub async fn fetch_model_info(model_id: &str) -> Result<ModelInfo> {
 /// Resolve a CLI model argument to a local file path (downloads Hub models first).
 pub async fn resolve_model_path(model: &str) -> Result<PathBuf> {
     if looks_like_hub_model_id(model) {
-        let mut opts = LoadOptions::default();
-        opts.quiet = true;
-        let files = pull_model_with_options(model, opts).await?;
+        let files = pull_model(model).await?;
         pick_graph_weight(&files)
     } else {
         Ok(PathBuf::from(model))

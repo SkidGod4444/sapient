@@ -47,7 +47,11 @@ pub fn detect_weight_prefix(weights: &HashMap<String, Tensor>) -> String {
     weights
         .keys()
         .find(|k| k.ends_with("embed_tokens.weight"))
-        .map(|k| k.strip_suffix("embed_tokens.weight").unwrap_or("").to_string())
+        .map(|k| {
+            k.strip_suffix("embed_tokens.weight")
+                .unwrap_or("")
+                .to_string()
+        })
         .unwrap_or_else(|| "model.".to_string())
 }
 

@@ -164,7 +164,8 @@ fn download_release(asset: &PlatformAsset, tag: &str) -> Result<PathBuf> {
 
     let staged = std::env::temp_dir().join(format!("sapient-update-{tag}"));
     let _ = fs::remove_file(&staged);
-    fs::copy(&extracted, &staged).with_context(|| format!("failed to stage {}", staged.display()))?;
+    fs::copy(&extracted, &staged)
+        .with_context(|| format!("failed to stage {}", staged.display()))?;
 
     #[cfg(unix)]
     {

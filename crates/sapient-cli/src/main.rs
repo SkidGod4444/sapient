@@ -192,7 +192,18 @@ async fn main() -> Result<()> {
             output,
             backend,
             telemetry,
-        } => run_command(&model, prompt, input, output, backend, telemetry, cli.verbose).await,
+        } => {
+            run_command(
+                &model,
+                prompt,
+                input,
+                output,
+                backend,
+                telemetry,
+                cli.verbose,
+            )
+            .await
+        }
         Commands::Bench {
             model,
             batch_sizes,
@@ -283,9 +294,18 @@ async fn pull_command(model: &str, verbose: bool) -> Result<()> {
         ui::show_loading(&format!("Downloading {model}"));
     }
 
-    let mut opts = HubLoadOptions::default();
-    opts.quiet = !verbose;
-    let files = hub::pull_model_with_options(model, opts).await?;
+    let files = if verbose {
+        hub::pull_model_with_options(
+            model,
+            HubLoadOptions {
+                quiet: false,
+                ..Default::default()
+            },
+        )
+        .await?
+    } else {
+        hub::pull_model(model).await?
+    };
 
     if !verbose {
         ui::clear_status();

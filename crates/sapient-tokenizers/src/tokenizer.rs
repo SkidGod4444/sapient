@@ -47,13 +47,10 @@ impl SapientTokenizer {
             Ok(inner) => Self::from_inner(inner, opts),
             Err(first_err) => {
                 let normalized = normalize_tokenizer_json(path).with_context(|| {
-                    format!(
-                        "Failed to load tokenizer and could not normalize it: {first_err}"
-                    )
+                    format!("Failed to load tokenizer and could not normalize it: {first_err}")
                 })?;
-                let inner = Tokenizer::from_bytes(&normalized).map_err(|e| {
-                    anyhow::anyhow!("Failed to load normalized tokenizer: {e}")
-                })?;
+                let inner = Tokenizer::from_bytes(&normalized)
+                    .map_err(|e| anyhow::anyhow!("Failed to load normalized tokenizer: {e}"))?;
                 Self::from_inner(inner, opts)
             }
         }
@@ -140,7 +137,8 @@ impl SapientTokenizer {
     }
 
     fn from_inner(inner: Tokenizer, opts: TokenizerOptions) -> Result<Self> {
-        let bos_id = Self::special_token_id(&inner, &["<s>", "<bos>", "<|begin_of_text|>", "[BOS]"]);
+        let bos_id =
+            Self::special_token_id(&inner, &["<s>", "<bos>", "<|begin_of_text|>", "[BOS]"]);
         let eos_id = Self::special_token_id(
             &inner,
             &[
@@ -152,7 +150,8 @@ impl SapientTokenizer {
                 "<|redacted_EOS|>",
             ],
         );
-        let pad_id = Self::special_token_id(&inner, &["<pad>", "<|finetune_right_pad_id|>", "[PAD]"]);
+        let pad_id =
+            Self::special_token_id(&inner, &["<pad>", "<|finetune_right_pad_id|>", "[PAD]"]);
 
         Ok(Self {
             inner,
@@ -193,11 +192,7 @@ fn normalize_tokenizer_json(path: &Path) -> Result<Vec<u8>> {
             if pair.len() != 2 {
                 return None;
             }
-            Some(format!(
-                "{} {}",
-                pair[0].as_str()?,
-                pair[1].as_str()?
-            ))
+            Some(format!("{} {}", pair[0].as_str()?, pair[1].as_str()?))
         })
         .collect();
 

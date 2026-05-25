@@ -41,7 +41,11 @@ impl ArchType {
     /// Detect arch from the `architectures` field in `config.json`.
     pub fn from_hf_arch_name(name: &str) -> Self {
         match name {
-            n if n.contains("Llama") || n.contains("Mistral") || n.contains("CodeLlama") || n.contains("VLlama") => {
+            n if n.contains("Llama")
+                || n.contains("Mistral")
+                || n.contains("CodeLlama")
+                || n.contains("VLlama") =>
+            {
                 Self::Llama
             }
             n if n.contains("Phi") => Self::Phi,

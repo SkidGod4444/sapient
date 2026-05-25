@@ -7,10 +7,13 @@ use sapient_core::Tensor;
 use sapient_hub::model_info::ModelInfo;
 
 use super::common::{
-    add, apply_rope_positions, concat_seq, embed_tokens, gqa_attention, gelu, linear_3d, logits_from_hidden,
-    mean_pool_hidden, merge_heads, layer_norm, split_heads,
+    add, apply_rope_positions, concat_seq, embed_tokens, gelu, gqa_attention, layer_norm,
+    linear_3d, logits_from_hidden, mean_pool_hidden, merge_heads, split_heads,
 };
-use crate::weights::{detect_weight_prefix, load_hf_weights, resolve_lm_head, resolve_weight, tie_word_embeddings_from_config};
+use crate::weights::{
+    detect_weight_prefix, load_hf_weights, resolve_lm_head, resolve_weight,
+    tie_word_embeddings_from_config,
+};
 
 #[derive(Debug, Default, Clone)]
 struct LayerCache {
@@ -67,13 +70,18 @@ impl PhiForward {
     }
 
     fn forward_hidden(&mut self, input_ids: &[u32], use_cache: bool) -> Result<Tensor> {
-        let embed = self.weights.get(&self.embed_key).ok_or_else(|| {
-            anyhow::anyhow!("missing embedding weights at '{}'", self.embed_key)
-        })?;
+        let embed = self
+            .weights
+            .get(&self.embed_key)
+            .ok_or_else(|| anyhow::anyhow!("missing embedding weights at '{}'", self.embed_key))?;
         let mut x = embed_tokens(embed, input_ids)?;
 
         let start_pos = if use_cache {
-            self.cache.first().and_then(|l| l.keys.as_ref()).map(|k| k.shape().dims()[2]).unwrap_or(0)
+            self.cache
+                .first()
+                .and_then(|l| l.keys.as_ref())
+                .map(|k| k.shape().dims()[2])
+                .unwrap_or(0)
         } else {
             self.reset_cache();
             0
@@ -101,12 +109,37 @@ impl PhiForward {
         let n_heads = self.info.num_attention_heads;
         let head_dim = self.info.head_dim;
 
-        let norm_w = resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.input_layernorm"))?;
+        let norm_w = resolve_weight(
+            &self.weights,
+            &self.prefix,
+            &format!("{pfx}.input_layernorm"),
+        )?;
         let h = layer_norm(&x, norm_w, None, eps)?;
 
-        let q = linear_3d(&h, resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.self_attn.q_proj"))?)?;
-        let k = linear_3d(&h, resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.self_attn.k_proj"))?)?;
-        let v = linear_3d(&h, resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.self_attn.v_proj"))?)?;
+        let q = linear_3d(
+            &h,
+            resolve_weight(
+                &self.weights,
+                &self.prefix,
+                &format!("{pfx}.self_attn.q_proj"),
+            )?,
+        )?;
+        let k = linear_3d(
+            &h,
+            resolve_weight(
+                &self.weights,
+                &self.prefix,
+                &format!("{pfx}.self_attn.k_proj"),
+            )?,
+        )?;
+        let v = linear_3d(
+            &h,
+            resolve_weight(
+                &self.weights,
+                &self.prefix,
+                &format!("{pfx}.self_attn.v_proj"),
+            )?,
+        )?;
 
         let mut q = split_heads(&q, n_heads, head_dim)?;
         let mut k = split_heads(&k, n_heads, head_dim)?;
@@ -129,18 +162,25 @@ impl PhiForward {
         let attn = merge_heads(&attn)?;
         let o = linear_3d(
             &attn,
-            resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.self_attn.dense"))
-                .or_else(|_| {
-                    resolve_weight(
-                        &self.weights,
-                        &self.prefix,
-                        &format!("{pfx}.self_attn.o_proj"),
-                    )
-                })?,
+            resolve_weight(
+                &self.weights,
+                &self.prefix,
+                &format!("{pfx}.self_attn.dense"),
+            )
+            .or_else(|_| {
+                resolve_weight(
+                    &self.weights,
+                    &self.prefix,
+                    &format!("{pfx}.self_attn.o_proj"),
+                )
+            })?,
         )?;
         let x = add(&x, &o)?;
 
-        let ff1 = linear_3d(&x, resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.mlp.fc1"))?)?;
+        let ff1 = linear_3d(
+            &x,
+            resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.mlp.fc1"))?,
+        )?;
         let ff1 = gelu(&ff1)?;
         let ff2 = linear_3d(
             &ff1,

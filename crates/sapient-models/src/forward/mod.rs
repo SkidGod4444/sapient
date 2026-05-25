@@ -22,7 +22,11 @@ pub enum ForwardEngine {
 }
 
 fn weight_format_from_paths(weight_paths: &[PathBuf]) -> WeightFormat {
-    match weight_paths.first().and_then(|p| p.extension()).and_then(|e| e.to_str()) {
+    match weight_paths
+        .first()
+        .and_then(|p| p.extension())
+        .and_then(|e| e.to_str())
+    {
         Some("gguf") => WeightFormat::Gguf,
         Some("safetensors") => WeightFormat::Safetensors,
         Some("bin") => WeightFormat::PyTorchBin,
@@ -63,9 +67,9 @@ impl ForwardEngine {
             ArchType::Llama | ArchType::Qwen | ArchType::Gemma | ArchType::Mixtral => {
                 Ok(Self::Llama(LlamaForward::from_weights(info, weights)?))
             }
-            ArchType::Phi => bail!(
-                "GGUF Phi models are not yet supported — use safetensors weights"
-            ),
+            ArchType::Phi => {
+                bail!("GGUF Phi models are not yet supported — use safetensors weights")
+            }
             other => bail!(
                 "architecture {other:?} does not yet support GGUF loading — \
                  try a Llama-family GGUF model or use safetensors weights"

@@ -51,7 +51,10 @@ fn build_tiny_weights(info: &ModelInfo) -> HashMap<String, Tensor> {
 
     for i in 0..info.num_hidden_layers {
         let p = format!("model.layers.{i}");
-        w.insert(format!("{p}.input_layernorm.weight"), rand_tensor(vec![h], 10 + i as u64));
+        w.insert(
+            format!("{p}.input_layernorm.weight"),
+            rand_tensor(vec![h], 10 + i as u64),
+        );
         w.insert(
             format!("{p}.post_attention_layernorm.weight"),
             rand_tensor(vec![h], 20 + i as u64),

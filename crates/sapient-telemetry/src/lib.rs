@@ -36,9 +36,6 @@ pub fn init_tracing(json: bool, verbose: bool) {
             .with_line_number(false)
             .init();
     } else {
-        fmt()
-            .with_env_filter(filter)
-            .with_writer(io::sink)
-            .init();
+        fmt().with_env_filter(filter).with_writer(io::sink).init();
     }
 }

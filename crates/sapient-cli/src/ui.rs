@@ -12,19 +12,35 @@ fn use_color() -> bool {
 }
 
 fn dim() -> &'static str {
-    if use_color() { DIM } else { "" }
+    if use_color() {
+        DIM
+    } else {
+        ""
+    }
 }
 
 fn bold() -> &'static str {
-    if use_color() { BOLD } else { "" }
+    if use_color() {
+        BOLD
+    } else {
+        ""
+    }
 }
 
 fn cyan() -> &'static str {
-    if use_color() { CYAN } else { "" }
+    if use_color() {
+        CYAN
+    } else {
+        ""
+    }
 }
 
 fn reset() -> &'static str {
-    if use_color() { RESET } else { "" }
+    if use_color() {
+        RESET
+    } else {
+        ""
+    }
 }
 
 /// Clear the current stderr line (spinner / status text).
