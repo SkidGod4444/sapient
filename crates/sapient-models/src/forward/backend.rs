@@ -5,10 +5,11 @@ use sapient_core::Tensor;
 
 use super::common;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum LlmBackendKind {
     Cpu,
     Metal,
+    #[default]
     Auto,
 }
 
@@ -21,12 +22,6 @@ pub struct MacGpuSupport {
 
 pub fn mac_gpu_support() -> MacGpuSupport {
     MlxLlmOps::support()
-}
-
-impl Default for LlmBackendKind {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl std::str::FromStr for LlmBackendKind {
@@ -262,29 +257,29 @@ impl MlxLlmOps {
     fn support() -> MacGpuSupport {
         #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "mlx"))]
         {
-            return MacGpuSupport {
+            MacGpuSupport {
                 available: true,
                 backend: "mlx",
                 reason: "Apple Silicon with MLX feature enabled",
-            };
+            }
         }
 
         #[cfg(all(target_os = "macos", target_arch = "aarch64", not(feature = "mlx")))]
         {
-            return MacGpuSupport {
+            MacGpuSupport {
                 available: false,
                 backend: "cpu",
                 reason: "Apple Silicon detected, but Sapient was built without the sapient-models/mlx feature",
-            };
+            }
         }
 
         #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
         {
-            return MacGpuSupport {
+            MacGpuSupport {
                 available: false,
                 backend: "cpu",
                 reason: "MLX GPU execution requires Apple Silicon; Intel Macs use CPU",
-            };
+            }
         }
 
         #[cfg(not(target_os = "macos"))]
