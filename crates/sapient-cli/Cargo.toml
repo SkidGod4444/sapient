@@ -40,3 +40,10 @@ tower-http  = { workspace = true }
 tracing     = { workspace = true }
 ureq        = { workspace = true }
 zip         = { workspace = true }
+
+[features]
+default = []
+mlx = ["sapient-generate/mlx"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+sapient-backends-metal = { workspace = true }

@@ -13,7 +13,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
-use sapient_generate::{LoadOptions, Pipeline};
+use sapient_generate::{mac_gpu_support, GenerationBackend, LoadOptions, Pipeline};
 use sapient_hub::LoadOptions as HubLoadOptions;
 use sapient_runtime::{InferenceSession, Model, ModelConfig, SessionOptions};
 use sapient_telemetry::init_tracing;
@@ -49,6 +49,10 @@ enum Commands {
     Chat {
         /// HuggingFace model ID (e.g. `microsoft/phi-2`).
         model: String,
+
+        /// Generation backend: auto | cpu | metal.
+        #[arg(short, long, default_value = "auto")]
+        backend: String,
     },
 
     /// Download a model from HuggingFace Hub to the local cache.
@@ -87,6 +91,9 @@ enum Commands {
         model: String,
     },
 
+    /// Show available local inference backends.
+    BackendInfo,
+
     /// Save a HuggingFace access token for gated models.
     Login {
         /// Token value (otherwise read from stdin).
@@ -111,8 +118,8 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
 
-        /// Backend: cpu | metal | vulkan (file-based models only).
-        #[arg(short, long, default_value = "cpu")]
+        /// Backend: auto | cpu | metal | vulkan.
+        #[arg(short, long, default_value = "auto")]
         backend: String,
 
         /// Enable console telemetry.
@@ -178,12 +185,13 @@ async fn main() -> Result<()> {
     init_tracing(cli.json_logs, cli.verbose);
 
     match cli.command {
-        Commands::Chat { model } => chat_command(&model, cli.verbose).await,
+        Commands::Chat { model, backend } => chat_command(&model, &backend, cli.verbose).await,
         Commands::Pull { model } => pull_command(&model, cli.verbose).await,
         Commands::List => list_command(),
         Commands::Rm { model } => rm_command(&model),
         Commands::Reset { model, yes, stale } => reset_command(model.as_deref(), yes, stale),
         Commands::Info { model } => info_command(&model).await,
+        Commands::BackendInfo => backend_info_command(),
         Commands::Login { token } => login_command(token.as_deref()),
         Commands::Run {
             model,
@@ -227,12 +235,13 @@ async fn main() -> Result<()> {
 
 // ── Hub commands ──────────────────────────────────────────────────────────────
 
-async fn chat_command(model: &str, verbose: bool) -> Result<()> {
+async fn chat_command(model: &str, backend: &str, verbose: bool) -> Result<()> {
     let mut load_opts = LoadOptions::default();
     load_opts.hub.quiet = !verbose;
+    load_opts.backend = parse_generation_backend(backend)?;
 
     if verbose {
-        eprintln!("Loading {model}…");
+        eprintln!("Loading {model} with backend {}…", load_opts.backend);
     } else {
         ui::show_loading("Loading model");
     }
@@ -435,6 +444,28 @@ fn login_command(token: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+fn backend_info_command() -> Result<()> {
+    println!("Backends:");
+    println!("  cpu    available");
+
+    let gpu = mac_gpu_support();
+    if gpu.available {
+        #[cfg(target_os = "macos")]
+        let device = sapient_backends_metal::MlxBackend::device_name()
+            .unwrap_or_else(|| "Apple Silicon GPU".to_string());
+        #[cfg(not(target_os = "macos"))]
+        let device = "GPU".to_string();
+
+        println!("  metal  available via {} ({device})", gpu.backend);
+        println!("  auto   selects metal on this host");
+    } else {
+        println!("  metal  unavailable ({})", gpu.reason);
+        println!("  auto   selects cpu on this host");
+    }
+
+    Ok(())
+}
+
 // ── run ───────────────────────────────────────────────────────────────────────
 
 async fn run_command(
@@ -455,8 +486,9 @@ async fn run_command(
         })?;
         let mut load_opts = LoadOptions::default();
         load_opts.hub.quiet = !verbose;
+        load_opts.backend = parse_generation_backend(&backend)?;
         if verbose {
-            eprintln!("Loading {model}…");
+            eprintln!("Loading {model} with backend {}…", load_opts.backend);
         } else {
             ui::show_loading("Loading model");
         }
@@ -505,6 +537,12 @@ async fn run_command(
     }
 
     Ok(())
+}
+
+fn parse_generation_backend(value: &str) -> Result<GenerationBackend> {
+    value
+        .parse()
+        .with_context(|| format!("invalid backend '{value}'; expected auto, cpu, or metal"))
 }
 
 // ── bench ─────────────────────────────────────────────────────────────────────

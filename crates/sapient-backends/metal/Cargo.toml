@@ -10,10 +10,11 @@ rust-version.workspace = true
 
 # Only build on macOS
 [target.'cfg(target_os = "macos")'.dependencies]
-sapient-core = { workspace = true }
-sapient-ir   = { workspace = true }
-thiserror    = { workspace = true }
-tracing      = { workspace = true }
+sapient-backends-cpu = { workspace = true }
+sapient-core         = { workspace = true }
+sapient-ir           = { workspace = true }
+thiserror            = { workspace = true }
+tracing              = { workspace = true }
 
 # mlx-rs: Rust bindings for Apple MLX (Apple Silicon GPU)
 # Uncomment when ready to enable full MLX acceleration:

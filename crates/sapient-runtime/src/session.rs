@@ -16,7 +16,7 @@ use sapient_core::Tensor;
 use sapient_scheduler::{Batcher, DynamicBatchScheduler, Executor, Request, Response};
 use sapient_telemetry::{ConsoleTelemetry, NoOpTelemetry, Telemetry};
 
-use crate::model::{Model, ModelConfig};
+use crate::model::Model;
 
 // ── SessionOptions ────────────────────────────────────────────────────────────
 
@@ -53,8 +53,16 @@ pub struct InferenceSession {
 impl InferenceSession {
     /// Create a new session from a loaded model.
     pub fn new(model: Model, opts: SessionOptions) -> Result<Self> {
-        let backend: Arc<dyn ExecutionBackend> = Arc::new(CpuBackend::new(opts.cpu_pool_bytes));
+        let backend = select_backend(&model.config.backend, opts.cpu_pool_bytes)?;
+        Self::new_with_backend(model, backend, opts)
+    }
 
+    /// Create a new session with an explicit backend implementation.
+    pub fn new_with_backend(
+        model: Model,
+        backend: Arc<dyn ExecutionBackend>,
+        opts: SessionOptions,
+    ) -> Result<Self> {
         let telemetry: Arc<dyn Telemetry> = if opts.telemetry {
             Arc::new(ConsoleTelemetry)
         } else {
@@ -120,6 +128,47 @@ impl InferenceSession {
     pub fn backend_name(&self) -> &str {
         self.backend.name()
     }
+}
+
+fn select_backend(name: &str, cpu_pool_bytes: usize) -> Result<Arc<dyn ExecutionBackend>> {
+    match name.to_ascii_lowercase().as_str() {
+        "cpu" => Ok(Arc::new(CpuBackend::new(cpu_pool_bytes))),
+        "auto" => select_auto_backend(cpu_pool_bytes),
+        "metal" => select_metal_backend(cpu_pool_bytes),
+        other => Err(SapientError::backend(
+            other,
+            "unsupported backend; expected cpu, metal, or auto",
+        )),
+    }
+}
+
+fn select_auto_backend(cpu_pool_bytes: usize) -> Result<Arc<dyn ExecutionBackend>> {
+    #[cfg(target_os = "macos")]
+    {
+        if sapient_backends_metal::MlxBackend::is_available() {
+            return Ok(Arc::new(sapient_backends_metal::MlxBackend::new()));
+        }
+    }
+    Ok(Arc::new(CpuBackend::new(cpu_pool_bytes)))
+}
+
+fn select_metal_backend(_cpu_pool_bytes: usize) -> Result<Arc<dyn ExecutionBackend>> {
+    #[cfg(target_os = "macos")]
+    {
+        if sapient_backends_metal::MlxBackend::is_available() {
+            return Ok(Arc::new(sapient_backends_metal::MlxBackend::new()));
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = _cpu_pool_bytes;
+    }
+
+    Err(SapientError::backend(
+        "metal",
+        "Metal backend is only available on macOS with a Metal-capable GPU",
+    ))
 }
 
 impl std::fmt::Debug for InferenceSession {

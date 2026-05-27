@@ -1,11 +1,17 @@
 //! Network integration tests for Hub download performance settings.
 //!
+//! Run with `SAPIENT_RUN_HF_NETWORK_TESTS=1 cargo test -p sapient-hub --test download_parallel`.
 //! Run serially — parallel tests contend on HuggingFace Hub file locks for gpt2.
 
 use sapient_hub::{HubClient, LoadOptions};
 
 #[tokio::test]
 async fn hub_download_fast_then_sequential() -> anyhow::Result<()> {
+    if std::env::var("SAPIENT_RUN_HF_NETWORK_TESTS").as_deref() != Ok("1") {
+        eprintln!("skipping Hugging Face network test; set SAPIENT_RUN_HF_NETWORK_TESTS=1 to run");
+        return Ok(());
+    }
+
     let fast = HubClient::with_options(LoadOptions {
         formats: vec!["safetensors".into()],
         quiet: true,

@@ -13,7 +13,7 @@ use tracing::debug;
 use sapient_hub::model_info::{ArchType, ModelInfo};
 use sapient_hub::resolver::ModelFiles;
 use sapient_hub::{tokenizer_fallback_model, HubClient, LoadOptions as HubOptions};
-use sapient_models::ForwardEngine;
+use sapient_models::{ForwardEngine, LlmBackendKind};
 use sapient_tokenizers::{
     chat::{builtin, ChatMessage, ChatTemplate},
     tokenizer::{SapientTokenizer, TokenizerOptions},
@@ -56,6 +56,8 @@ pub struct LoadOptions {
     pub hub: HubOptions,
     /// Override the generation config.
     pub generation: GenerationConfig,
+    /// Native LLM backend for Hub generation.
+    pub backend: LlmBackendKind,
 }
 
 // ── Pipeline ─────────────────────────────────────────────────────────────────
@@ -68,6 +70,7 @@ pub struct Pipeline {
     weight_paths: Vec<PathBuf>,
     engine: Mutex<ForwardEngine>,
     config: GenerationConfig,
+    backend: LlmBackendKind,
 }
 
 impl Pipeline {
@@ -81,6 +84,7 @@ impl Pipeline {
     /// Load with custom hub and generation options.
     pub async fn from_pretrained_with_opts(model_id: &str, opts: LoadOptions) -> Result<Self> {
         debug!("Loading model: {model_id}");
+        let backend = opts.backend;
 
         let mut hub_opts = opts.hub.clone();
         if hub_opts.formats == LoadOptions::default().hub.formats {
@@ -142,9 +146,14 @@ impl Pipeline {
                 ))
             });
 
-        let engine =
-            ForwardEngine::from_weight_paths(model_info.clone(), &model_files.weight_paths)
-                .context("Failed to initialize inference engine")?;
+        validate_tokenizer_model_compat(model_id, &model_info, &tokenizer)?;
+
+        let engine = ForwardEngine::from_weight_paths_with_backend(
+            model_info.clone(),
+            &model_files.weight_paths,
+            backend,
+        )
+        .context("Failed to initialize inference engine")?;
 
         let mut config = opts.generation;
         if config.eos_token_id.is_none() {
@@ -152,8 +161,8 @@ impl Pipeline {
         }
 
         debug!(
-            "Pipeline ready — vocab_size={} layers={}",
-            model_info.vocab_size, model_info.num_hidden_layers
+            "Pipeline ready — vocab_size={} layers={} backend={}",
+            model_info.vocab_size, model_info.num_hidden_layers, backend
         );
 
         Ok(Self {
@@ -163,6 +172,7 @@ impl Pipeline {
             weight_paths: model_files.weight_paths.clone(),
             engine: Mutex::new(engine),
             config,
+            backend,
         })
     }
 
@@ -239,9 +249,14 @@ impl Pipeline {
         let tok = Arc::clone(&self.tokenizer);
         let model_info = self.model_info.clone();
         let weight_paths = self.weight_paths.clone();
+        let backend = self.configured_backend();
 
         tokio::task::spawn_blocking(move || {
-            let mut engine = match ForwardEngine::from_weight_paths(model_info, &weight_paths) {
+            let mut engine = match ForwardEngine::from_weight_paths_with_backend(
+                model_info,
+                &weight_paths,
+                backend,
+            ) {
                 Ok(e) => e,
                 Err(e) => {
                     let _ = tx.blocking_send(format!("Error: {e}"));
@@ -372,12 +387,46 @@ impl Pipeline {
     pub fn arch(&self) -> &ArchType {
         &self.model_info.arch
     }
+
+    fn configured_backend(&self) -> LlmBackendKind {
+        self.backend
+    }
 }
 
 fn ensure_weights_present(files: &ModelFiles) -> Result<()> {
     if files.weight_paths.is_empty() {
         anyhow::bail!("No weight files found for this model");
     }
+    Ok(())
+}
+
+fn validate_tokenizer_model_compat(
+    model_id: &str,
+    model_info: &ModelInfo,
+    tokenizer: &SapientTokenizer,
+) -> Result<()> {
+    let tokenizer_vocab = tokenizer.vocab_size();
+    if tokenizer_vocab > model_info.vocab_size {
+        anyhow::bail!(
+            "tokenizer/model vocab mismatch for '{model_id}': tokenizer has {tokenizer_vocab} tokens but model config vocab_size is {}",
+            model_info.vocab_size
+        );
+    }
+
+    if let Some(eos) = tokenizer.eos_id {
+        if eos as usize >= model_info.vocab_size {
+            anyhow::bail!(
+                "tokenizer/model EOS mismatch for '{model_id}': eos_token_id {eos} is outside model vocab_size {}",
+                model_info.vocab_size
+            );
+        }
+    } else {
+        tracing::warn!(
+            model = model_id,
+            "tokenizer has no recognized EOS token; generation will stop only by max_new_tokens or stop strings"
+        );
+    }
+
     Ok(())
 }
 

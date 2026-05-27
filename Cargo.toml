@@ -3,6 +3,7 @@ members = [
     "crates/sapient-core",
     "crates/sapient-ir",
     "crates/sapient-backends/cpu",
+    "crates/sapient-backends/metal",
     "crates/sapient-scheduler",
     "crates/sapient-io",
     "crates/sapient-telemetry",
@@ -16,7 +17,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version       = "0.1.5"
+version       = "0.1.6"
 edition       = "2021"
 authors       = ["SAPIENT Contributors"]
 license       = "GPL-3.0-only"
@@ -27,13 +28,14 @@ description   = "Fast LLM & SLM inference engine — run any HuggingFace model w
 keywords      = ["llm", "llama", "mistral", "transformers", "inference"]
 categories    = ["science", "algorithms", "text-processing"]
 readme        = "README.md"
-rust-version  = "1.75"
+rust-version  = "1.82"
 
 [workspace.dependencies]
 # Internal crates
 sapient-core         = { path = "crates/sapient-core" }
 sapient-ir           = { path = "crates/sapient-ir" }
 sapient-backends-cpu = { path = "crates/sapient-backends/cpu" }
+sapient-backends-metal = { path = "crates/sapient-backends/metal" }
 sapient-scheduler    = { path = "crates/sapient-scheduler" }
 sapient-io           = { path = "crates/sapient-io" }
 sapient-telemetry    = { path = "crates/sapient-telemetry" }

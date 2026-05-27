@@ -21,5 +21,12 @@ anyhow       = { workspace = true }
 tracing      = { workspace = true }
 ordered-float = { workspace = true }
 
+[features]
+default = []
+mlx = ["dep:mlx-rs"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mlx-rs = { version = "0.25.3", default-features = true, optional = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }

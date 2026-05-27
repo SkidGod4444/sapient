@@ -1,5 +1,6 @@
 //! Real transformer forward passes for text generation.
 
+pub mod backend;
 mod common;
 mod llama;
 mod phi;
@@ -12,6 +13,7 @@ use sapient_hub::resolver::WeightFormat;
 
 use crate::gguf_weights::load_gguf_hf_weights;
 
+pub use backend::{mac_gpu_support, LlmBackendKind, MacGpuSupport};
 pub use llama::LlamaForward;
 pub use phi::PhiForward;
 
@@ -40,18 +42,34 @@ impl ForwardEngine {
     }
 
     pub fn from_weight_paths(info: ModelInfo, weight_paths: &[PathBuf]) -> Result<Self> {
+        Self::from_weight_paths_with_backend(info, weight_paths, LlmBackendKind::Auto)
+    }
+
+    pub fn from_weight_paths_with_backend(
+        info: ModelInfo,
+        weight_paths: &[PathBuf],
+        backend: LlmBackendKind,
+    ) -> Result<Self> {
         match weight_format_from_paths(weight_paths) {
             WeightFormat::Gguf => {
                 let path = weight_paths
                     .first()
                     .context("GGUF model has no weight path")?;
-                Self::from_gguf(info, path)
+                Self::from_gguf_with_backend(info, path, backend)
             }
             WeightFormat::Safetensors | WeightFormat::PyTorchBin => match info.arch {
                 ArchType::Llama | ArchType::Qwen | ArchType::Gemma | ArchType::Mixtral => {
-                    Ok(Self::Llama(LlamaForward::from_files(info, weight_paths)?))
+                    Ok(Self::Llama(LlamaForward::from_files_with_backend(
+                        info,
+                        weight_paths,
+                        backend,
+                    )?))
                 }
-                ArchType::Phi => Ok(Self::Phi(PhiForward::from_files(info, weight_paths)?)),
+                ArchType::Phi => Ok(Self::Phi(PhiForward::from_files_with_backend(
+                    info,
+                    weight_paths,
+                    backend,
+                )?)),
                 other => bail!(
                     "architecture {other:?} does not yet have a native forward engine — \
                      use safetensors weights for Llama, Phi, or Qwen models"
@@ -62,10 +80,20 @@ impl ForwardEngine {
     }
 
     pub fn from_gguf(info: ModelInfo, path: &Path) -> Result<Self> {
+        Self::from_gguf_with_backend(info, path, LlmBackendKind::Auto)
+    }
+
+    pub fn from_gguf_with_backend(
+        info: ModelInfo,
+        path: &Path,
+        backend: LlmBackendKind,
+    ) -> Result<Self> {
         let weights = load_gguf_hf_weights(path)?;
         match info.arch {
             ArchType::Llama | ArchType::Qwen | ArchType::Gemma | ArchType::Mixtral => {
-                Ok(Self::Llama(LlamaForward::from_weights(info, weights)?))
+                Ok(Self::Llama(LlamaForward::from_weights_with_backend(
+                    info, weights, backend,
+                )?))
             }
             ArchType::Phi => {
                 bail!("GGUF Phi models are not yet supported — use safetensors weights")

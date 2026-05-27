@@ -20,5 +20,5 @@ pub mod gguf_weights;
 pub mod registry;
 pub mod weights;
 
-pub use forward::ForwardEngine;
+pub use forward::{mac_gpu_support, ForwardEngine, LlmBackendKind, MacGpuSupport};
 pub use registry::{build_graph, ModelGraph};

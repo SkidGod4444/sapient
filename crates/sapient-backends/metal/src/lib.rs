@@ -11,7 +11,7 @@
 //! - [ ] Automatic graph dispatch
 //!
 //! # Usage (when complete)
-//! ```no_run
+//! ```ignore
 //! use sapient_backends_metal::MlxBackend;
 //! use sapient_runtime::{InferenceSession, Model, ModelConfig, SessionOptions};
 //!
@@ -32,3 +32,6 @@ pub mod backend;
 
 #[cfg(target_os = "macos")]
 pub use backend::MlxBackend;
+
+#[cfg(target_os = "macos")]
+pub type MetalBackend = MlxBackend;

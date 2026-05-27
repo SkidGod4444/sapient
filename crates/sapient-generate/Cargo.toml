@@ -28,6 +28,10 @@ tracing    = { workspace = true }
 futures    = { workspace = true }
 async-trait = { workspace = true }
 
+[features]
+default = []
+mlx = ["sapient-models/mlx"]
+
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio    = { workspace = true }

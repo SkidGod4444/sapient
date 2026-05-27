@@ -6,7 +6,7 @@
     <a href="https://docs.rs/sapient-generate"><img src="https://docs.rs/sapient-generate/badge.svg" alt="docs.rs"/></a>
     <a href="https://github.com/SkidGod4444/sapient/actions"><img src="https://github.com/SkidGod4444/sapient/workflows/CI/badge.svg" alt="CI"/></a>
     <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License"/>
-    <img src="https://img.shields.io/badge/rust-1.75%2B-orange" alt="MSRV"/>
+    <img src="https://img.shields.io/badge/rust-1.82%2B-orange" alt="MSRV"/>
     <img src="https://img.shields.io/github/downloads/SkidGod4444/sapient/total" alt="Downloads"/>
   </p>
   <p>
@@ -61,9 +61,11 @@ Grab a pre-built binary for your platform from the [**latest release**](https://
 ```bash
 # Interactive chat — streaming replies, clean UI
 sapient chat <model>
+sapient chat <model> --backend auto   # auto | cpu | metal
 
 # One-shot completion (Hub models need --prompt)
 sapient run <model> --prompt "Explain transformers in simple terms"
+sapient run <model> --prompt "Explain transformers" --backend cpu
 
 # Download a model to local cache
 sapient pull <model>
@@ -84,6 +86,7 @@ sapient serve <model> --port 8080
 
 # Show info about a model
 sapient info <model>
+sapient backend-info
 
 # Verbose mode — show internal logs and file paths
 sapient -v pull <model>
@@ -176,20 +179,15 @@ let text = p.generate_with_config("Write a haiku about Rust", &cfg).await?;
 
 ## Supported Models
 
-All HuggingFace Hub models work with `sapient chat <model-id>` or `Pipeline::from_pretrained("<model-id>")`.
+Sapient's native generation path currently targets Llama-family and Phi-family causal LMs. Other model builders may exist in the IR layer, but they are not all validated for text generation yet.
 
-| Family | Example IDs | Format |
-|---|---|---|
-| **Llama 3** | `meta-llama/Llama-3.2-1B-Instruct` | GGUF / Safetensors |
-| **Mistral** | `mistralai/Mistral-7B-Instruct-v0.3` | GGUF / Safetensors |
-| **Phi** | `microsoft/phi-2`, `microsoft/Phi-3-mini-4k-instruct` | Safetensors |
-| **Gemma** | `google/gemma-2-2b-it` | Safetensors |
-| **Qwen** | `Qwen/Qwen2.5-1.5B-Instruct` | Safetensors |
-| **GPT-2** | `openai-community/gpt2` | Safetensors |
-| **BERT** | `sentence-transformers/all-MiniLM-L6-v2` | Safetensors |
-| **Mixtral (MoE)** | `mistralai/Mixtral-8x7B-Instruct-v0.1` | GGUF / Safetensors |
-| **Any GGUF** | `TheBloke/Llama-2-7B-GGUF` | Q4_0, Q8_0 |
-| **Custom** | Any model with `config.json` + `tokenizer.json` | Any |
+| Family | Example IDs | Format | Backend |
+|---|---|---|---|
+| **Llama / TinyLlama / Mistral** | `TinyLlama/TinyLlama-1.1B-Chat-v1.0` | GGUF / Safetensors | CPU, MLX on Apple Silicon when built with `--features mlx` |
+| **Phi** | `microsoft/phi-2`, `microsoft/Phi-3-mini-4k-instruct` | Safetensors | CPU, MLX on Apple Silicon when built with `--features mlx` |
+| **Qwen** | `Qwen/Qwen2.5-1.5B-Instruct` | Safetensors | Experimental |
+| **Gemma / GPT-2 / BERT / Mixtral** | Various | Safetensors / GGUF | Not validated for native generation |
+| **GGUF** | `TheBloke/Llama-2-7B-GGUF` | Q4_0, Q8_0 | CPU, macOS Metal dispatch |
 
 ---
 
@@ -241,8 +239,8 @@ sapient-generate          ← Pipeline API — from_pretrained, generate, chat, 
 │   ├── sapient-ir        ← Computation graph IR (90+ ops)
 │   └── sapient-io        ← GGUF (Q4/Q8 dequant), Safetensors, ONNX loaders
 │
-└── sapient-backends-cpu  ← CPU kernels: GQA attention, RoPE, RMSNorm, MatMul...
-    └── sapient-backends-metal  ← 🚧 Apple Silicon GPU via Metal (coming soon)
+├── sapient-backends-cpu    ← CPU kernels: GQA attention, RoPE, RMSNorm, MatMul...
+└── sapient-backends-metal  ← macOS Metal backend selection and kernel integration point
 ```
 
 ---
@@ -253,6 +251,10 @@ sapient-generate          ← Pipeline API — from_pretrained, generate, chat, 
 git clone https://github.com/SkidGod4444/sapient
 cd sapient
 cargo build --workspace --release
+
+# Apple Silicon MLX GPU build:
+# requires Xcode's Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`)
+cargo build -p sapient-cli --release --features mlx
 
 # Binary will be at:
 ./target/release/sapient
@@ -274,5 +276,5 @@ Issues and PRs are very welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guid
 
 Areas where contributions are especially appreciated:
 - New model architecture builders (`crates/sapient-models/src/architectures/`)
-- Apple Metal / MLX GPU backend (`crates/sapient-backends/metal/`)
+- Apple Metal kernels (`crates/sapient-backends/metal/`)
 - Quantization kernels (INT4, INT8 fused)

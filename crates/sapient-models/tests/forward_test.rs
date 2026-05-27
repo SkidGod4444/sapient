@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use sapient_core::Tensor;
 use sapient_hub::model_info::ModelInfo;
-use sapient_models::forward::LlamaForward;
+use sapient_models::forward::{LlamaForward, LlmBackendKind};
 
 const TINY: &str = r#"{
     "architectures": ["LlamaForCausalLM"],
@@ -96,6 +96,53 @@ fn tiny_llama_forward_produces_logits() {
     let info = ModelInfo::from_json_str(TINY).unwrap();
     let weights = build_tiny_weights(&info);
     let mut fwd = LlamaForward::from_weights(info, weights).unwrap();
+
+    let logits = fwd.forward_logits(&[1u32, 2, 3], false).unwrap();
+    assert_eq!(logits.len(), 64);
+    assert!(logits.iter().all(|v| v.is_finite()));
+}
+
+#[test]
+fn tiny_llama_forward_accepts_explicit_cpu_backend() {
+    let info = ModelInfo::from_json_str(TINY).unwrap();
+    let weights = build_tiny_weights(&info);
+    let mut fwd =
+        LlamaForward::from_weights_with_backend(info, weights, LlmBackendKind::Cpu).unwrap();
+
+    let logits = fwd.forward_logits(&[1u32, 2, 3], false).unwrap();
+    assert_eq!(logits.len(), 64);
+    assert!(logits.iter().all(|v| v.is_finite()));
+}
+
+#[cfg(all(target_os = "macos", feature = "mlx"))]
+#[test]
+fn tiny_llama_metal_backend_matches_cpu_reference() {
+    let info = ModelInfo::from_json_str(TINY).unwrap();
+    let weights = build_tiny_weights(&info);
+
+    let mut cpu =
+        LlamaForward::from_weights_with_backend(info.clone(), weights.clone(), LlmBackendKind::Cpu)
+            .unwrap();
+    let mut metal =
+        LlamaForward::from_weights_with_backend(info, weights, LlmBackendKind::Metal).unwrap();
+
+    let cpu_logits = cpu.forward_logits(&[1u32, 2, 3], false).unwrap();
+    let metal_logits = metal.forward_logits(&[1u32, 2, 3], false).unwrap();
+
+    for (a, b) in cpu_logits.iter().zip(metal_logits.iter()) {
+        assert!(
+            (a - b).abs() < 1e-4,
+            "metal backend diverges from CPU reference: {a} vs {b}"
+        );
+    }
+}
+
+#[test]
+fn tiny_llama_auto_backend_generates_logits() {
+    let info = ModelInfo::from_json_str(TINY).unwrap();
+    let weights = build_tiny_weights(&info);
+    let mut fwd =
+        LlamaForward::from_weights_with_backend(info, weights, LlmBackendKind::Auto).unwrap();
 
     let logits = fwd.forward_logits(&[1u32, 2, 3], false).unwrap();
     assert_eq!(logits.len(), 64);

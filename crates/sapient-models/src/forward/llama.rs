@@ -6,10 +6,8 @@ use anyhow::Result;
 use sapient_core::Tensor;
 use sapient_hub::model_info::ModelInfo;
 
-use super::common::{
-    add, apply_rope_positions, concat_seq, embed_tokens, gqa_attention, linear_3d,
-    logits_from_hidden, mean_pool_hidden, merge_heads, mul, rms_norm, silu, split_heads,
-};
+use super::backend::{LlmBackend, LlmBackendDispatch, LlmBackendKind};
+use super::common::{concat_seq, embed_tokens, mean_pool_hidden, merge_heads, split_heads};
 use crate::weights::{
     detect_weight_prefix, load_hf_weights, resolve_lm_head, resolve_weight,
     tie_word_embeddings_from_config,
@@ -30,19 +28,42 @@ pub struct LlamaForward {
     embed_key: String,
     lm_head: Tensor,
     cache: Vec<LayerCache>,
+    backend: LlmBackendDispatch,
 }
 
 impl LlamaForward {
     pub fn from_files(info: ModelInfo, weight_paths: &[std::path::PathBuf]) -> Result<Self> {
+        Self::from_files_with_backend(info, weight_paths, LlmBackendKind::Auto)
+    }
+
+    pub fn from_files_with_backend(
+        info: ModelInfo,
+        weight_paths: &[std::path::PathBuf],
+        backend: LlmBackendKind,
+    ) -> Result<Self> {
         let weights = load_hf_weights(weight_paths)?;
-        Self::from_weights(info, weights)
+        Self::from_weights_with_backend(info, weights, backend)
     }
 
     pub fn from_weights(info: ModelInfo, weights: HashMap<String, Tensor>) -> Result<Self> {
+        Self::from_weights_with_backend(info, weights, LlmBackendKind::Auto)
+    }
+
+    pub fn from_weights_with_backend(
+        info: ModelInfo,
+        weights: HashMap<String, Tensor>,
+        backend: LlmBackendKind,
+    ) -> Result<Self> {
         let prefix = detect_weight_prefix(&weights);
         let embed_key = format!("{prefix}embed_tokens.weight");
         let tie = tie_word_embeddings_from_config(&info.raw);
         let lm_head = resolve_lm_head(&weights, &prefix, tie, &embed_key)?.clone();
+        validate_core_shapes(&info, &weights, &embed_key, &lm_head)?;
+        let backend = LlmBackendDispatch::from_kind(backend)?;
+        tracing::debug!(
+            backend = backend.name(),
+            "initialized Llama forward backend"
+        );
 
         Ok(Self {
             cache: vec![LayerCache::default(); info.num_hidden_layers],
@@ -51,6 +72,7 @@ impl LlamaForward {
             embed_key,
             lm_head,
             weights,
+            backend,
         })
     }
 
@@ -63,7 +85,7 @@ impl LlamaForward {
     /// Run forward on token ids and return logits for the last token.
     pub fn forward_logits(&mut self, input_ids: &[u32], use_cache: bool) -> Result<Vec<f32>> {
         let hidden = self.forward_hidden(input_ids, use_cache)?;
-        logits_from_hidden(&hidden, &self.lm_head)
+        self.backend.logits_from_hidden(&hidden, &self.lm_head)
     }
 
     /// Mean-pooled hidden states for embedding models.
@@ -99,7 +121,8 @@ impl LlamaForward {
         }
 
         let norm_w = resolve_weight(&self.weights, &self.prefix, "norm")?;
-        rms_norm(&x, norm_w, self.info.rms_norm_eps as f32)
+        self.backend
+            .rms_norm(&x, norm_w, self.info.rms_norm_eps as f32)
     }
 
     fn forward_layer(
@@ -120,9 +143,9 @@ impl LlamaForward {
             &self.prefix,
             &format!("{pfx}.input_layernorm"),
         )?;
-        let h = rms_norm(&x, attn_norm_w, eps)?;
+        let h = self.backend.rms_norm(&x, attn_norm_w, eps)?;
 
-        let q = linear_3d(
+        let q = self.backend.linear_3d(
             &h,
             resolve_weight(
                 &self.weights,
@@ -130,7 +153,7 @@ impl LlamaForward {
                 &format!("{pfx}.self_attn.q_proj"),
             )?,
         )?;
-        let k = linear_3d(
+        let k = self.backend.linear_3d(
             &h,
             resolve_weight(
                 &self.weights,
@@ -138,7 +161,7 @@ impl LlamaForward {
                 &format!("{pfx}.self_attn.k_proj"),
             )?,
         )?;
-        let v = linear_3d(
+        let v = self.backend.linear_3d(
             &h,
             resolve_weight(
                 &self.weights,
@@ -151,8 +174,12 @@ impl LlamaForward {
         let mut k = split_heads(&k, n_kv, head_dim)?;
         let mut v = split_heads(&v, n_kv, head_dim)?;
 
-        q = apply_rope_positions(&q, positions, self.info.rope_theta as f32)?;
-        k = apply_rope_positions(&k, positions, self.info.rope_theta as f32)?;
+        q = self
+            .backend
+            .apply_rope_positions(&q, positions, self.info.rope_theta as f32)?;
+        k = self
+            .backend
+            .apply_rope_positions(&k, positions, self.info.rope_theta as f32)?;
 
         let cache = &mut self.cache[layer_idx];
         if use_cache {
@@ -164,9 +191,9 @@ impl LlamaForward {
             cache.values = Some(v.clone());
         }
 
-        let attn = gqa_attention(&q, &k, &v, n_kv, true)?;
+        let attn = self.backend.gqa_attention(&q, &k, &v, n_kv, true)?;
         let attn = merge_heads(&attn)?;
-        let o = linear_3d(
+        let o = self.backend.linear_3d(
             &attn,
             resolve_weight(
                 &self.weights,
@@ -174,29 +201,66 @@ impl LlamaForward {
                 &format!("{pfx}.self_attn.o_proj"),
             )?,
         )?;
-        let x = add(&x, &o)?;
+        let x = self.backend.add(&x, &o)?;
 
         let ffn_norm_w = resolve_weight(
             &self.weights,
             &self.prefix,
             &format!("{pfx}.post_attention_layernorm"),
         )?;
-        let h = rms_norm(&x, ffn_norm_w, eps)?;
+        let h = self.backend.rms_norm(&x, ffn_norm_w, eps)?;
 
-        let gate = linear_3d(
+        let gate = self.backend.linear_3d(
             &h,
             resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.mlp.gate_proj"))?,
         )?;
-        let up = linear_3d(
+        let up = self.backend.linear_3d(
             &h,
             resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.mlp.up_proj"))?,
         )?;
-        let gate = silu(&gate)?;
-        let mid = mul(&gate, &up)?;
-        let down = linear_3d(
+        let gate = self.backend.silu(&gate)?;
+        let mid = self.backend.mul(&gate, &up)?;
+        let down = self.backend.linear_3d(
             &mid,
             resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.mlp.down_proj"))?,
         )?;
-        add(&x, &down)
+        self.backend.add(&x, &down)
     }
+}
+
+fn validate_core_shapes(
+    info: &ModelInfo,
+    weights: &HashMap<String, Tensor>,
+    embed_key: &str,
+    lm_head: &Tensor,
+) -> Result<()> {
+    let embed = weights
+        .get(embed_key)
+        .ok_or_else(|| anyhow::anyhow!("missing embedding weights at '{embed_key}'"))?;
+    let embed_dims = embed.shape().dims();
+    if embed_dims.len() != 2 || embed_dims[1] != info.hidden_size {
+        anyhow::bail!(
+            "embedding shape mismatch at '{embed_key}': expected [vocab, {}], got {:?}",
+            info.hidden_size,
+            embed_dims
+        );
+    }
+    if embed_dims[0] < info.vocab_size {
+        anyhow::bail!(
+            "embedding vocab rows {} are smaller than config vocab_size {}",
+            embed_dims[0],
+            info.vocab_size
+        );
+    }
+
+    let head_dims = lm_head.shape().dims();
+    if head_dims.len() != 2 || head_dims[1] != info.hidden_size {
+        anyhow::bail!(
+            "lm_head shape mismatch: expected [vocab, {}], got {:?}",
+            info.hidden_size,
+            head_dims
+        );
+    }
+
+    Ok(())
 }
