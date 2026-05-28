@@ -1,7 +1,8 @@
 use std::collections::HashMap;
+use anyhow::{bail, Result};
 
-/// Resolves a short alias (like "phi-2") to a HuggingFace repository ID (like "microsoft/phi-2").
-pub fn resolve_model_alias(alias: &str) -> String {
+/// Resolves a short alias (like "openhorizon/phi-2") to a HuggingFace repository ID (like "microsoft/phi-2").
+pub fn resolve_model_alias(alias: &str) -> Result<String> {
     let mut map = HashMap::new();
     map.insert("openhorizon/phi-2", "microsoft/phi-2");
     
@@ -9,10 +10,8 @@ pub fn resolve_model_alias(alias: &str) -> String {
     let normalized = alias.to_lowercase();
     
     if let Some(repo_id) = map.get(normalized.as_str()) {
-        repo_id.to_string()
+        Ok(repo_id.to_string())
     } else {
-        // If it's not an alias, just return the original input
-        // which might already be a valid HuggingFace repo ID.
-        alias.to_string()
+        bail!("Model '{}' is not supported in the registry. Currently supported model is: openhorizon/phi-2", alias)
     }
 }

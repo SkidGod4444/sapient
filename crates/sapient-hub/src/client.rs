@@ -97,16 +97,19 @@ impl HubClient {
     /// Download a model by its HuggingFace model ID (e.g. `"meta-llama/Llama-3.2-1B"`).
     ///
     /// Returns the resolved local file paths — no Python, no git-lfs required.
-    pub async fn download(&self, model_id: &str) -> Result<ModelFiles> {
-        debug!("Downloading model: {model_id}");
-        let repo = self.api.model(model_id.to_owned());
-        let files = self.resolve_files(&repo, model_id).await?;
+    pub async fn download(&self, model_alias: &str) -> Result<ModelFiles> {
+        let actual_repo = crate::registry::resolve_model_alias(model_alias)?;
+        debug!("Downloading model: {model_alias} (resolved to {actual_repo})");
+        let repo = self.api.model(actual_repo.clone());
+        let mut files = self.resolve_files(&repo, &actual_repo).await?;
+        files.model_id = model_alias.to_owned();
         Ok(files)
     }
 
     /// Fetch model info / architecture type from the Hub (reads `config.json`).
-    pub async fn model_info(&self, model_id: &str) -> Result<ModelInfo> {
-        let repo = self.api.model(model_id.to_owned());
+    pub async fn model_info(&self, model_alias: &str) -> Result<ModelInfo> {
+        let actual_repo = crate::registry::resolve_model_alias(model_alias)?;
+        let repo = self.api.model(actual_repo);
         let config_path = repo
             .get("config.json")
             .await
@@ -209,10 +212,18 @@ impl HubClient {
     ) -> Result<Vec<PathBuf>> {
         let mut paths = Vec::with_capacity(names.len());
         for name in names {
-            let path = repo
-                .get(name)
-                .await
-                .with_context(|| format!("Failed to download '{name}'"))?;
+            let mut retries = 3;
+            let path = loop {
+                match repo.get(name).await {
+                    Ok(p) => break p,
+                    Err(e) if retries > 0 => {
+                        debug!("Retry downloading '{}' ({} retries left) due to: {}", name, retries, e);
+                        retries -= 1;
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("Failed to download '{}': {}", name, e)),
+                }
+            };
             paths.push(path);
         }
         Ok(paths)
@@ -237,10 +248,19 @@ impl HubClient {
                     .acquire()
                     .await
                     .map_err(|e| anyhow::anyhow!("download worker failed: {e}"))?;
-                api.model(model_id)
-                    .get(&name)
-                    .await
-                    .with_context(|| format!("Failed to download '{name}'"))
+                
+                let mut retries = 3;
+                loop {
+                    match api.model(model_id.clone()).get(&name).await {
+                        Ok(p) => return Ok(p),
+                        Err(e) if retries > 0 => {
+                            debug!("Retry parallel download '{}' ({} retries left) due to: {}", name, retries, e);
+                            retries -= 1;
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
+                        Err(e) => return Err(anyhow::anyhow!("Failed to download '{}': {}", name, e)),
+                    }
+                }
             }));
         }
 
