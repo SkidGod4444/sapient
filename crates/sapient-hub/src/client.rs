@@ -101,7 +101,21 @@ impl HubClient {
         let actual_repo = crate::registry::resolve_model_alias(model_alias)?;
         debug!("Downloading model: {model_alias} (resolved to {actual_repo})");
         let repo = self.api.model(actual_repo.clone());
-        let mut files = self.resolve_files(&repo, &actual_repo).await?;
+        let mut files = match self.resolve_files(&repo, &actual_repo).await {
+            Ok(f) => f,
+            Err(e) => {
+                if self.opts.fast_download {
+                    eprintln!("Warning: Fast download failed ({}). Retrying in safe mode...", e);
+                    let mut safe_opts = self.opts.clone();
+                    safe_opts.fast_download = false;
+                    let safe_client = Self::with_options(safe_opts)?;
+                    let safe_repo = safe_client.api.model(actual_repo.clone());
+                    safe_client.resolve_files(&safe_repo, &actual_repo).await?
+                } else {
+                    return Err(e);
+                }
+            }
+        };
         files.model_id = model_alias.to_owned();
         Ok(files)
     }
@@ -212,14 +226,16 @@ impl HubClient {
     ) -> Result<Vec<PathBuf>> {
         let mut paths = Vec::with_capacity(names.len());
         for name in names {
-            let mut retries = 3;
+            let mut retries = 5;
+            let mut backoff = 2;
             let path = loop {
                 match repo.get(name).await {
                     Ok(p) => break p,
                     Err(e) if retries > 0 => {
                         debug!("Retry downloading '{}' ({} retries left) due to: {}", name, retries, e);
                         retries -= 1;
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                        backoff = std::cmp::min(backoff * 2, 10);
                     }
                     Err(e) => return Err(anyhow::anyhow!("Failed to download '{}': {}", name, e)),
                 }
@@ -249,14 +265,16 @@ impl HubClient {
                     .await
                     .map_err(|e| anyhow::anyhow!("download worker failed: {e}"))?;
                 
-                let mut retries = 3;
+                let mut retries = 5;
+                let mut backoff = 2;
                 loop {
                     match api.model(model_id.clone()).get(&name).await {
                         Ok(p) => return Ok(p),
                         Err(e) if retries > 0 => {
                             debug!("Retry parallel download '{}' ({} retries left) due to: {}", name, retries, e);
                             retries -= 1;
-                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                            backoff = std::cmp::min(backoff * 2, 10);
                         }
                         Err(e) => return Err(anyhow::anyhow!("Failed to download '{}': {}", name, e)),
                     }
