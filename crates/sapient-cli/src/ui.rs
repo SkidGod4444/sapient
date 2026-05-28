@@ -49,11 +49,6 @@ pub fn clear_status() {
     let _ = io::stderr().flush();
 }
 
-/// Show a single-line loading status on stderr (no paths or log noise).
-pub fn show_loading(message: &str) {
-    let _ = write!(io::stderr(), "\r{}…{} ", message, reset());
-    let _ = io::stderr().flush();
-}
 
 pub fn print_chat_banner(model: &str, arch: &str) {
     let line = "─".repeat(48);

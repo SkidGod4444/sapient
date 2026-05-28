@@ -17,7 +17,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version       = "0.1.8"
+version       = "0.1.9"
 edition       = "2021"
 authors       = ["SAPIENT Contributors"]
 license       = "GPL-3.0-only"
@@ -74,7 +74,7 @@ memmap2 = "0.9"
 prost   = "0.12"
 
 # HuggingFace ecosystem
-hf-hub     = { version = "0.4.0", default-features = false, features = ["tokio", "rustls-tls"] }
+hf-hub     = { version = "0.4.0", default-features = true, features = ["tokio", "rustls-tls"] }
 tokenizers = { version = "0.23", features = ["http"] }
 minijinja  = "2.0"
 

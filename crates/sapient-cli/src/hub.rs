@@ -22,7 +22,7 @@ pub async fn pull_model(model_id: &str) -> Result<ModelFiles> {
     pull_model_with_options(
         model_id,
         LoadOptions {
-            quiet: true,
+            quiet: false,
             ..Default::default()
         },
     )

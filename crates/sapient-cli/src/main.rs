@@ -237,13 +237,13 @@ async fn main() -> Result<()> {
 
 async fn chat_command(model: &str, backend: &str, verbose: bool) -> Result<()> {
     let mut load_opts = LoadOptions::default();
-    load_opts.hub.quiet = !verbose;
+    load_opts.hub.quiet = false; // Always show progress!
     load_opts.backend = parse_generation_backend(backend)?;
 
     if verbose {
         eprintln!("Loading {model} with backend {}…", load_opts.backend);
     } else {
-        ui::show_loading("Loading model");
+        eprintln!("Loading model {model}…");
     }
 
     let pipeline = Pipeline::from_pretrained_with_opts(model, load_opts)
@@ -300,7 +300,7 @@ async fn pull_command(model: &str, verbose: bool) -> Result<()> {
     if verbose {
         println!("Pulling {model}…");
     } else {
-        ui::show_loading(&format!("Downloading {model}"));
+        println!("Downloading {model}…");
     }
 
     let files = if verbose {
@@ -485,17 +485,14 @@ async fn run_command(
             )
         })?;
         let mut load_opts = LoadOptions::default();
-        load_opts.hub.quiet = !verbose;
+        load_opts.hub.quiet = false; // Always show progress!
         load_opts.backend = parse_generation_backend(&backend)?;
         if verbose {
             eprintln!("Loading {model} with backend {}…", load_opts.backend);
         } else {
-            ui::show_loading("Loading model");
+            eprintln!("Loading model {model}…");
         }
         let pipeline = Pipeline::from_pretrained_with_opts(model, load_opts).await?;
-        if !verbose {
-            ui::clear_status();
-        }
         let output = pipeline.generate(&prompt).await?;
         println!("{output}");
         return Ok(());
