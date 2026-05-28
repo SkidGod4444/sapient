@@ -1,7 +1,7 @@
 //! Real transformer forward passes for text generation.
 
 pub mod backend;
-mod common;
+pub mod common;
 mod llama;
 mod phi;
 

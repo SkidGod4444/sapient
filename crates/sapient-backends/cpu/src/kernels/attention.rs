@@ -48,6 +48,10 @@ pub fn scaled_dot_product_attention(
     let k_data = k.as_f32_slice();
     let v_data = v.as_f32_slice();
 
+    let q_strides = q.strides();
+    let k_strides = k.strides();
+    let v_strides = v.strides();
+
     // KV head repetition for GQA.
     let kv_rep = n_heads / n_kv_heads; // 1 for MHA, >1 for GQA
 
@@ -63,9 +67,12 @@ pub fn scaled_dot_product_attention(
             for qi in 0..seq_q {
                 for ki in 0..seq_k {
                     let mut dot = 0.0f32;
+                    let q_base = b * q_strides[0] + h * q_strides[1] + qi * q_strides[2];
+                    let k_base = b * k_strides[0] + kv_h * k_strides[1] + ki * k_strides[2];
+                    
                     for d in 0..head_dim {
-                        let q_idx = ((b * n_heads + h) * seq_q + qi) * head_dim + d;
-                        let k_idx = ((b * n_kv_heads + kv_h) * seq_k + ki) * head_dim + d;
+                        let q_idx = q_base + d * q_strides[3];
+                        let k_idx = k_base + d * k_strides[3];
                         dot += q_data[q_idx] * k_data[k_idx];
                     }
                     scores[qi * seq_k + ki] = dot * scale;
@@ -85,11 +92,17 @@ pub fn scaled_dot_product_attention(
             // Softmax over seq_k for each query position.
             for qi in 0..seq_q {
                 let row = &mut scores[qi * seq_k..(qi + 1) * seq_k];
-                let max_v = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let mut max_v = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                if max_v == f32::NEG_INFINITY {
+                    max_v = 0.0;
+                }
                 let mut sum = 0.0f32;
                 for v in row.iter_mut() {
                     *v = (*v - max_v).exp();
                     sum += *v;
+                }
+                if sum == 0.0 {
+                    sum = f32::EPSILON;
                 }
                 for v in row.iter_mut() {
                     *v /= sum;
@@ -102,7 +115,7 @@ pub fn scaled_dot_product_attention(
                     let mut acc = 0.0f32;
                     for ki in 0..seq_k {
                         let s_idx = qi * seq_k + ki;
-                        let v_idx = ((b * n_kv_heads + kv_h) * seq_k + ki) * head_dim + d;
+                        let v_idx = b * v_strides[0] + kv_h * v_strides[1] + ki * v_strides[2] + d * v_strides[3];
                         acc += scores[s_idx] * v_data[v_idx];
                     }
                     out[((b * n_heads + h) * seq_q + qi) * head_dim + d] = acc;

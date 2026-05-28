@@ -72,6 +72,9 @@ impl Sampler {
 
             SamplingStrategy::Temperature(t) => {
                 let t = *t;
+                if t <= 0.0 {
+                    return Ok(argmax(logits));
+                }
                 let scaled = scale_logits(logits, t);
                 let probs = softmax(&scaled);
                 Ok(self.random_sample(&probs))
@@ -79,6 +82,9 @@ impl Sampler {
 
             SamplingStrategy::TopK { k, temperature } => {
                 let (k, t) = (*k, *temperature);
+                if t <= 0.0 {
+                    return Ok(argmax(logits));
+                }
                 let scaled = scale_logits(logits, t);
                 let filtered = top_k_filter(&scaled, k);
                 let probs = softmax(&filtered);
@@ -87,6 +93,9 @@ impl Sampler {
 
             SamplingStrategy::TopP { p, temperature } => {
                 let (p, t) = (*p, *temperature);
+                if t <= 0.0 {
+                    return Ok(argmax(logits));
+                }
                 let scaled = scale_logits(logits, t);
                 let filtered = top_p_filter(&scaled, p);
                 let probs = softmax(&filtered);
@@ -101,6 +110,9 @@ impl Sampler {
             } => {
                 let (k, p, t, rp) = (*top_k, *top_p, *temperature, *repetition_penalty);
                 let mut penalized = apply_repetition_penalty(logits, prev_tokens, rp);
+                if t <= 0.0 {
+                    return Ok(argmax(&penalized));
+                }
                 penalized = scale_logits(&penalized, t);
                 penalized = top_k_filter(&penalized, k);
                 penalized = top_p_filter(&penalized, p);

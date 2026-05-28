@@ -3,6 +3,7 @@
 //! A `Tensor` owns its shape and dtype metadata, and holds a reference-counted
 //! `BufferHandle` for the raw bytes.  Layout is always row-major (C order).
 
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde::{Deserializer, Serializer};
 
@@ -146,6 +147,23 @@ impl Tensor {
         unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, bytes.len() / 4) }
     }
 
+    /// Mutable typed `f32` view — fails if buffer is shared or not F32.
+    pub fn as_f32_slice_mut(&mut self) -> Result<&mut [f32]> {
+        if self.dtype != DType::F32 {
+            return Err(SapientError::internal("Tensor dtype is not F32"));
+        }
+        let offset = self.offset;
+        let buf = Arc::get_mut(&mut self.buffer.0)
+            .ok_or_else(|| SapientError::internal("Cannot mutate shared tensor buffer"))?;
+        let bytes = buf.as_bytes_mut();
+        let bytes = &mut bytes[offset..];
+        if bytes.len() % 4 != 0 {
+            return Err(SapientError::internal("Buffer length not a multiple of 4"));
+        }
+        // SAFETY: alignment ensured by CpuBuffer, dtype checked above.
+        Ok(unsafe { std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut f32, bytes.len() / 4) })
+    }
+
     // ── Shape manipulation ───────────────────────────────────────────────────
 
     /// Returns a new tensor with a different shape but the same buffer.
@@ -177,6 +195,26 @@ impl Tensor {
             strides,
             buffer: self.buffer.clone(),
             offset: self.offset,
+        })
+    }
+
+    /// Return a view of the tensor sliced along the given axis.
+    pub fn slice_axis(&self, axis: usize, start: usize, end: usize) -> Result<Tensor> {
+        let mut dims = self.shape.dims().to_vec();
+        if axis >= dims.len() {
+            return Err(SapientError::internal("slice axis out of bounds"));
+        }
+        if start > end || end > dims[axis] {
+            return Err(SapientError::internal("slice range out of bounds"));
+        }
+        dims[axis] = end - start;
+        let offset = self.offset + start * self.strides[axis] * self.dtype.element_size();
+        Ok(Tensor {
+            shape: Shape(dims),
+            dtype: self.dtype,
+            strides: self.strides.clone(),
+            buffer: self.buffer.clone(),
+            offset,
         })
     }
 

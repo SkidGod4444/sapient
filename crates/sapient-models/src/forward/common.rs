@@ -140,36 +140,51 @@ fn strides_for(dims: &[usize]) -> Vec<usize> {
     strides
 }
 
-/// Concatenate two 4-D tensors along the sequence axis (dim 2).
-pub fn concat_seq(k1: &Tensor, k2: &Tensor) -> Result<Tensor> {
-    let d1 = k1.shape().dims();
-    let d2 = k2.shape().dims();
-    if d1.len() != 4 || d2.len() != 4 {
-        anyhow::bail!("concat_seq expects 4-D tensors");
+/// Update the pre-allocated KV cache in place and return a view of length `seq_len + new_seq`.
+pub fn update_kv_cache(cache: &mut Tensor, current_seq_len: usize, new_k: &Tensor) -> Result<Tensor> {
+    let cd = cache.shape().dims();
+    let nd = new_k.shape().dims();
+    
+    if cd.len() != 4 || nd.len() != 4 {
+        anyhow::bail!("update_kv_cache expects 4-D tensors");
     }
-    if d1[0] != d2[0] || d1[1] != d2[1] || d1[3] != d2[3] {
-        anyhow::bail!("concat_seq shape mismatch");
+    if cd[0] != nd[0] || cd[1] != nd[1] || cd[3] != nd[3] {
+        anyhow::bail!("update_kv_cache shape mismatch");
     }
-    let new_seq = d1[2] + d2[2];
-    let mut out = vec![0.0f32; d1[0] * d1[1] * new_seq * d1[3]];
-    let a = k1.as_f32_slice();
-    let b = k2.as_f32_slice();
-    let (b_sz, h, _, hd) = (d1[0], d1[1], d1[2], d1[3]);
-    let s1 = d1[2];
-    let s2 = d2[2];
-
-    for bi in 0..b_sz {
-        for hi in 0..h {
-            let dst_base = ((bi * h + hi) * new_seq) * hd;
-            let a_base = ((bi * h + hi) * s1) * hd;
-            let b_base = ((bi * h + hi) * s2) * hd;
-            out[dst_base..dst_base + s1 * hd].copy_from_slice(&a[a_base..a_base + s1 * hd]);
-            out[dst_base + s1 * hd..dst_base + (s1 + s2) * hd]
-                .copy_from_slice(&b[b_base..b_base + s2 * hd]);
+    
+    let max_seq = cd[2];
+    let new_seq = nd[2];
+    let total_seq = current_seq_len + new_seq;
+    
+    if total_seq > max_seq {
+        anyhow::bail!("context length {} exceeds max cache size {}", total_seq, max_seq);
+    }
+    
+    let (b_sz, h, hd) = (cd[0], cd[1], cd[3]);
+    let new_k_slice = new_k.as_f32_slice();
+    
+    let cache_strides = cache.strides().to_vec();
+    
+    {
+        let cache_slice = cache.as_f32_slice_mut()?;
+        for bi in 0..b_sz {
+            for hi in 0..h {
+                let cache_base = bi * cache_strides[0] + hi * cache_strides[1] + current_seq_len * cache_strides[2];
+                let new_base = ((bi * h + hi) * new_seq) * hd; // new_k is assumed contiguous from split_heads
+                
+                for si in 0..new_seq {
+                    let c_idx = cache_base + si * cache_strides[2];
+                    let n_idx = new_base + si * hd;
+                    
+                    // Copy head_dim elements
+                    cache_slice[c_idx..c_idx + hd].copy_from_slice(&new_k_slice[n_idx..n_idx + hd]);
+                }
+            }
         }
     }
-
-    Tensor::from_f32(&out, Shape::new([b_sz, h, new_seq, hd])).map_err(|e| anyhow::anyhow!("{e}"))
+    
+    // Return a sliced view of the cache from 0 to total_seq
+    cache.slice_axis(2, 0, total_seq).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 pub fn apply_rope_positions(x: &Tensor, positions: &[usize], base: f32) -> Result<Tensor> {

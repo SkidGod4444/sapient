@@ -7,7 +7,7 @@ use sapient_core::Tensor;
 use sapient_hub::model_info::ModelInfo;
 
 use super::backend::{LlmBackend, LlmBackendDispatch, LlmBackendKind};
-use super::common::{concat_seq, embed_tokens, mean_pool_hidden, merge_heads, split_heads};
+use super::common::{embed_tokens, mean_pool_hidden, merge_heads, split_heads};
 use crate::weights::{
     detect_weight_prefix, load_hf_weights, resolve_lm_head, resolve_weight,
     tie_word_embeddings_from_config,
@@ -18,6 +18,7 @@ use crate::weights::{
 struct LayerCache {
     keys: Option<Tensor>,
     values: Option<Tensor>,
+    seq_len: usize,
 }
 
 /// Real Llama-architecture forward engine backed by safetensors weights.
@@ -65,8 +66,25 @@ impl LlamaForward {
             "initialized Llama forward backend"
         );
 
+        let max_seq = info.max_position_embeddings;
+        let n_kv = info.num_key_value_heads;
+        let hd = info.head_dim;
+        let cache_shape = vec![1, n_kv, max_seq, hd];
+        
+        let cache = (0..info.num_hidden_layers)
+            .map(|_| {
+                let keys = Tensor::zeros(cache_shape.clone(), sapient_core::DType::F32).unwrap();
+                let values = Tensor::zeros(cache_shape.clone(), sapient_core::DType::F32).unwrap();
+                LayerCache {
+                    keys: Some(keys),
+                    values: Some(values),
+                    seq_len: 0,
+                }
+            })
+            .collect();
+
         Ok(Self {
-            cache: vec![LayerCache::default(); info.num_hidden_layers],
+            cache,
             info,
             prefix,
             embed_key,
@@ -78,7 +96,7 @@ impl LlamaForward {
 
     pub fn reset_cache(&mut self) {
         for layer in &mut self.cache {
-            *layer = LayerCache::default();
+            layer.seq_len = 0;
         }
     }
 
@@ -105,8 +123,7 @@ impl LlamaForward {
         let start_pos = if use_cache {
             self.cache
                 .first()
-                .and_then(|l| l.keys.as_ref())
-                .map(|k| k.shape().dims()[2])
+                .map(|l| l.seq_len)
                 .unwrap_or(0)
         } else {
             self.reset_cache();
@@ -183,12 +200,12 @@ impl LlamaForward {
 
         let cache = &mut self.cache[layer_idx];
         if use_cache {
-            if let (Some(ck), Some(cv)) = (&cache.keys, &cache.values) {
-                k = concat_seq(ck, &k)?;
-                v = concat_seq(cv, &v)?;
+            let current_seq = cache.seq_len;
+            if let (Some(ck), Some(cv)) = (&mut cache.keys, &mut cache.values) {
+                k = crate::forward::common::update_kv_cache(ck, current_seq, &k)?;
+                v = crate::forward::common::update_kv_cache(cv, current_seq, &v)?;
             }
-            cache.keys = Some(k.clone());
-            cache.values = Some(v.clone());
+            cache.seq_len = current_seq + positions.len();
         }
 
         let attn = self.backend.gqa_attention(&q, &k, &v, n_kv, true)?;

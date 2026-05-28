@@ -93,9 +93,22 @@ pub fn list_cached_models() -> Result<Vec<String>> {
     let mut models = Vec::new();
     for entry in std::fs::read_dir(&hub_cache)? {
         let entry = entry?;
+        let path = entry.path();
+        
         let name = entry.file_name().to_string_lossy().into_owned();
         if let Some(rest) = name.strip_prefix("models--") {
-            models.push(rest.replace("--", "/"));
+            // Verify it's a properly installed model, not an empty or failed directory
+            let snapshots_dir = path.join("snapshots");
+            if snapshots_dir.is_dir() {
+                // Check if there's at least one commit hash folder inside snapshots
+                let has_commits = std::fs::read_dir(&snapshots_dir)
+                    .map(|mut dirs| dirs.next().is_some())
+                    .unwrap_or(false);
+                
+                if has_commits {
+                    models.push(rest.replace("--", "/"));
+                }
+            }
         }
     }
     models.sort();

@@ -131,7 +131,7 @@ use sapient_generate::Pipeline;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Downloads, caches, and runs — zero config needed
-    let p = Pipeline::from_pretrained("microsoft/phi-2").await?;
+    let p = Pipeline::from_pretrained("openhorizon/phi-2").await?;
     println!("{}", p.generate("The key to good software is").await?);
     Ok(())
 }
@@ -142,7 +142,7 @@ async fn main() -> anyhow::Result<()> {
 ```rust
 use sapient_tokenizers::ChatMessage;
 
-let p = Pipeline::from_pretrained("meta-llama/Llama-3.2-1B-Instruct").await?;
+let p = Pipeline::from_pretrained("openhorizon/phi-2").await?;
 let reply = p.chat(&[
     ChatMessage::system("You are a helpful coding assistant."),
     ChatMessage::user("Write a Rust function to reverse a string."),
@@ -179,22 +179,20 @@ let text = p.generate_with_config("Write a haiku about Rust", &cfg).await?;
 
 ## Supported Models
 
-Sapient's native generation path currently targets Llama-family and Phi-family causal LMs. Other model builders may exist in the IR layer, but they are not all validated for text generation yet.
+Sapient's native generation path is currently focused exclusively on optimizing the **openhorizon/phi-2** model for edge devices. Our built-in registry resolves `openhorizon/phi-2` directly to the Hugging Face repository, while providing $O(1)$ KV-caching optimizations.
 
-| Family | Example IDs | Format | Backend |
-|---|---|---|---|
-| **Llama / TinyLlama / Mistral** | `TinyLlama/TinyLlama-1.1B-Chat-v1.0` | GGUF / Safetensors | CPU, MLX on Apple Silicon when built with `--features mlx` |
-| **Phi** | `microsoft/phi-2`, `microsoft/Phi-3-mini-4k-instruct` | Safetensors | CPU, MLX on Apple Silicon when built with `--features mlx` |
-| **Qwen** | `Qwen/Qwen2.5-1.5B-Instruct` | Safetensors | Experimental |
-| **Gemma / GPT-2 / BERT / Mixtral** | Various | Safetensors / GGUF | Not validated for native generation |
-| **GGUF** | `TheBloke/Llama-2-7B-GGUF` | Q4_0, Q8_0 | CPU, macOS Metal dispatch |
+| Registry Alias | Format | Backend |
+|---|---|---|
+| **`openhorizon/phi-2`** | Safetensors | CPU, MLX on Apple Silicon when built with `--features mlx` |
+
+*Note: Other model builders exist in the IR layer but are not officially supported or validated in the current registry focus.*
 
 ---
 
 ## OpenAI-Compatible API
 
 ```bash
-sapient serve microsoft/phi-2 --port 8080
+sapient serve openhorizon/phi-2 --port 8080
 ```
 
 ```bash
@@ -202,7 +200,7 @@ sapient serve microsoft/phi-2 --port 8080
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "microsoft/phi-2",
+    "model": "openhorizon/phi-2",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 ```

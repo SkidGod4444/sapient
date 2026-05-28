@@ -55,9 +55,15 @@ fn apply_softmax_impl(x: &Tensor, axis: i64, log_mode: bool) -> Result<Tensor> {
                 .collect();
 
             // Subtract max for numerical stability.
-            let max_v = slice.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let mut max_v = slice.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            if max_v == f32::NEG_INFINITY {
+                max_v = 0.0;
+            }
             let exps: Vec<f32> = slice.iter().map(|&v| (v - max_v).exp()).collect();
-            let sum_e: f32 = exps.iter().sum();
+            let mut sum_e: f32 = exps.iter().sum();
+            if sum_e == 0.0 {
+                sum_e = f32::EPSILON;
+            }
 
             for d in 0..dim_size {
                 let idx = (o * dim_size + d) * inner + i;

@@ -90,23 +90,50 @@ pub fn build(info: &ModelInfo) -> Result<Graph> {
             1,
             Some(format!("{p}.self_attn.out_proj")),
         );
-        let x_attn = g.add_op(OpType::Add, vec![x, o], 1, Some(format!("{p}.attn_res")));
 
-        // FFN: Linear → GELU → Linear.
-        let ff1 = g.add_op(
-            OpType::MatMul,
-            vec![x_attn],
-            1,
-            Some(format!("{p}.mlp.fc1")),
-        );
-        let act = g.add_op(OpType::Gelu, vec![ff1], 1, Some(format!("{p}.mlp.gelu")));
-        let ff2 = g.add_op(OpType::MatMul, vec![act], 1, Some(format!("{p}.mlp.fc2")));
-        x = g.add_op(
-            OpType::Add,
-            vec![x_attn, ff2],
-            1,
-            Some(format!("{p}.ffn_res")),
-        );
+        let is_parallel = info.model_type == "phi";
+
+        if is_parallel {
+            // Parallel structure (Phi-1, Phi-2)
+            let ff1 = g.add_op(
+                OpType::MatMul,
+                vec![norm],
+                1,
+                Some(format!("{p}.mlp.fc1")),
+            );
+            let act = g.add_op(OpType::Gelu, vec![ff1], 1, Some(format!("{p}.mlp.gelu")));
+            let ff2 = g.add_op(OpType::MatMul, vec![act], 1, Some(format!("{p}.mlp.fc2")));
+            
+            let parallel_res = g.add_op(OpType::Add, vec![o, ff2], 1, Some(format!("{p}.parallel_res")));
+            x = g.add_op(OpType::Add, vec![x, parallel_res], 1, Some(format!("{p}.res")));
+        } else {
+            // Sequential structure (Phi-3)
+            let x_attn = g.add_op(OpType::Add, vec![x, o], 1, Some(format!("{p}.attn_res")));
+            let norm2 = g.add_op(
+                OpType::LayerNorm {
+                    axis: -1,
+                    epsilon: eps,
+                },
+                vec![x_attn],
+                1,
+                Some(format!("{p}.post_attention_layernorm")),
+            );
+            
+            let ff1 = g.add_op(
+                OpType::MatMul,
+                vec![norm2],
+                1,
+                Some(format!("{p}.mlp.gate_up_proj")),
+            );
+            let act = g.add_op(OpType::Silu, vec![ff1], 1, Some(format!("{p}.mlp.act")));
+            let ff2 = g.add_op(OpType::MatMul, vec![act], 1, Some(format!("{p}.mlp.down_proj")));
+            x = g.add_op(
+                OpType::Add,
+                vec![x_attn, ff2],
+                1,
+                Some(format!("{p}.ffn_res")),
+            );
+        }
     }
 
     let normed = g.add_op(

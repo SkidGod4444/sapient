@@ -185,12 +185,12 @@ async fn main() -> Result<()> {
     init_tracing(cli.json_logs, cli.verbose);
 
     match cli.command {
-        Commands::Chat { model, backend } => chat_command(&model, &backend, cli.verbose).await,
-        Commands::Pull { model } => pull_command(&model, cli.verbose).await,
+        Commands::Chat { model, backend } => chat_command(&sapient_hub::resolve_model_alias(&model), &backend, cli.verbose).await,
+        Commands::Pull { model } => pull_command(&sapient_hub::resolve_model_alias(&model), cli.verbose).await,
         Commands::List => list_command(),
-        Commands::Rm { model } => rm_command(&model),
-        Commands::Reset { model, yes, stale } => reset_command(model.as_deref(), yes, stale),
-        Commands::Info { model } => info_command(&model).await,
+        Commands::Rm { model } => rm_command(&sapient_hub::resolve_model_alias(&model)),
+        Commands::Reset { model, yes, stale } => reset_command(model.map(|m| sapient_hub::resolve_model_alias(&m)).as_deref(), yes, stale),
+        Commands::Info { model } => info_command(&sapient_hub::resolve_model_alias(&model)).await,
         Commands::BackendInfo => backend_info_command(),
         Commands::Login { token } => login_command(token.as_deref()),
         Commands::Run {
@@ -202,7 +202,7 @@ async fn main() -> Result<()> {
             telemetry,
         } => {
             run_command(
-                &model,
+                &sapient_hub::resolve_model_alias(&model),
                 prompt,
                 input,
                 output,
@@ -218,15 +218,15 @@ async fn main() -> Result<()> {
             backend,
             warmup,
             iters,
-        } => bench_command(&model, &batch_sizes, backend, warmup, iters).await,
-        Commands::Inspect { model, output } => inspect_command(&model, output).await,
+        } => bench_command(&sapient_hub::resolve_model_alias(&model), &batch_sizes, backend, warmup, iters).await,
+        Commands::Inspect { model, output } => inspect_command(&sapient_hub::resolve_model_alias(&model), output).await,
         Commands::Serve {
             model,
             port,
             backend,
             workers,
         } => {
-            let model_path = hub::resolve_model_path(&model).await?;
+            let model_path = hub::resolve_model_path(&sapient_hub::resolve_model_alias(&model)).await?;
             server::serve(model_path, port, backend, workers).await
         }
         Commands::Update { force } => update::run_update(force),

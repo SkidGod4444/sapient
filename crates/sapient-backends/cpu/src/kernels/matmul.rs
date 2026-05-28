@@ -123,6 +123,9 @@ pub fn gemm(
     let b_data = b2.as_f32_slice();
     let mut out = vec![0.0f32; m * n];
 
+    let a_strides = a2.strides();
+    let b_strides = b2.strides();
+
     unsafe {
         matrixmultiply::sgemm(
             m,
@@ -130,11 +133,11 @@ pub fn gemm(
             n,
             alpha,
             a_data.as_ptr(),
-            k as isize,
-            1,
+            a_strides[0] as isize,
+            a_strides[1] as isize,
             b_data.as_ptr(),
-            n as isize,
-            1,
+            b_strides[0] as isize,
+            b_strides[1] as isize,
             0.0,
             out.as_mut_ptr(),
             n as isize,
