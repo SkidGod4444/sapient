@@ -8,6 +8,15 @@ use anyhow::{bail, Context, Result};
 
 const REPO: &str = "SkidGod4444/sapient";
 const BINARY: &str = "sapient";
+/// MLX's compiled Metal shader library. The Metal build ships it next to the
+/// binary because MLX loads it from the executable's directory at runtime.
+const METALLIB: &str = "mlx.metallib";
+
+/// Files staged in a temp dir, ready to install over the current binary.
+struct Staged {
+    binary: PathBuf,
+    metallib: Option<PathBuf>,
+}
 
 struct PlatformAsset {
     triple: &'static str,
@@ -174,7 +183,7 @@ fn extract_zip(data: &[u8], dest: &Path) -> Result<PathBuf> {
     bail!("binary '{BINARY}.exe' not found in archive")
 }
 
-fn download_release(asset: &PlatformAsset, tag: &str, variant: Variant) -> Result<PathBuf> {
+fn download_release(asset: &PlatformAsset, tag: &str, variant: Variant) -> Result<Staged> {
     let suffix = variant.suffix();
     let filename = match asset.archive {
         ArchiveKind::TarGz => format!("{BINARY}-{}{suffix}.tar.gz", asset.triple),
@@ -203,22 +212,43 @@ fn download_release(asset: &PlatformAsset, tag: &str, variant: Variant) -> Resul
         ArchiveKind::Zip => extract_zip(&archive_bytes, tmp.path())?,
     };
 
-    let staged = std::env::temp_dir().join(format!("sapient-update-{tag}"));
-    let _ = fs::remove_file(&staged);
-    fs::copy(&extracted, &staged)
-        .with_context(|| format!("failed to stage {}", staged.display()))?;
+    // Stage into a fresh directory so we can carry sidecar files (the Metal
+    // build ships `mlx.metallib`, which MLX loads from next to the executable).
+    let staged_dir = std::env::temp_dir().join(format!("sapient-update-{tag}{suffix}"));
+    let _ = fs::remove_dir_all(&staged_dir);
+    fs::create_dir_all(&staged_dir).context("failed to create staging dir")?;
+
+    let staged_bin = staged_dir.join(extracted.file_name().unwrap());
+    fs::copy(&extracted, &staged_bin)
+        .with_context(|| format!("failed to stage {}", staged_bin.display()))?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))?;
+        fs::set_permissions(&staged_bin, fs::Permissions::from_mode(0o755))?;
     }
 
-    Ok(staged)
+    // Carry the Metal shader library if the archive bundled one.
+    let staged_metallib = {
+        let src = tmp.path().join(METALLIB);
+        if src.is_file() {
+            let dst = staged_dir.join(METALLIB);
+            fs::copy(&src, &dst).with_context(|| format!("failed to stage {METALLIB}"))?;
+            Some(dst)
+        } else {
+            None
+        }
+    };
+
+    Ok(Staged {
+        binary: staged_bin,
+        metallib: staged_metallib,
+    })
 }
 
-fn replace_current_binary(new_binary: &Path) -> Result<()> {
+fn replace_current_binary(staged: &Staged) -> Result<()> {
     let current = std::env::current_exe().context("could not locate current sapient binary")?;
+    let new_binary = &staged.binary;
 
     #[cfg(windows)]
     {
@@ -234,7 +264,6 @@ fn replace_current_binary(new_binary: &Path) -> Result<()> {
                 current.display()
             )
         })?;
-        return Ok(());
     }
 
     #[cfg(unix)]
@@ -243,8 +272,18 @@ fn replace_current_binary(new_binary: &Path) -> Result<()> {
             .with_context(|| format!("failed to install update to {}", current.display()))?;
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&current, fs::Permissions::from_mode(0o755))?;
-        Ok(())
     }
+
+    // Install the Metal shader library next to the binary so MLX can find it.
+    if let Some(metallib) = &staged.metallib {
+        if let Some(dir) = current.parent() {
+            let dst = dir.join(METALLIB);
+            fs::copy(metallib, &dst)
+                .with_context(|| format!("failed to install {} to {}", METALLIB, dst.display()))?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Decide which build variant to install.
@@ -323,7 +362,9 @@ pub fn run_update(force: bool, variant: Option<Variant>) -> Result<()> {
     let asset = platform_asset()?;
     let staged = download_release(&asset, &latest_tag, target_variant)?;
     replace_current_binary(&staged)?;
-    let _ = fs::remove_file(&staged);
+    if let Some(dir) = staged.binary.parent() {
+        let _ = fs::remove_dir_all(dir);
+    }
 
     println!("✓ Updated to sapient {latest} ({})", target_variant.label());
     println!("  Run: sapient --version");

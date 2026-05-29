@@ -154,18 +154,100 @@ pub fn lookup(name: &str) -> Option<&'static SupportedModel> {
     })
 }
 
+/// Every lowercase name a model answers to (alias, repo id, extra aliases).
+fn model_names(m: &SupportedModel) -> Vec<String> {
+    let mut names = vec![m.alias.to_lowercase(), m.repo_id.to_lowercase()];
+    names.extend(m.extra_aliases.iter().map(|a| a.to_lowercase()));
+    names
+}
+
+/// Classic Levenshtein edit distance (used for typo tolerance).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// Find the model(s) a possibly-mistyped name could refer to. Prefers prefix
+/// matches (e.g. `qwen2.5-0.5` → `qwen2.5-0.5b`); falls back to small typos.
+/// Returns the unique deduplicated set of candidate models.
+fn fuzzy_candidates(input: &str) -> Vec<&'static SupportedModel> {
+    let n = input.trim().to_lowercase();
+    if n.is_empty() {
+        return Vec::new();
+    }
+
+    let mut prefix = Vec::new();
+    let mut typo = Vec::new();
+    // Only allow typo tolerance for inputs long enough to be unambiguous.
+    let max_dist = if n.chars().count() >= 5 { 2 } else { 0 };
+
+    for m in CATALOG {
+        let names = model_names(m);
+        let is_prefix = names
+            .iter()
+            .any(|name| name.starts_with(&n) || n.starts_with(name.as_str()));
+        let is_typo = max_dist > 0 && names.iter().any(|name| edit_distance(name, &n) <= max_dist);
+        if is_prefix {
+            prefix.push(m);
+        } else if is_typo {
+            typo.push(m);
+        }
+    }
+
+    // Prefer prefix matches; only use typo matches if there were no prefix hits.
+    let chosen = if !prefix.is_empty() { prefix } else { typo };
+    let mut seen = std::collections::HashSet::new();
+    chosen
+        .into_iter()
+        .filter(|m| seen.insert(m.repo_id))
+        .collect()
+}
+
 /// Resolve a name to the HuggingFace repository id to download.
 ///
 /// Accepts the friendly alias, the canonical repo id, or any registered alias.
 /// Errors (with the full supported list) for anything not in the catalog.
 pub fn resolve_model_alias(alias: &str) -> Result<String> {
-    match lookup(alias) {
-        Some(m) => Ok(m.repo_id.to_string()),
-        None => bail!(
+    // 1) Exact match wins.
+    if let Some(m) = lookup(alias) {
+        return Ok(m.repo_id.to_string());
+    }
+
+    // 2) Forgiving match: unambiguous prefix (e.g. `qwen2.5-0.5` → `qwen2.5-0.5b`)
+    //    or a close typo. Auto-resolve only when it points to exactly one model.
+    let candidates = fuzzy_candidates(alias);
+    match candidates.as_slice() {
+        [m] => {
+            eprintln!(
+                "note: '{alias}' isn't an exact model name — using closest match '{}'",
+                m.alias
+            );
+            Ok(m.repo_id.to_string())
+        }
+        [] => bail!(
             "Model '{}' is not in the SAPIENT registry.\n\nSupported models:\n{}",
             alias,
             supported_list_pretty()
         ),
+        many => {
+            let names = many
+                .iter()
+                .map(|m| format!("  {}", m.alias))
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!("Model '{}' is ambiguous. Did you mean one of:\n{names}", alias)
+        }
     }
 }
 
@@ -225,5 +307,33 @@ mod tests {
             m.get("microsoft/phi-2").map(String::as_str),
             Some("openhorizon/phi-2")
         );
+    }
+
+    #[test]
+    fn resolves_unambiguous_prefix_typo() {
+        // Missing trailing 'b' — a prefix of exactly one model.
+        assert_eq!(
+            resolve_model_alias("openhorizon/qwen2.5-0.5").unwrap(),
+            "Qwen/Qwen2.5-0.5B-Instruct"
+        );
+        // Bare prefix without the brand namespace also works.
+        assert_eq!(
+            resolve_model_alias("qwen2.5-0.5").unwrap(),
+            "Qwen/Qwen2.5-0.5B-Instruct"
+        );
+    }
+
+    #[test]
+    fn resolves_close_typo() {
+        // One transposed/altered char within edit distance.
+        assert_eq!(resolve_model_alias("tinyllama-1.1").unwrap(), "TinyLlama/TinyLlama-1.1B-Chat-v1.0");
+    }
+
+    #[test]
+    fn ambiguous_prefix_errors_with_candidates() {
+        // `qwen2.5-` is a prefix of three models → must not silently pick one.
+        let err = resolve_model_alias("openhorizon/qwen2.5-").unwrap_err().to_string();
+        assert!(err.contains("ambiguous"), "got: {err}");
+        assert!(err.contains("qwen2.5-0.5b") && err.contains("qwen2.5-1.5b"));
     }
 }

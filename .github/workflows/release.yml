@@ -137,9 +137,26 @@ jobs:
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
+          set -euo pipefail
           BINARY="target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}"
+          DIR="$(dirname "$BINARY")"
           ARCHIVE="${{ env.BINARY_NAME }}-${{ matrix.target }}${{ matrix.suffix }}.tar.gz"
-          tar czf "$ARCHIVE" -C "$(dirname $BINARY)" "$(basename $BINARY)"
+          FILES="$(basename "$BINARY")"
+
+          # The Metal build needs MLX's compiled shader library at runtime; MLX
+          # loads it from next to the executable, so ship it inside the archive.
+          if [ -n "${{ matrix.features }}" ]; then
+            METALLIB="$(find "target/${{ matrix.target }}/release" -name 'mlx.metallib' | head -n1)"
+            if [ -z "$METALLIB" ]; then
+              echo "::error::Metal build produced no mlx.metallib"
+              exit 1
+            fi
+            echo "Bundling $METALLIB"
+            cp "$METALLIB" "$DIR/mlx.metallib"
+            FILES="$FILES mlx.metallib"
+          fi
+
+          tar czf "$ARCHIVE" -C "$DIR" $FILES
           echo "ARCHIVE=$ARCHIVE" >> $GITHUB_ENV
 
       - name: Package (zip — Windows)
