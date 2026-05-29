@@ -202,19 +202,25 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
-    /// Start an HTTP inference server (file-based models).
+    /// Start an OpenAI-compatible HTTP server for LLM inference.
+    ///
+    /// Exposes: GET /v1/models, POST /v1/chat/completions (streaming + non-streaming),
+    /// POST /v1/completions. Compatible with any OpenAI client library.
     Serve {
-        /// HuggingFace model ID or path to a model file.
+        /// HuggingFace model alias (e.g. `openhorizon/qwen2.5-1.5b-q4`).
         model: String,
 
-        #[arg(short, long, default_value = "8080")]
+        /// Port to listen on.
+        #[arg(short, long, default_value = "11435")]
         port: u16,
 
-        #[arg(short, long, default_value = "cpu")]
+        /// Generation backend: auto | cpu | metal.
+        #[arg(short, long, default_value = "auto")]
         backend: String,
 
-        #[arg(short, long, default_value = "4")]
-        workers: usize,
+        /// Load weights via mmap (auto-enabled when model > available RAM).
+        #[arg(long)]
+        mmap: bool,
     },
 
     /// Update sapient to the latest release from GitHub.
@@ -315,11 +321,8 @@ async fn dispatch(cli: Cli) -> Result<()> {
             model,
             port,
             backend,
-            workers,
-        } => {
-            let model_path = hub::resolve_model_path(model.as_str()).await?;
-            server::serve(model_path, port, backend, workers).await
-        }
+            mmap,
+        } => server::serve_llm(model.as_str(), port, &backend, mmap).await,
         Commands::Update { force, metal, cpu } => {
             let variant = if metal {
                 Some(update::Variant::Metal)

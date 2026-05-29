@@ -6,7 +6,10 @@
 use super::quant;
 use rayon::prelude::*;
 use sapient_core::error::{Result, SapientError};
-use sapient_core::{DType, Shape, Tensor, Q4_0_BLOCK_BYTES, Q8_0_BLOCK_BYTES, QUANT_BLOCK_SIZE};
+use sapient_core::{
+    DType, Shape, Tensor, Q4_0_BLOCK_BYTES, Q8_0_BLOCK_BYTES, QUANT_BLOCK_SIZE,
+    Q4_K_BLOCK_BYTES, Q5_K_BLOCK_BYTES, Q6_K_BLOCK_BYTES,
+};
 
 // ── matmul ───────────────────────────────────────────────────────────────────
 
@@ -120,10 +123,14 @@ pub fn matmul_nt(x: &Tensor, w: &Tensor) -> Result<Tensor> {
         });
     }
 
-    // Dispatch on weight dtype. Quantized paths never materialise F32 weights.
+    // Dispatch on weight dtype. All quantized paths dequantize on-the-fly block
+    // by block — no F32 expansion in memory.
     match w.dtype() {
         DType::Q4_0 => matmul_nt_q4_0(x, w, m, k, n),
         DType::Q8_0 => matmul_nt_q8_0(x, w, m, k, n),
+        DType::Q4_K => matmul_nt_kquant(x, w, m, k, n, Q4_K_BLOCK_BYTES, quant::dot_q4_k_row_f32),
+        DType::Q5_K => matmul_nt_kquant(x, w, m, k, n, Q5_K_BLOCK_BYTES, quant::dot_q5_k_row_f32),
+        DType::Q6_K => matmul_nt_kquant(x, w, m, k, n, Q6_K_BLOCK_BYTES, quant::dot_q6_k_row_f32),
         _ => matmul_nt_float(x, w, m, k, n),
     }
 }
@@ -226,6 +233,44 @@ fn matmul_nt_q8_0(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
             .for_each(|(j, slot)| {
                 *slot =
                     quant::dot_q8_0_row_f32(&w_blocks[j * row_bytes..(j + 1) * row_bytes], x_row);
+            });
+    }
+    Tensor::from_f32(&out, Shape::new([m, n]))
+}
+
+/// Generic K-quant weight path — shared by Q4_K, Q5_K, Q6_K.
+///
+/// Each K-quant block covers 256 elements (vs 32 for Q4_0/Q8_0). The
+/// `block_bytes` and `dot_fn` parameters specialize this for each variant.
+/// Parallel over output rows (the n dimension) — same strategy as Q4_0/Q8_0.
+fn matmul_nt_kquant(
+    x: &Tensor,
+    w: &Tensor,
+    m: usize,
+    k: usize,
+    n: usize,
+    block_bytes: usize,
+    dot_fn: fn(&[u8], &[f32]) -> f32,
+) -> Result<Tensor> {
+    const K_BLOCK: usize = 256;
+    if k % K_BLOCK != 0 {
+        return Err(SapientError::internal(
+            "K-quant matmul_nt: k must be a multiple of 256",
+        ));
+    }
+    let x_cow = x.to_f32_cow();
+    let x_data: &[f32] = x_cow.as_ref();
+    let w_blocks: &[u8] = w.as_quant_blocks();
+    let row_bytes = k / K_BLOCK * block_bytes;
+
+    let mut out = vec![0.0f32; m * n];
+    for i in 0..m {
+        let x_row = &x_data[i * k..(i + 1) * k];
+        out[i * n..(i + 1) * n]
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(j, slot)| {
+                *slot = dot_fn(&w_blocks[j * row_bytes..(j + 1) * row_bytes], x_row);
             });
     }
     Tensor::from_f32(&out, Shape::new([m, n]))

@@ -432,6 +432,135 @@ impl Pipeline {
         self.generate(&prompt).await
     }
 
+    /// Chat with a custom generation config (used by `sapient serve`).
+    pub async fn chat_with_config(
+        &self,
+        messages: &[ChatMessage],
+        config: &GenerationConfig,
+    ) -> Result<String> {
+        let prompt = self.format_chat_prompt(messages)?;
+        self.generate_with_config(&prompt, config).await
+    }
+
+    /// Stream a chat reply token-by-token with a custom generation config.
+    pub async fn chat_stream_with_config(
+        &self,
+        messages: &[ChatMessage],
+        config: &GenerationConfig,
+    ) -> ReceiverStream<String> {
+        match self.format_chat_prompt(messages) {
+            Ok(prompt) => self.generate_stream_with_config(&prompt, config).await,
+            Err(e) => {
+                let (tx, rx) = mpsc::channel(1);
+                let _ = tx.try_send(format!("Error: {e}"));
+                ReceiverStream::new(rx)
+            }
+        }
+    }
+
+    /// Stream tokens as they are generated, with a custom generation config.
+    /// Used by `sapient serve` to respect per-request max_tokens/temperature/stop.
+    pub async fn generate_stream_with_config(
+        &self,
+        prompt: &str,
+        config: &GenerationConfig,
+    ) -> ReceiverStream<String> {
+        let (tx, rx) = mpsc::channel(64);
+        let input_ids = self.tokenizer.encode(prompt).unwrap_or_default();
+        let mut eos_ids = self.eos_token_ids();
+        if let Some(e) = config.eos_token_id {
+            if !eos_ids.contains(&e) {
+                eos_ids.push(e);
+            }
+        }
+        let max_new = config.max_new_tokens;
+        let strategy = config.strategy.clone();
+        let mut stop = config.stop_sequences.clone();
+        for s in &self.config.stop_sequences {
+            if !stop.contains(s) {
+                stop.push(s.clone());
+            }
+        }
+        let tok = Arc::clone(&self.tokenizer);
+        let model_info = self.model_info.clone();
+        let weight_paths = self.weight_paths.clone();
+        let backend = self.configured_backend();
+
+        tokio::task::spawn_blocking(move || {
+            let mut engine = match ForwardEngine::from_weight_paths_with_backend(
+                model_info,
+                &weight_paths,
+                backend,
+            ) {
+                Ok(e) => e,
+                Err(e) => {
+                    let _ = tx.blocking_send(format!("Error: {e}"));
+                    return;
+                }
+            };
+            let mut sampler = Sampler::new(strategy);
+            let mut all_tokens = input_ids;
+            let mut generated: Vec<u32> = Vec::new();
+            let mut emitted = 0usize;
+            let mut clean_stop = false;
+
+            engine.reset_cache();
+            for step in 0..max_new {
+                let chunk = if step == 0 {
+                    all_tokens.clone()
+                } else {
+                    vec![*all_tokens.last().unwrap()]
+                };
+                let logits = match engine.forward_logits(&chunk, true) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = tx.blocking_send(format!("Error: {e}"));
+                        break;
+                    }
+                };
+                let next = match sampler.sample(&logits, &all_tokens) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let _ = tx.blocking_send(format!("Error: {e}"));
+                        break;
+                    }
+                };
+                generated.push(next);
+                all_tokens.push(next);
+                if eos_ids.contains(&next) {
+                    clean_stop = true;
+                    break;
+                }
+                let text = match tok.decode(&generated, true) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                if let Some(idx) = earliest_stop(&text, &stop) {
+                    if idx > emitted {
+                        let _ = tx.blocking_send(text[emitted..idx].to_string());
+                    }
+                    clean_stop = true;
+                    break;
+                }
+                let safe = safe_emit_end(&text, &stop);
+                if safe > emitted {
+                    if tx.blocking_send(text[emitted..safe].to_string()).is_err() {
+                        break;
+                    }
+                    emitted = safe;
+                }
+            }
+            if !clean_stop {
+                if let Ok(text) = tok.decode(&generated, true) {
+                    if text.len() > emitted {
+                        let _ = tx.blocking_send(text[emitted..].to_string());
+                    }
+                }
+            }
+        });
+        ReceiverStream::new(rx)
+    }
+
     /// Stream a chat reply token-by-token.
     pub async fn chat_stream(&self, messages: &[ChatMessage]) -> ReceiverStream<String> {
         match self.format_chat_prompt(messages) {

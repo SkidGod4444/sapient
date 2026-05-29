@@ -150,9 +150,15 @@ pub fn start_download_progress(
                     bar_clone.set_message(format!("pulling {model_name}"));
                 }
             } else if !in_verify_phase
-                && total_bytes > 0
-                && on_disk >= total_bytes / 2          // downloaded ≥ half
                 && last_change_time.elapsed() >= Duration::from_secs(2)
+                && (
+                    // Known total: switched to verify when ≥ 50% downloaded.
+                    (total_bytes > 0 && on_disk >= total_bytes / 2)
+                    // Unknown total (some GGUF repos don't expose file sizes via API):
+                    // switch to verify when bytes have been stable for ≥ 2s and we've
+                    // downloaded at least 50 MB (prevents false trigger on tiny files).
+                    || (total_bytes == 0 && on_disk >= 50 * 1024 * 1024)
+                )
             {
                 in_verify_phase = true;
                 bar_clone.set_style(verify_style.clone());

@@ -118,7 +118,7 @@ impl Tensor {
     pub fn from_quant_bytes(data: &[u8], shape: impl Into<Shape>, dtype: DType) -> Result<Self> {
         if !dtype.is_quantized() {
             return Err(SapientError::TypeMismatch {
-                expected: "a quantized dtype (Q4_0 or Q8_0)".into(),
+                expected: "a quantized dtype (Q4_0, Q8_0, Q4_K, Q5_K, Q6_K)".into(),
                 got: dtype.to_string(),
             });
         }
@@ -306,9 +306,12 @@ impl Tensor {
     }
 
     /// Convert this tensor to a `Vec<f32>`, handling all dtypes including quantized.
-    /// For F32: cheap copy. For F16/BF16: convert. For Q4_0/Q8_0: dequantize all blocks.
+    /// For F32: cheap copy. For F16/BF16: convert. For quantized: dequantize all blocks.
     pub fn to_f32_vec(&self) -> Vec<f32> {
-        use crate::dtype::{Q4_0_BLOCK_BYTES, Q8_0_BLOCK_BYTES, QUANT_BLOCK_SIZE};
+        use crate::dtype::{
+            Q4_0_BLOCK_BYTES, Q4_K_BLOCK_BYTES, Q5_K_BLOCK_BYTES, Q6_K_BLOCK_BYTES,
+            Q8_0_BLOCK_BYTES, K_QUANT_BLOCK_SIZE, QUANT_BLOCK_SIZE,
+        };
         match self.dtype {
             DType::F32 => self.as_f32_slice().to_vec(),
             DType::BF16 => {
@@ -353,9 +356,121 @@ impl Tensor {
                 }
                 out
             }
+            DType::Q4_K => {
+                let numel = self.numel();
+                let bytes = self.as_bytes();
+                let mut out = vec![0.0f32; numel];
+                let mut out_idx = 0usize;
+                for block in bytes.chunks_exact(Q4_K_BLOCK_BYTES) {
+                    let d = half::f16::from_le_bytes([block[0], block[1]]).to_f32();
+                    let dmin = half::f16::from_le_bytes([block[2], block[3]]).to_f32();
+                    let scales = &block[4..16];
+                    let qs = &block[16..Q4_K_BLOCK_BYTES];
+                    let mut q_off = 0usize;
+                    let mut is = 0usize;
+                    for _ in 0..(K_QUANT_BLOCK_SIZE / 64) {
+                        let (sc1, m1) = Self::get_scale_min_k4(is, scales);
+                        let d1 = d * sc1 as f32;
+                        let m1v = dmin * m1 as f32;
+                        let (sc2, m2) = Self::get_scale_min_k4(is + 1, scales);
+                        let d2 = d * sc2 as f32;
+                        let m2v = dmin * m2 as f32;
+                        for l in 0..32 {
+                            out[out_idx + l     ] = d1 * (qs[q_off + l] & 0x0F) as f32 - m1v;
+                            out[out_idx + l + 32] = d2 * (qs[q_off + l] >> 4) as f32 - m2v;
+                        }
+                        out_idx += 64;
+                        q_off += 32;
+                        is += 2;
+                    }
+                }
+                out
+            }
+            DType::Q5_K => {
+                let numel = self.numel();
+                let bytes = self.as_bytes();
+                let mut out = vec![0.0f32; numel];
+                let mut out_idx = 0usize;
+                for block in bytes.chunks_exact(Q5_K_BLOCK_BYTES) {
+                    let d = half::f16::from_le_bytes([block[0], block[1]]).to_f32();
+                    let dmin = half::f16::from_le_bytes([block[2], block[3]]).to_f32();
+                    let scales = &block[4..16];
+                    let qh = &block[16..48];
+                    let ql = &block[48..Q5_K_BLOCK_BYTES];
+                    let mut ql_off = 0usize;
+                    let mut is = 0usize;
+                    let mut u1: u8 = 1;
+                    let mut u2: u8 = 2;
+                    for _ in 0..(K_QUANT_BLOCK_SIZE / 64) {
+                        let (sc1, m1) = Self::get_scale_min_k4(is, scales);
+                        let d1 = d * sc1 as f32;
+                        let m1v = dmin * m1 as f32;
+                        let (sc2, m2) = Self::get_scale_min_k4(is + 1, scales);
+                        let d2 = d * sc2 as f32;
+                        let m2v = dmin * m2 as f32;
+                        let qh_byte = qh[is / 8];
+                        for l in 0..32usize {
+                            let hi = if qh_byte & u1 != 0 { 16.0f32 } else { 0.0 };
+                            out[out_idx + l] = d1 * ((ql[ql_off + l] & 0x0F) as f32 + hi) - m1v;
+                            let hi2 = if qh_byte & u2 != 0 { 16.0f32 } else { 0.0 };
+                            out[out_idx + l + 32] = d2 * ((ql[ql_off + l] >> 4) as f32 + hi2) - m2v;
+                        }
+                        out_idx += 64;
+                        ql_off += 32;
+                        is += 2;
+                        if is % 8 == 0 { u1 = 1; u2 = 2; } else { u1 <<= 2; u2 <<= 2; }
+                    }
+                }
+                out
+            }
+            DType::Q6_K => {
+                let numel = self.numel();
+                let bytes = self.as_bytes();
+                let mut out = vec![0.0f32; numel];
+                let mut out_idx = 0usize;
+                for block in bytes.chunks_exact(Q6_K_BLOCK_BYTES) {
+                    let ql = &block[0..128];
+                    let qh = &block[128..192];
+                    let sc = &block[192..208];
+                    let d = half::f16::from_le_bytes([block[208], block[209]]).to_f32();
+                    let mut ql_off = 0usize;
+                    let mut qh_off = 0usize;
+                    let mut ib = 0usize;
+                    for _ in 0..(K_QUANT_BLOCK_SIZE / 128) {
+                        for l in 0..32usize {
+                            let q1 = (((ql[ql_off + l     ] & 0x0F) | ((qh[qh_off + l] & 3) << 4)) as i32 - 32) as f32;
+                            let q2 = (((ql[ql_off + l + 32] & 0x0F) | (((qh[qh_off + l] >> 2) & 3) << 4)) as i32 - 32) as f32;
+                            let q3 = (((ql[ql_off + l     ] >> 4)   | (((qh[qh_off + l] >> 4) & 3) << 4)) as i32 - 32) as f32;
+                            let q4 = (((ql[ql_off + l + 32] >> 4)   | (((qh[qh_off + l] >> 6) & 3) << 4)) as i32 - 32) as f32;
+                            out[out_idx + l      ] = d * sc[ib    ] as i8 as f32 * q1;
+                            out[out_idx + l + 32 ] = d * sc[ib + 1] as i8 as f32 * q2;
+                            out[out_idx + l + 64 ] = d * sc[ib + 2] as i8 as f32 * q3;
+                            out[out_idx + l + 96 ] = d * sc[ib + 3] as i8 as f32 * q4;
+                        }
+                        out_idx += 128;
+                        ql_off += 64;
+                        qh_off += 32;
+                        ib += 4;
+                    }
+                }
+                out
+            }
             _ => self.as_f32_slice().to_vec(), // fallback for integer dtypes
         }
     }
+
+/// Extract scale and min for a K-quant sub-block (used in Q4_K/Q5_K dequantization).
+#[inline]
+fn get_scale_min_k4(j: usize, scales: &[u8]) -> (u8, u8) {
+    if j < 4 {
+        (scales[j] & 63, scales[j + 4] & 63)
+    } else {
+        (
+            (scales[j + 4] & 0x0F) | ((scales[j - 4] >> 6) << 4),
+            (scales[j + 4] >> 4) | ((scales[j] >> 6) << 4),
+        )
+    }
+}
 
     /// Returns an F32 tensor, converting BF16/F16 if necessary.
     /// For already-F32 tensors, clones the buffer. For native types, converts.

@@ -454,6 +454,7 @@ Key changes shipped in Phase 2/3/4:
 - **Phase 3**: MLX persistent weight cache (upload each weight to GPU once, reuse per token),
   GQA fallback to CPU attention, auto backend selection by available unified memory.
 - **Phase 4** (v0.2.3): memory-mapped GGUF loading — run models larger than your RAM.
+- **v0.2.6**: Native K-quant inference (Q4_K, Q5_K, Q6_K dequant on-the-fly, no F32 expansion), OpenAI-compatible `sapient serve`.
 
 ### Phase 4: Memory-mapped GGUF (bigger-than-RAM models, Raspberry Pi)
 

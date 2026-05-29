@@ -147,11 +147,16 @@ impl GgmlType {
         }
     }
 
-    /// Map to the corresponding `sapient_core::DType` for types we keep quantized.
+    /// Map to the corresponding `sapient_core::DType` for types we keep as packed blocks.
+    /// All of these are stored zero-copy from the GGUF file and dequantized on-the-fly
+    /// inside the matmul kernel — no F32 expansion at load time.
     fn to_sapient_dtype(self) -> Option<DType> {
         match self {
             Self::Q4_0 => Some(DType::Q4_0),
             Self::Q8_0 => Some(DType::Q8_0),
+            Self::Q4_K => Some(DType::Q4_K),
+            Self::Q5_K => Some(DType::Q5_K),
+            Self::Q6_K => Some(DType::Q6_K),
             _ => None,
         }
     }
@@ -351,6 +356,79 @@ fn dequantize_q4_k(data: &[u8], numel: usize) -> Vec<f32> {
     out
 }
 
+fn dequantize_q5_k(data: &[u8], numel: usize) -> Vec<f32> {
+    const BLOCK_BYTES: usize = 176;
+    let n_blocks = numel / QK_K;
+    let mut out = vec![0.0f32; numel];
+    let mut out_idx = 0usize;
+    for b in 0..n_blocks {
+        let base = b * BLOCK_BYTES;
+        let d = f16_to_f32(u16::from_le_bytes([data[base], data[base + 1]]));
+        let dmin = f16_to_f32(u16::from_le_bytes([data[base + 2], data[base + 3]]));
+        let scales = &data[base + 4..base + 16];
+        let qh = &data[base + 16..base + 48];
+        let ql = &data[base + 48..base + BLOCK_BYTES];
+        let mut ql_off = 0usize;
+        let mut is = 0usize;
+        let mut u1: u8 = 1;
+        let mut u2: u8 = 2;
+        for _ in 0..(QK_K / 64) {
+            let (sc1, m1) = get_scale_min_k4(is, scales);
+            let d1 = d * sc1 as f32;
+            let m1v = dmin * m1 as f32;
+            let (sc2, m2) = get_scale_min_k4(is + 1, scales);
+            let d2 = d * sc2 as f32;
+            let m2v = dmin * m2 as f32;
+            let qh_byte = qh[is / 8];
+            for l in 0..32usize {
+                let hi = if qh_byte & u1 != 0 { 16.0f32 } else { 0.0 };
+                out[out_idx + l] = d1 * ((ql[ql_off + l] & 0x0F) as f32 + hi) - m1v;
+                let hi2 = if qh_byte & u2 != 0 { 16.0f32 } else { 0.0 };
+                out[out_idx + l + 32] = d2 * ((ql[ql_off + l] >> 4) as f32 + hi2) - m2v;
+            }
+            out_idx += 64;
+            ql_off += 32;
+            is += 2;
+            if is % 8 == 0 { u1 = 1; u2 = 2; } else { u1 <<= 2; u2 <<= 2; }
+        }
+    }
+    out
+}
+
+fn dequantize_q6_k(data: &[u8], numel: usize) -> Vec<f32> {
+    const BLOCK_BYTES: usize = 210;
+    let n_blocks = numel / QK_K;
+    let mut out = vec![0.0f32; numel];
+    let mut out_idx = 0usize;
+    for b in 0..n_blocks {
+        let base = b * BLOCK_BYTES;
+        let ql = &data[base..base + 128];
+        let qh = &data[base + 128..base + 192];
+        let sc = &data[base + 192..base + 208];
+        let d = f16_to_f32(u16::from_le_bytes([data[base + 208], data[base + 209]]));
+        let mut ql_off = 0usize;
+        let mut qh_off = 0usize;
+        let mut ib = 0usize;
+        for _ in 0..(QK_K / 128) {
+            for l in 0..32usize {
+                let q1 = (((ql[ql_off + l     ] & 0x0F) | ((qh[qh_off + l] & 3) << 4)) as i32 - 32) as f32;
+                let q2 = (((ql[ql_off + l + 32] & 0x0F) | (((qh[qh_off + l] >> 2) & 3) << 4)) as i32 - 32) as f32;
+                let q3 = (((ql[ql_off + l     ] >> 4)   | (((qh[qh_off + l] >> 4) & 3) << 4)) as i32 - 32) as f32;
+                let q4 = (((ql[ql_off + l + 32] >> 4)   | (((qh[qh_off + l] >> 6) & 3) << 4)) as i32 - 32) as f32;
+                out[out_idx + l      ] = d * sc[ib    ] as i8 as f32 * q1;
+                out[out_idx + l + 32 ] = d * sc[ib + 1] as i8 as f32 * q2;
+                out[out_idx + l + 64 ] = d * sc[ib + 2] as i8 as f32 * q3;
+                out[out_idx + l + 96 ] = d * sc[ib + 3] as i8 as f32 * q4;
+            }
+            out_idx += 128;
+            ql_off += 64;
+            qh_off += 32;
+            ib += 4;
+        }
+    }
+    out
+}
+
 fn dequantize_to_f32(kind: GgmlType, bytes: &[u8], numel: usize) -> Result<Vec<f32>> {
     let f32_data = match kind {
         GgmlType::F32 => bytes[..numel * 4]
@@ -369,10 +447,11 @@ fn dequantize_to_f32(kind: GgmlType, bytes: &[u8], numel: usize) -> Result<Vec<f
         GgmlType::Q5_0 => dequantize_q5_0(bytes, numel),
         GgmlType::Q8_0 => dequantize_q8_0(bytes, numel),
         GgmlType::Q4_K => dequantize_q4_k(bytes, numel),
+        GgmlType::Q5_K => dequantize_q5_k(bytes, numel),
+        GgmlType::Q6_K => dequantize_q6_k(bytes, numel),
         other => {
             return Err(SapientError::GgufParseError(format!(
-                "unsupported GGUF quantization type {other:?} — \
-                 prefer Q8_0, Q4_0, or Q4_K_M weights from the Hub"
+                "unsupported GGUF quantization type {other:?}"
             )));
         }
     };

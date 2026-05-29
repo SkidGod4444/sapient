@@ -22,6 +22,12 @@ pub fn select_best_gguf(filenames: &[String]) -> Option<&str> {
 }
 
 /// Score a GGUF filename — higher is better.
+///
+/// Quantized formats are strongly preferred over F16/BF16. GGUF repos exist
+/// specifically for quantized deployment; BF16/F16 in a GGUF repo is a
+/// full-precision fallback that costs 2–3× more RAM than Q4_K_M for no
+/// benefit on CPU-only inference. Only fall back to F16/BF16 when no
+/// quantized file is offered.
 pub fn gguf_preference_score(name: &str) -> i32 {
     let upper = name.to_ascii_uppercase();
     let base = upper
@@ -30,13 +36,7 @@ pub fn gguf_preference_score(name: &str) -> i32 {
         .unwrap_or(&upper)
         .replace(".GGUF", "");
 
-    // Full-precision / well-supported native dequant formats first.
-    if base.contains("F32") {
-        return 110;
-    }
-    if base.contains("F16") || base.contains("BF16") {
-        return 105;
-    }
+    // Native SAPIENT kernels: Q8_0 and Q4_K_M are the sweet spot.
     if base.contains("Q8_0") {
         return 100;
     }
@@ -67,9 +67,6 @@ pub fn gguf_preference_score(name: &str) -> i32 {
     if base.contains("Q3_K_S") {
         return 50;
     }
-    if base.contains("Q2_K") {
-        return 30;
-    }
     if base.contains("Q4_K") {
         return 60;
     }
@@ -79,9 +76,18 @@ pub fn gguf_preference_score(name: &str) -> i32 {
     if base.contains("Q3_K") {
         return 45;
     }
-
+    if base.contains("Q2_K") {
+        return 30;
+    }
+    // Float formats — only chosen when no quantized alternative exists.
+    if base.contains("F32") {
+        return 10;
+    }
+    if base.contains("F16") || base.contains("BF16") {
+        return 5;
+    }
     // Unknown quant tag — still usable if it is the only GGUF.
-    40
+    20
 }
 
 /// HuggingFace model ID to use for tokenizer files when a GGUF-only repo has none.

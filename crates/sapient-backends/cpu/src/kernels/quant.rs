@@ -330,6 +330,147 @@ unsafe fn dot_q8_0_row_avx2(row_blocks: &[u8], x: &[f32]) -> f32 {
     _mm_cvtss_f32(sum1)
 }
 
+// ── K-quants (Q4_K, Q5_K, Q6_K) ─────────────────────────────────────────────
+//
+// K-quant blocks use QK_K = 256 elements per block with super-block scaling.
+// Weights are kept as packed blocks and dequantized one block at a time inside
+// the dot product — no F32 expansion at load time.
+
+pub const QK_K: usize = 256;
+pub const Q4_K_BLOCK_BYTES: usize = 144;
+pub const Q5_K_BLOCK_BYTES: usize = 176;
+pub const Q6_K_BLOCK_BYTES: usize = 210;
+
+/// Extract 6-bit scale and min for K-quant sub-block `j` (0..7) from the
+/// 12-byte `scales` field of a Q4_K or Q5_K block.
+#[inline(always)]
+fn get_scale_min_k4(j: usize, scales: &[u8]) -> (u8, u8) {
+    if j < 4 {
+        (scales[j] & 63, scales[j + 4] & 63)
+    } else {
+        (
+            (scales[j + 4] & 0x0F) | ((scales[j - 4] >> 6) << 4),
+            (scales[j + 4] >> 4) | ((scales[j] >> 6) << 4),
+        )
+    }
+}
+
+/// Dot product of a full Q4_K-quantized weight row with an f32 activation vector.
+///
+/// Q4_K block layout (144 bytes, 256 weights):
+///   [0..1] d (f16) — super-block scale
+///   [2..3] dmin (f16) — super-block min scale
+///   [4..15] scales (12 bytes) — 8 pairs of 6-bit (scale, min) packed
+///   [16..143] qs (128 bytes) — 256 × 4-bit quantized values (lo/hi nibble)
+pub fn dot_q4_k_row_f32(row_data: &[u8], x: &[f32]) -> f32 {
+    let mut acc = 0.0f32;
+    let mut x_off = 0usize;
+    for block in row_data.chunks_exact(Q4_K_BLOCK_BYTES) {
+        let d    = f16::from_le_bytes([block[0], block[1]]).to_f32();
+        let dmin = f16::from_le_bytes([block[2], block[3]]).to_f32();
+        let scales = &block[4..16];
+        let qs = &block[16..Q4_K_BLOCK_BYTES];
+        let mut q_off = 0usize;
+        let mut is = 0usize;
+        for _ in 0..(QK_K / 64) {
+            let (sc1, m1) = get_scale_min_k4(is, scales);
+            let d1  = d * sc1 as f32;
+            let m1v = dmin * m1 as f32;
+            let (sc2, m2) = get_scale_min_k4(is + 1, scales);
+            let d2  = d * sc2 as f32;
+            let m2v = dmin * m2 as f32;
+            for l in 0..32 {
+                acc += (d1 * (qs[q_off + l] & 0x0F) as f32 - m1v) * x[x_off + l];
+                acc += (d2 * (qs[q_off + l] >> 4) as f32 - m2v) * x[x_off + l + 32];
+            }
+            x_off += 64;
+            q_off += 32;
+            is += 2;
+        }
+    }
+    acc
+}
+
+/// Dot product of a full Q5_K-quantized weight row with an f32 activation vector.
+///
+/// Q5_K block layout (176 bytes, 256 weights):
+///   [0..1] d (f16), [2..3] dmin (f16), [4..15] scales (12B),
+///   [16..47] qh (32B — high bits, one per 32-weight sub-block),
+///   [48..175] ql (128B — low 4-bit nibbles)
+pub fn dot_q5_k_row_f32(row_data: &[u8], x: &[f32]) -> f32 {
+    let mut acc = 0.0f32;
+    let mut x_off = 0usize;
+    for block in row_data.chunks_exact(Q5_K_BLOCK_BYTES) {
+        let d    = f16::from_le_bytes([block[0], block[1]]).to_f32();
+        let dmin = f16::from_le_bytes([block[2], block[3]]).to_f32();
+        let scales = &block[4..16];
+        let qh = &block[16..48];
+        let ql = &block[48..Q5_K_BLOCK_BYTES];
+        let mut ql_off = 0usize;
+        let mut is = 0usize;
+        let mut u1: u8 = 1;
+        let mut u2: u8 = 2;
+        for _ in 0..(QK_K / 64) {
+            let (sc1, m1) = get_scale_min_k4(is, scales);
+            let d1  = d * sc1 as f32;
+            let m1v = dmin * m1 as f32;
+            let (sc2, m2) = get_scale_min_k4(is + 1, scales);
+            let d2  = d * sc2 as f32;
+            let m2v = dmin * m2 as f32;
+            let qh_byte = qh[is / 8];
+            for l in 0..32 {
+                let hi1 = if qh_byte & u1 != 0 { 16.0f32 } else { 0.0 };
+                let hi2 = if qh_byte & u2 != 0 { 16.0f32 } else { 0.0 };
+                acc += (d1 * ((ql[ql_off + l] & 0x0F) as f32 + hi1) - m1v) * x[x_off + l];
+                acc += (d2 * ((ql[ql_off + l] >> 4) as f32 + hi2) - m2v) * x[x_off + l + 32];
+            }
+            x_off  += 64;
+            ql_off += 32;
+            is     += 2;
+            if is % 8 == 0 { u1 = 1; u2 = 2; } else { u1 <<= 2; u2 <<= 2; }
+        }
+    }
+    acc
+}
+
+/// Dot product of a full Q6_K-quantized weight row with an f32 activation vector.
+///
+/// Q6_K block layout (210 bytes, 256 weights):
+///   [0..127] ql (128B — low 4-bit nibbles)
+///   [128..191] qh (64B — upper 2 bits, two per byte)
+///   [192..207] scales (16B — i8 per 16-element group)
+///   [208..209] d (f16)
+pub fn dot_q6_k_row_f32(row_data: &[u8], x: &[f32]) -> f32 {
+    let mut acc = 0.0f32;
+    let mut x_off = 0usize;
+    for block in row_data.chunks_exact(Q6_K_BLOCK_BYTES) {
+        let ql = &block[0..128];
+        let qh = &block[128..192];
+        let sc = &block[192..208];
+        let d  = f16::from_le_bytes([block[208], block[209]]).to_f32();
+        let mut ql_off = 0usize;
+        let mut qh_off = 0usize;
+        let mut ib = 0usize;
+        for _ in 0..(QK_K / 128) {
+            for l in 0..32 {
+                let q1 = (((ql[ql_off + l     ] & 0x0F) | ((qh[qh_off + l] & 3) << 4)) as i32 - 32) as f32;
+                let q2 = (((ql[ql_off + l + 32] & 0x0F) | (((qh[qh_off + l] >> 2) & 3) << 4)) as i32 - 32) as f32;
+                let q3 = (((ql[ql_off + l     ] >> 4)   | (((qh[qh_off + l] >> 4) & 3) << 4)) as i32 - 32) as f32;
+                let q4 = (((ql[ql_off + l + 32] >> 4)   | (((qh[qh_off + l] >> 6) & 3) << 4)) as i32 - 32) as f32;
+                acc += d * sc[ib    ] as i8 as f32 * q1 * x[x_off + l      ];
+                acc += d * sc[ib + 1] as i8 as f32 * q2 * x[x_off + l + 32 ];
+                acc += d * sc[ib + 2] as i8 as f32 * q3 * x[x_off + l + 64 ];
+                acc += d * sc[ib + 3] as i8 as f32 * q4 * x[x_off + l + 96 ];
+            }
+            x_off  += 128;
+            ql_off += 64;
+            qh_off += 32;
+            ib     += 4;
+        }
+    }
+    acc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
