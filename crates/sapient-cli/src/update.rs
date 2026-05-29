@@ -272,10 +272,26 @@ fn replace_current_binary(staged: &Staged) -> Result<()> {
 
     #[cfg(unix)]
     {
-        fs::copy(new_binary, &current)
-            .with_context(|| format!("failed to install update to {}", current.display()))?;
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&current, fs::Permissions::from_mode(0o755))?;
+
+        // On Linux, `cp` into a running binary fails with ETXTBSY (os error 26).
+        // The fix: write the new binary to a temp file in the *same directory* as
+        // the target (guarantees same filesystem), set permissions, then `rename()`
+        // it into place. `rename()` is atomic and replaces the directory entry while
+        // the kernel keeps the old inode alive for any process still executing it.
+        let dir = current
+            .parent()
+            .context("binary path has no parent directory")?;
+        let tmp = dir.join(format!(".sapient-update-{}", std::process::id()));
+
+        fs::copy(new_binary, &tmp)
+            .with_context(|| format!("failed to stage update binary to {}", tmp.display()))?;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
+        fs::rename(&tmp, &current).with_context(|| {
+            // Clean up the temp file if rename fails (different filesystem, etc.)
+            let _ = fs::remove_file(&tmp);
+            format!("failed to install update to {}", current.display())
+        })?;
     }
 
     // Install the Metal shader library next to the binary so MLX can find it.
