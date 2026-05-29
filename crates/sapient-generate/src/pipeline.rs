@@ -13,6 +13,7 @@ use tracing::debug;
 use sapient_hub::model_info::{ArchType, ModelInfo};
 use sapient_hub::resolver::ModelFiles;
 use sapient_hub::{tokenizer_fallback_model, HubClient, LoadOptions as HubOptions};
+use sapient_io::GgufLoader;
 use sapient_models::{ForwardEngine, LlmBackendKind};
 use sapient_tokenizers::{
     chat::{builtin, ChatMessage, ChatTemplate},
@@ -187,12 +188,80 @@ impl Pipeline {
         })
     }
 
-    /// Load a GGUF model directly from a local file path.
-    pub async fn from_gguf(_path: impl Into<PathBuf>) -> Result<Self> {
-        anyhow::bail!(
-            "Direct GGUF loading is not yet supported. \
-             Download a safetensors model from HuggingFace Hub instead."
-        )
+    /// Load a GGUF model from a local `.gguf` file.
+    ///
+    /// Weights are kept quantized in memory (Q4_0/Q8_0 as packed blocks, no F32
+    /// expansion) so RAM ≈ file size.  The tokenizer is loaded from the embedded
+    /// GGUF vocabulary; if unavailable, a HuggingFace Hub fallback is fetched.
+    pub async fn from_gguf(path: impl Into<PathBuf>) -> Result<Self> {
+        Self::from_gguf_with_backend(path, LlmBackendKind::Auto).await
+    }
+
+    pub async fn from_gguf_with_backend(
+        path: impl Into<PathBuf>,
+        backend: LlmBackendKind,
+    ) -> Result<Self> {
+        let path = path.into();
+        debug!("Loading GGUF: {}", path.display());
+
+        // Parse metadata + load tensors (quantized types stay quantized).
+        let (metadata, _) = GgufLoader::load_tensors_with_metadata(&path)
+            .with_context(|| format!("failed to load GGUF: {}", path.display()))?;
+
+        // Build ModelInfo from GGUF KV metadata (no config.json needed).
+        let model_info = ModelInfo::from_gguf_metadata(&metadata)
+            .context("failed to build ModelInfo from GGUF metadata")?;
+
+        // Build the forward engine directly from the file (it calls
+        // load_gguf_hf_weights internally, which keeps quantized types intact).
+        let engine = ForwardEngine::from_gguf_with_backend(model_info.clone(), &path, backend)
+            .context("failed to initialise ForwardEngine from GGUF")?;
+
+        // Tokenizer: try the model ID from GGUF metadata, else arch-based fallback.
+        let model_id = metadata
+            .get("general.name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let tokenizer = if let Some(fallback) = tokenizer_fallback_model(model_id)
+            .or_else(|| tokenizer_fallback_model(model_info.model_type.as_str()))
+        {
+            Arc::new(
+                SapientTokenizer::from_pretrained(fallback)
+                    .with_context(|| format!("failed to load tokenizer from '{fallback}'"))?,
+            )
+        } else {
+            anyhow::bail!(
+                "Cannot determine tokenizer for GGUF model '{}' (arch: {}). \
+                 Load via `Pipeline::from_pretrained` with a registry alias instead.",
+                path.display(),
+                model_info.model_type
+            );
+        };
+
+        let (chat_template, builtin_stops) =
+            builtin_template_for(&model_info.arch, model_id, &model_info.model_type);
+
+        let mut config = GenerationConfig::default();
+        if config.eos_token_id.is_none() {
+            config.eos_token_id = tokenizer.eos_id;
+        }
+        for s in builtin_stops {
+            if !config.stop_sequences.contains(&s) {
+                config.stop_sequences.push(s);
+            }
+        }
+
+        validate_tokenizer_model_compat(model_id, &model_info, &tokenizer)?;
+
+        Ok(Self {
+            tokenizer,
+            chat_template: Some(chat_template),
+            model_info,
+            weight_paths: vec![path],
+            engine: Mutex::new(engine),
+            config,
+            backend,
+        })
     }
 
     // ── Inference API ─────────────────────────────────────────────────────────

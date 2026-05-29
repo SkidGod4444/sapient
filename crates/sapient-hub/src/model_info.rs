@@ -105,6 +105,78 @@ pub struct ModelInfo {
 }
 
 impl ModelInfo {
+    /// Build a `ModelInfo` from GGUF KV metadata.
+    ///
+    /// GGUF stores model config under `{arch}.block_count`, `{arch}.embedding_length`,
+    /// etc.  `general.architecture` (e.g. "llama", "phi2", "qwen2") selects the prefix.
+    /// Fields absent from the metadata fall back to safe defaults.
+    pub fn from_gguf_metadata(
+        kv: &std::collections::HashMap<String, sapient_io::GgufValue>,
+    ) -> Result<Self> {
+        let arch_name = kv
+            .get("general.architecture")
+            .and_then(|v| v.as_str())
+            .unwrap_or("llama");
+        let p = arch_name;
+
+        let model_type = arch_name.to_string();
+        let arch = ArchType::from_model_type(arch_name);
+
+        let g = |key: &str| kv.get(key);
+        let u32v = |key: &str| g(key).and_then(|v| v.as_u32());
+        let f64v = |key: &str| g(key).and_then(|v| v.as_f64());
+
+        let vocab_size = u32v(&format!("{p}.vocab_size"))
+            .or_else(|| {
+                // Fall back to tokenizer token count if arch-specific key missing.
+                kv.get("tokenizer.ggml.tokens").and_then(|v| match v {
+                    sapient_io::GgufValue::ArrayStr(s) => Some(s.len() as u32),
+                    sapient_io::GgufValue::ArrayU32(u) => Some(u.len() as u32),
+                    _ => None,
+                })
+            })
+            .unwrap_or(32000) as usize;
+        let hidden_size = u32v(&format!("{p}.embedding_length")).unwrap_or(4096) as usize;
+        let num_hidden_layers = u32v(&format!("{p}.block_count")).unwrap_or(32) as usize;
+        let num_attention_heads = u32v(&format!("{p}.attention.head_count")).unwrap_or(32) as usize;
+        let num_key_value_heads = u32v(&format!("{p}.attention.head_count_kv"))
+            .unwrap_or(num_attention_heads as u32) as usize;
+        let intermediate_size = u32v(&format!("{p}.feed_forward_length")).unwrap_or(11008) as usize;
+        let max_position_embeddings = u32v(&format!("{p}.context_length")).unwrap_or(4096) as usize;
+        let rms_norm_eps = f64v(&format!("{p}.attention.layer_norm_rms_epsilon"))
+            .or_else(|| f64v(&format!("{p}.attention.layer_norm_epsilon")))
+            .unwrap_or(1e-5);
+        let rope_theta = f64v(&format!("{p}.rope.freq_base")).unwrap_or(10000.0);
+        let head_dim = hidden_size / num_attention_heads.max(1);
+        let partial_rotary_factor = u32v(&format!("{p}.rope.dimension_count"))
+            .map(|d| d as f64 / head_dim as f64)
+            .unwrap_or(1.0);
+        // GGUF omits a hidden_act field; infer from architecture name.
+        let hidden_act = match arch_name {
+            "phi2" | "gpt2" => "gelu",
+            _ => "silu",
+        }
+        .to_owned();
+
+        Ok(Self {
+            arch,
+            model_type,
+            vocab_size,
+            hidden_size,
+            num_hidden_layers,
+            num_attention_heads,
+            num_key_value_heads,
+            intermediate_size,
+            max_position_embeddings,
+            rms_norm_eps,
+            hidden_act,
+            rope_theta,
+            partial_rotary_factor,
+            head_dim,
+            raw: serde_json::Value::Null,
+        })
+    }
+
     /// Parse from a `config.json` file on disk.
     pub fn from_config_file(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).context("Failed to read config.json")?;

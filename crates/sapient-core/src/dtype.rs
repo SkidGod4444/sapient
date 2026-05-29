@@ -4,6 +4,9 @@ use crate::error::{Result, SapientError};
 use serde::{Deserialize, Serialize};
 
 /// The scalar data-type stored in a tensor buffer.
+///
+/// Quantized variants (Q4_0, Q8_0) store packed blocks rather than individual
+/// elements. Use `byte_count(numel)` to compute storage — not `numel * element_size()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum DType {
@@ -21,10 +24,24 @@ pub enum DType {
     U8,
     /// Boolean (stored as u8, 0 or 1).
     Bool,
+    /// 4-bit quantized, ggml Q4_0 block layout.
+    /// 32 weights/block, 18 bytes/block (f16 scale + 16 packed nibble bytes).
+    Q4_0,
+    /// 8-bit quantized, ggml Q8_0 block layout.
+    /// 32 weights/block, 34 bytes/block (f16 scale + 32 × i8).
+    Q8_0,
 }
 
+/// Weights per quantized block (both Q4_0 and Q8_0 use 32).
+pub const QUANT_BLOCK_SIZE: usize = 32;
+/// Bytes per Q4_0 block.
+pub const Q4_0_BLOCK_BYTES: usize = 18;
+/// Bytes per Q8_0 block.
+pub const Q8_0_BLOCK_BYTES: usize = 34;
+
 impl DType {
-    /// Size in bytes of a single element.
+    /// Size in bytes of a single element for non-quantized dtypes.
+    /// **Not valid for Q4_0 / Q8_0** — use `byte_count(numel)` instead.
     #[inline]
     pub const fn element_size(self) -> usize {
         match self {
@@ -35,6 +52,8 @@ impl DType {
             DType::I64 => 8,
             DType::U8 => 1,
             DType::Bool => 1,
+            // Quantized types have fractional bytes/element; always use byte_count.
+            DType::Q4_0 | DType::Q8_0 => 0,
         }
     }
 
@@ -43,13 +62,55 @@ impl DType {
     pub const fn alignment(self) -> usize {
         match self {
             DType::F32 => 4,
-            DType::F16 => 2,
-            DType::BF16 => 2,
+            DType::F16 | DType::BF16 => 2,
             DType::I32 => 4,
             DType::I64 => 8,
-            DType::U8 => 1,
-            DType::Bool => 1,
+            DType::U8 | DType::Bool => 1,
+            DType::Q4_0 | DType::Q8_0 => 2, // f16 scale at block start
         }
+    }
+
+    /// Bytes per quantized block (32 elements). Panics for non-quantized dtypes.
+    #[inline]
+    pub const fn block_bytes(self) -> usize {
+        match self {
+            DType::Q4_0 => Q4_0_BLOCK_BYTES,
+            DType::Q8_0 => Q8_0_BLOCK_BYTES,
+            _ => panic!("block_bytes() called on non-quantized dtype"),
+        }
+    }
+
+    /// Total byte count for `numel` elements. Works for all dtypes including
+    /// quantized ones (which store packed blocks, not individual bytes/element).
+    ///
+    /// For quantized dtypes, `numel` must be a multiple of `QUANT_BLOCK_SIZE`.
+    #[inline]
+    pub fn byte_count(self, numel: usize) -> usize {
+        match self {
+            DType::Q4_0 => {
+                debug_assert_eq!(
+                    numel % QUANT_BLOCK_SIZE,
+                    0,
+                    "Q4_0 numel must be a multiple of {QUANT_BLOCK_SIZE}"
+                );
+                numel / QUANT_BLOCK_SIZE * Q4_0_BLOCK_BYTES
+            }
+            DType::Q8_0 => {
+                debug_assert_eq!(
+                    numel % QUANT_BLOCK_SIZE,
+                    0,
+                    "Q8_0 numel must be a multiple of {QUANT_BLOCK_SIZE}"
+                );
+                numel / QUANT_BLOCK_SIZE * Q8_0_BLOCK_BYTES
+            }
+            _ => numel * self.element_size(),
+        }
+    }
+
+    /// True for ggml block-quantized dtypes (Q4_0, Q8_0).
+    #[inline]
+    pub const fn is_quantized(self) -> bool {
+        matches!(self, DType::Q4_0 | DType::Q8_0)
     }
 
     /// Is this a floating-point dtype?
@@ -74,6 +135,8 @@ impl DType {
             DType::I64 => "i64",
             DType::U8 => "u8",
             DType::Bool => "bool",
+            DType::Q4_0 => "q4_0",
+            DType::Q8_0 => "q8_0",
         }
     }
 
@@ -81,12 +144,6 @@ impl DType {
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self> {
         s.parse()
-    }
-
-    /// Compute the total byte count for `numel` elements of this dtype.
-    #[inline]
-    pub fn byte_count(self, numel: usize) -> usize {
-        numel * self.element_size()
     }
 }
 
@@ -107,6 +164,8 @@ impl std::str::FromStr for DType {
             "i64" | "int64" => Ok(DType::I64),
             "u8" | "uint8" => Ok(DType::U8),
             "bool" => Ok(DType::Bool),
+            "q4_0" => Ok(DType::Q4_0),
+            "q8_0" => Ok(DType::Q8_0),
             other => Err(SapientError::TypeMismatch {
                 expected: "a valid dtype".to_owned(),
                 got: other.to_owned(),
@@ -145,6 +204,8 @@ impl DType {
             DType::Bool => 9,
             DType::F16 => 10,
             DType::BF16 => 16,
+            // No standard ONNX code for ggml quant types.
+            DType::Q4_0 | DType::Q8_0 => 0,
         }
     }
 }

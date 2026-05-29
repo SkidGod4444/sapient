@@ -282,13 +282,26 @@ async fn chat_command(model: &str, backend: &str, verbose: bool) -> Result<()> {
         eprintln!("Loading {model} with backend {backend_label}…");
     }
 
-    let pipeline = match Pipeline::from_pretrained_with_opts(model, load_opts).await {
-        Ok(p) => p,
-        Err(e) => {
-            if let Some(pb) = load_spinner {
-                pb.finish_and_clear();
+    let pipeline = if model.ends_with(".gguf") || std::path::Path::new(model).is_file() {
+        // Local GGUF file: load directly without Hub download.
+        match Pipeline::from_gguf_with_backend(model, load_opts.backend).await {
+            Ok(p) => p,
+            Err(e) => {
+                if let Some(pb) = load_spinner {
+                    pb.finish_and_clear();
+                }
+                return Err(e).with_context(|| format!("failed to load GGUF '{model}'"));
             }
-            return Err(e).with_context(|| format!("failed to load model '{model}'"));
+        }
+    } else {
+        match Pipeline::from_pretrained_with_opts(model, load_opts).await {
+            Ok(p) => p,
+            Err(e) => {
+                if let Some(pb) = load_spinner {
+                    pb.finish_and_clear();
+                }
+                return Err(e).with_context(|| format!("failed to load model '{model}'"));
+            }
         }
     };
     if let Some(pb) = load_spinner {

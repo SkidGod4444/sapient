@@ -2907,7 +2907,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-backends-cpu"
-version = "0.1.11"
+version = "0.2.0"
 dependencies = [
  "approx",
  "blas-src",
@@ -2927,7 +2927,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-backends-metal"
-version = "0.1.11"
+version = "0.2.0"
 dependencies = [
  "approx",
  "sapient-backends-cpu",
@@ -2939,7 +2939,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-cli"
-version = "0.1.11"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -2975,7 +2975,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-core"
-version = "0.1.11"
+version = "0.2.0"
 dependencies = [
  "approx",
  "bytemuck",
@@ -2989,7 +2989,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-generate"
-version = "0.1.11"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3013,7 +3013,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-hub"
-version = "0.1.11"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -3023,6 +3023,7 @@ dependencies = [
  "num_cpus",
  "reqwest",
  "sapient-core",
+ "sapient-io",
  "serde",
  "serde_json",
  "sha2",
@@ -3034,7 +3035,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-io"
-version = "0.1.11"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "half",
@@ -3051,7 +3052,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-ir"
-version = "0.1.11"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "criterion",
@@ -3065,7 +3066,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-models"
-version = "0.1.11"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "mlx-rs",
@@ -3084,7 +3085,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-runtime"
-version = "0.1.11"
+version = "0.2.0"
 dependencies = [
  "sapient-backends-cpu",
  "sapient-backends-metal",
@@ -3102,7 +3103,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-scheduler"
-version = "0.1.11"
+version = "0.2.0"
 dependencies = [
  "flume",
  "metrics",
@@ -3120,7 +3121,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-telemetry"
-version = "0.1.11"
+version = "0.2.0"
 dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
@@ -3137,7 +3138,7 @@ dependencies = [
 
 [[package]]
 name = "sapient-tokenizers"
-version = "0.1.11"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "minijinja",

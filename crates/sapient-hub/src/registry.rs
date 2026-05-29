@@ -137,6 +137,48 @@ pub const CATALOG: &[SupportedModel] = &[
         gated: true,
         extra_aliases: &["mistral-7b", "mistral-7b-instruct"],
     },
+    // ── Quantized GGUF models (Phase 1: huge models on small devices) ─────────
+    // These download a single .gguf file; RAM ≈ file size (no F32 expansion).
+    SupportedModel {
+        alias: "openhorizon/qwen2.5-0.5b-q4",
+        repo_id: "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+        family: "Qwen2.5",
+        params: "0.5B Q4_K_M",
+        gated: false,
+        extra_aliases: &["qwen2.5-0.5b-q4", "qwen0.5b-q4"],
+    },
+    SupportedModel {
+        alias: "openhorizon/qwen2.5-1.5b-q4",
+        repo_id: "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+        family: "Qwen2.5",
+        params: "1.5B Q4_K_M",
+        gated: false,
+        extra_aliases: &["qwen2.5-1.5b-q4", "qwen1.5b-q4"],
+    },
+    SupportedModel {
+        alias: "openhorizon/smollm2-360m-q4",
+        repo_id: "HuggingFaceTB/SmolLM2-360M-Instruct-GGUF",
+        family: "Llama",
+        params: "360M Q8_0",
+        gated: false,
+        extra_aliases: &["smollm2-360m-q4"],
+    },
+    SupportedModel {
+        alias: "openhorizon/smollm2-1.7b-q4",
+        repo_id: "HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF",
+        family: "Llama",
+        params: "1.7B Q4_K_M",
+        gated: false,
+        extra_aliases: &["smollm2-1.7b-q4"],
+    },
+    SupportedModel {
+        alias: "openhorizon/llama-3.2-3b-q4",
+        repo_id: "bartowski/Llama-3.2-3B-Instruct-GGUF",
+        family: "Llama",
+        params: "3B Q4_K_M",
+        gated: false,
+        extra_aliases: &["llama-3.2-3b-q4", "llama3.2-3b-q4"],
+    },
 ];
 
 /// All supported models, for display (e.g. `sapient list --available`).
@@ -326,15 +368,20 @@ mod tests {
 
     #[test]
     fn resolves_unambiguous_prefix_typo() {
-        // Missing trailing 'b' — a prefix of exactly one model.
+        // Now that qwen2.5-0.5b-q4 also exists, 'qwen2.5-0.5' is ambiguous — the
+        // resolver should error with the candidate list rather than silently pick one.
+        let err = resolve_model_alias("openhorizon/qwen2.5-0.5")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ambiguous"), "expected ambiguous, got: {err}");
+        // Full aliases still resolve exactly.
         assert_eq!(
-            resolve_model_alias("openhorizon/qwen2.5-0.5").unwrap(),
+            resolve_model_alias("openhorizon/qwen2.5-0.5b").unwrap(),
             "Qwen/Qwen2.5-0.5B-Instruct"
         );
-        // Bare prefix without the brand namespace also works.
         assert_eq!(
-            resolve_model_alias("qwen2.5-0.5").unwrap(),
-            "Qwen/Qwen2.5-0.5B-Instruct"
+            resolve_model_alias("openhorizon/qwen2.5-0.5b-q4").unwrap(),
+            "Qwen/Qwen2.5-0.5B-Instruct-GGUF"
         );
     }
 

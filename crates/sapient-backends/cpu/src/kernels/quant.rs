@@ -110,6 +110,32 @@ pub fn quantize_q4_0_row(w: &[f32]) -> Vec<u8> {
     out
 }
 
+// ── Q8_0 ──────────────────────────────────────────────────────────────────────
+
+/// Dot product of a Q8_0 block with an f32 activation slice, on the fly.
+#[inline]
+pub fn dot_q8_0_block_f32(block: &[u8], x: &[f32]) -> f32 {
+    debug_assert_eq!(block.len(), Q8_0_BLOCK_BYTES);
+    debug_assert_eq!(x.len(), QK);
+    let d = half::f16::from_le_bytes([block[0], block[1]]).to_f32();
+    let mut acc = 0.0f32;
+    for j in 0..QK {
+        acc += block[2 + j] as i8 as f32 * x[j];
+    }
+    acc * d
+}
+
+/// Dot product of a full Q8_0-quantized weight row with an f32 activation vector.
+pub fn dot_q8_0_row_f32(row_blocks: &[u8], x: &[f32]) -> f32 {
+    let k = x.len();
+    debug_assert_eq!(k % QK, 0);
+    let mut acc = 0.0f32;
+    for (b, chunk) in row_blocks.chunks_exact(Q8_0_BLOCK_BYTES).enumerate() {
+        acc += dot_q8_0_block_f32(chunk, &x[b * QK..b * QK + QK]);
+    }
+    acc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

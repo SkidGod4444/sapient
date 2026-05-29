@@ -110,6 +110,39 @@ impl Tensor {
         })
     }
 
+    /// Create a quantized tensor from raw block bytes (Q4_0 / Q8_0).
+    ///
+    /// `data` must contain exactly `dtype.byte_count(shape.numel())` bytes, i.e.
+    /// the packed ggml block bytes with no expansion.  The shape describes the
+    /// *logical* element count; `shape.numel()` must be a multiple of 32.
+    pub fn from_quant_bytes(data: &[u8], shape: impl Into<Shape>, dtype: DType) -> Result<Self> {
+        if !dtype.is_quantized() {
+            return Err(SapientError::TypeMismatch {
+                expected: "a quantized dtype (Q4_0 or Q8_0)".into(),
+                got: dtype.to_string(),
+            });
+        }
+        let shape = shape.into();
+        shape.validate()?;
+        let numel = shape.numel();
+        let expected_bytes = dtype.byte_count(numel);
+        if data.len() != expected_bytes {
+            return Err(SapientError::ShapeMismatch {
+                expected: vec![expected_bytes],
+                got: vec![data.len()],
+            });
+        }
+        let strides = shape.strides();
+        let buffer = BufferHandle::new(CpuBuffer::from_bytes_slice(data)?);
+        Ok(Self {
+            shape,
+            dtype,
+            strides,
+            buffer,
+            offset: 0,
+        })
+    }
+
     /// Create a scalar tensor from a single `f32`.
     pub fn scalar_f32(v: f32) -> Result<Self> {
         Self::from_f32(&[v], Shape::scalar())
@@ -177,10 +210,30 @@ impl Tensor {
 
     // ── Typed data access (CPU only) ─────────────────────────────────────────
 
-    /// Raw byte view (always works).
+    /// Raw byte view. For non-quantized tensors returns the full buffer slice from
+    /// `offset` onwards (preserving the original behavior that stride-based kernels
+    /// rely on). For quantized tensors (Q4_0/Q8_0) returns exactly the packed block
+    /// bytes for this tensor's logical shape.
     pub fn as_bytes(&self) -> &[u8] {
         let bytes = self.buffer.as_bytes();
-        &bytes[self.offset..]
+        if self.dtype.is_quantized() {
+            let end = self.offset + self.dtype.byte_count(self.numel());
+            &bytes[self.offset..end]
+        } else {
+            &bytes[self.offset..]
+        }
+    }
+
+    /// For quantized tensors (Q4_0, Q8_0): returns the packed block bytes as a
+    /// row-major slice where each logical row of `k` elements occupies
+    /// `dtype.byte_count(k)` bytes.  Panics if the tensor is not quantized.
+    pub fn as_quant_blocks(&self) -> &[u8] {
+        assert!(
+            self.dtype.is_quantized(),
+            "as_quant_blocks() called on non-quantized tensor (dtype = {})",
+            self.dtype
+        );
+        self.as_bytes()
     }
 
     /// Typed `f32` view — panics if dtype is not F32.
@@ -205,9 +258,10 @@ impl Tensor {
         }
     }
 
-    /// Convert this tensor to a `Vec<f32>`, handling BF16/F16 → F32 on the fly.
-    /// For F32 tensors this is a cheap slice-to-vec copy. For BF16/F16 it converts.
+    /// Convert this tensor to a `Vec<f32>`, handling all dtypes including quantized.
+    /// For F32: cheap copy. For F16/BF16: convert. For Q4_0/Q8_0: dequantize all blocks.
     pub fn to_f32_vec(&self) -> Vec<f32> {
+        use crate::dtype::{Q4_0_BLOCK_BYTES, Q8_0_BLOCK_BYTES, QUANT_BLOCK_SIZE};
         match self.dtype {
             DType::F32 => self.as_f32_slice().to_vec(),
             DType::BF16 => {
@@ -224,7 +278,35 @@ impl Tensor {
                     .map(|c| half::f16::from_le_bytes(c.try_into().unwrap()).to_f32())
                     .collect()
             }
-            _ => self.as_f32_slice().to_vec(), // fallback for other dtypes
+            DType::Q4_0 => {
+                let numel = self.numel();
+                let bytes = self.as_bytes();
+                let mut out = vec![0.0f32; numel];
+                for (b, block) in bytes.chunks_exact(Q4_0_BLOCK_BYTES).enumerate() {
+                    let d = half::f16::from_le_bytes([block[0], block[1]]).to_f32();
+                    for j in 0..QUANT_BLOCK_SIZE / 2 {
+                        let byte = block[2 + j];
+                        let lo = (byte & 0x0f) as i32 - 8;
+                        let hi = (byte >> 4) as i32 - 8;
+                        out[b * QUANT_BLOCK_SIZE + j] = lo as f32 * d;
+                        out[b * QUANT_BLOCK_SIZE + j + QUANT_BLOCK_SIZE / 2] = hi as f32 * d;
+                    }
+                }
+                out
+            }
+            DType::Q8_0 => {
+                let numel = self.numel();
+                let bytes = self.as_bytes();
+                let mut out = vec![0.0f32; numel];
+                for (b, block) in bytes.chunks_exact(Q8_0_BLOCK_BYTES).enumerate() {
+                    let d = half::f16::from_le_bytes([block[0], block[1]]).to_f32();
+                    for j in 0..QUANT_BLOCK_SIZE {
+                        out[b * QUANT_BLOCK_SIZE + j] = block[2 + j] as i8 as f32 * d;
+                    }
+                }
+                out
+            }
+            _ => self.as_f32_slice().to_vec(), // fallback for integer dtypes
         }
     }
 

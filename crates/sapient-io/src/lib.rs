@@ -4,7 +4,7 @@ pub mod gguf;
 pub mod onnx;
 pub mod safetensors;
 
-pub use gguf::GgufLoader;
+pub use gguf::{GgufLoader, GgufValue};
 pub use onnx::OnnxLoader;
 pub use safetensors::SafetensorsLoader;
 
