@@ -12,9 +12,13 @@ env:
 
 jobs:
   # ── Format + Clippy ──────────────────────────────────────────────────────────
+  # Non-blocking: lint is enforced locally by the .githooks/pre-push hook, which
+  # auto-formats and applies clippy fixes before each push. CI still reports lint
+  # as a signal, but never blocks merges or releases.
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

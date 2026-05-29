@@ -31,19 +31,20 @@ readme        = "README.md"
 rust-version  = "1.82"
 
 [workspace.dependencies]
-# Internal crates
-sapient-core         = { path = "crates/sapient-core" }
-sapient-ir           = { path = "crates/sapient-ir" }
-sapient-backends-cpu = { path = "crates/sapient-backends/cpu" }
-sapient-backends-metal = { path = "crates/sapient-backends/metal" }
-sapient-scheduler    = { path = "crates/sapient-scheduler" }
-sapient-io           = { path = "crates/sapient-io" }
-sapient-telemetry    = { path = "crates/sapient-telemetry" }
-sapient-runtime      = { path = "crates/sapient-runtime" }
-sapient-hub          = { path = "crates/sapient-hub" }
-sapient-tokenizers   = { path = "crates/sapient-tokenizers" }
-sapient-models       = { path = "crates/sapient-models" }
-sapient-generate     = { path = "crates/sapient-generate" }
+# Internal crates — version is required so they can be published to crates.io
+# (cargo uses the version for the registry dep and the path for local builds).
+sapient-core         = { path = "crates/sapient-core", version = "0.1.11" }
+sapient-ir           = { path = "crates/sapient-ir", version = "0.1.11" }
+sapient-backends-cpu = { path = "crates/sapient-backends/cpu", version = "0.1.11" }
+sapient-backends-metal = { path = "crates/sapient-backends/metal", version = "0.1.11" }
+sapient-scheduler    = { path = "crates/sapient-scheduler", version = "0.1.11" }
+sapient-io           = { path = "crates/sapient-io", version = "0.1.11" }
+sapient-telemetry    = { path = "crates/sapient-telemetry", version = "0.1.11" }
+sapient-runtime      = { path = "crates/sapient-runtime", version = "0.1.11" }
+sapient-hub          = { path = "crates/sapient-hub", version = "0.1.11" }
+sapient-tokenizers   = { path = "crates/sapient-tokenizers", version = "0.1.11" }
+sapient-models       = { path = "crates/sapient-models", version = "0.1.11" }
+sapient-generate     = { path = "crates/sapient-generate", version = "0.1.11" }
 
 # Core utilities
 thiserror      = "1.0"

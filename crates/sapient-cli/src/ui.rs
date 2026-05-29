@@ -105,7 +105,10 @@ pub fn print_gen_stats(tokens: usize, elapsed: Duration) {
     let tps = tokens as f64 / secs;
     println!(
         "{}",
-        style(format!("  {BOLT} {tokens} tokens · {tps:.1} tok/s · {secs:.1}s")).dim()
+        style(format!(
+            "  {BOLT} {tokens} tokens · {tps:.1} tok/s · {secs:.1}s"
+        ))
+        .dim()
     );
 }
 

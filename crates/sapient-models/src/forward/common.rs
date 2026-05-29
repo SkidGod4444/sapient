@@ -167,11 +167,7 @@ pub fn update_kv_cache(
     }
 
     let mut total_seq = current_seq_len + new_seq;
-    let shift = if total_seq > max_seq {
-        total_seq - max_seq
-    } else {
-        0
-    };
+    let shift = total_seq.saturating_sub(max_seq);
 
     let (b_sz, h, hd) = (cd[0], cd[1], cd[3]);
     let new_k_slice = new_k.as_f32_slice();

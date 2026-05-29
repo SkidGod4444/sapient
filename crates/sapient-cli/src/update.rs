@@ -190,7 +190,11 @@ fn download_release(asset: &PlatformAsset, tag: &str, variant: Variant) -> Resul
         ArchiveKind::Zip => format!("{BINARY}-{}{suffix}.zip", asset.triple),
     };
     let url = format!("https://github.com/{REPO}/releases/download/{tag}/{filename}");
-    println!("Downloading {tag} ({}, {})...", asset.triple, variant.label());
+    println!(
+        "Downloading {tag} ({}, {})...",
+        asset.triple,
+        variant.label()
+    );
 
     let archive_bytes = http_get_bytes(&url)?;
 
@@ -322,7 +326,10 @@ fn prompt_variant(default: Variant) -> Variant {
         Variant::Metal => 1,
         Variant::Cpu => 2,
     };
-    print!("Build [1/2] (default {default_num}, currently {}): ", default.label());
+    print!(
+        "Build [1/2] (default {default_num}, currently {}): ",
+        default.label()
+    );
     let _ = std::io::stdout().flush();
 
     let mut buf = String::new();
@@ -347,7 +354,10 @@ pub fn run_update(force: bool, variant: Option<Variant>) -> Result<()> {
 
     // If already current AND not switching build variant, nothing to do.
     if !force && !switching && !version_lt(current, latest) {
-        println!("sapient {current} ({}) is already up to date.", current_variant().label());
+        println!(
+            "sapient {current} ({}) is already up to date.",
+            current_variant().label()
+        );
         return Ok(());
     }
 

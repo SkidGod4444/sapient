@@ -246,7 +246,10 @@ pub fn resolve_model_alias(alias: &str) -> Result<String> {
                 .map(|m| format!("  {}", m.alias))
                 .collect::<Vec<_>>()
                 .join("\n");
-            bail!("Model '{}' is ambiguous. Did you mean one of:\n{names}", alias)
+            bail!(
+                "Model '{}' is ambiguous. Did you mean one of:\n{names}",
+                alias
+            )
         }
     }
 }
@@ -255,7 +258,11 @@ pub fn resolve_model_alias(alias: &str) -> Result<String> {
 pub fn supported_list_pretty() -> String {
     let mut lines = Vec::new();
     for m in CATALOG {
-        let gated = if m.gated { "  (gated — run `sapient login`)" } else { "" };
+        let gated = if m.gated {
+            "  (gated — run `sapient login`)"
+        } else {
+            ""
+        };
         lines.push(format!(
             "  {:<16} {:<34} {:<8} {}{}",
             m.alias, m.repo_id, m.params, m.family, gated
@@ -280,8 +287,14 @@ mod tests {
     #[test]
     fn resolves_alias_and_repo_and_extra() {
         assert_eq!(resolve_model_alias("phi-2").unwrap(), "microsoft/phi-2");
-        assert_eq!(resolve_model_alias("microsoft/phi-2").unwrap(), "microsoft/phi-2");
-        assert_eq!(resolve_model_alias("openhorizon/phi-2").unwrap(), "microsoft/phi-2");
+        assert_eq!(
+            resolve_model_alias("microsoft/phi-2").unwrap(),
+            "microsoft/phi-2"
+        );
+        assert_eq!(
+            resolve_model_alias("openhorizon/phi-2").unwrap(),
+            "microsoft/phi-2"
+        );
         assert_eq!(
             resolve_model_alias("Qwen/Qwen2.5-0.5B-Instruct").unwrap(),
             "Qwen/Qwen2.5-0.5B-Instruct"
@@ -295,7 +308,9 @@ mod tests {
 
     #[test]
     fn unknown_model_errors_with_list() {
-        let err = resolve_model_alias("totally/unknown").unwrap_err().to_string();
+        let err = resolve_model_alias("totally/unknown")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("not in the SAPIENT registry"));
         assert!(err.contains("phi-2"));
     }
@@ -326,13 +341,18 @@ mod tests {
     #[test]
     fn resolves_close_typo() {
         // One transposed/altered char within edit distance.
-        assert_eq!(resolve_model_alias("tinyllama-1.1").unwrap(), "TinyLlama/TinyLlama-1.1B-Chat-v1.0");
+        assert_eq!(
+            resolve_model_alias("tinyllama-1.1").unwrap(),
+            "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+        );
     }
 
     #[test]
     fn ambiguous_prefix_errors_with_candidates() {
         // `qwen2.5-` is a prefix of three models → must not silently pick one.
-        let err = resolve_model_alias("openhorizon/qwen2.5-").unwrap_err().to_string();
+        let err = resolve_model_alias("openhorizon/qwen2.5-")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("ambiguous"), "got: {err}");
         assert!(err.contains("qwen2.5-0.5b") && err.contains("qwen2.5-1.5b"));
     }

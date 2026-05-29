@@ -81,9 +81,7 @@ pub fn apply_rope_partial(
     let (batch, n_heads, seq_len, head_dim) = (dims[0], dims[1], dims[2], dims[3]);
 
     if rotary_dim == 0 || rotary_dim > head_dim {
-        return Err(SapientError::internal(
-            "rotary_dim must be in 1..=head_dim",
-        ));
+        return Err(SapientError::internal("rotary_dim must be in 1..=head_dim"));
     }
     if rotary_dim % 2 != 0 {
         return Err(SapientError::internal("RoPE requires even rotary_dim"));

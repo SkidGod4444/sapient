@@ -54,12 +54,7 @@ pub trait LlmBackend: Send + Sync {
     /// Linear projection with an optional bias added over the last dimension.
     /// Backend-agnostic: computes `linear_3d` then folds in the bias on the host,
     /// so every backend gets correct bias handling for free.
-    fn linear_3d_bias(
-        &self,
-        x: &Tensor,
-        weight: &Tensor,
-        bias: Option<&Tensor>,
-    ) -> Result<Tensor> {
+    fn linear_3d_bias(&self, x: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
         let y = self.linear_3d(x, weight)?;
         match bias {
             None => Ok(y),

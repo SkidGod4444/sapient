@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Auto-lint before every push:
+#   1. Format the whole workspace (cargo fmt --all) — applied automatically.
+#   2. If formatting changed anything, abort so you can commit the result.
+#   3. Gate on Clippy (-D warnings); abort if any warning remains.
+#
+# Enable once per clone with:  git config core.hooksPath .githooks
+# Bypass for a single push with: SKIP_LINT=1 git push
+set -euo pipefail
+
+# Skip in CI or when explicitly bypassed.
+if [ "${CI:-}" = "true" ] || [ "${SKIP_LINT:-}" = "1" ]; then
+  exit 0
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "pre-push: cargo not found — skipping lint." >&2
+  exit 0
+fi
+
+echo "pre-push: formatting (cargo fmt --all)…"
+cargo fmt --all
+
+if ! git diff --quiet; then
+  echo "" >&2
+  echo "pre-push: formatting changed files. Commit them, then push again:" >&2
+  git --no-pager diff --stat >&2
+  exit 1
+fi
+
+echo "pre-push: running clippy (-D warnings)…"
+if ! cargo clippy --workspace --all-targets -- -D warnings; then
+  echo "" >&2
+  echo "pre-push: clippy reported warnings — fix them (or 'cargo clippy --fix'), then push again." >&2
+  exit 1
+fi
+
+echo "pre-push: lint clean ✓"
+exit 0

@@ -135,14 +135,17 @@ impl PhiForward {
         }
 
         // Phi names the final norm `final_layernorm`; fall back to `norm` for other variants.
-        let (norm_w, norm_b) =
-            match resolve_weight(&self.weights, &self.prefix, "final_layernorm") {
-                Ok(w) => (w, resolve_bias(&self.weights, &self.prefix, "final_layernorm")),
-                Err(_) => (
-                    resolve_weight(&self.weights, &self.prefix, "norm")?,
-                    resolve_bias(&self.weights, &self.prefix, "norm"),
-                ),
-            };
+        let (norm_w, norm_b) = match resolve_weight(&self.weights, &self.prefix, "final_layernorm")
+        {
+            Ok(w) => (
+                w,
+                resolve_bias(&self.weights, &self.prefix, "final_layernorm"),
+            ),
+            Err(_) => (
+                resolve_weight(&self.weights, &self.prefix, "norm")?,
+                resolve_bias(&self.weights, &self.prefix, "norm"),
+            ),
+        };
         self.backend
             .layer_norm(&x, norm_w, norm_b, self.info.rms_norm_eps as f32)
     }
@@ -179,8 +182,12 @@ impl PhiForward {
         let k = split_heads(&k, n_heads, head_dim)?;
         let mut v = split_heads(&v, n_heads, head_dim)?;
 
-        let q = self.backend.apply_rope_partial(&q, positions, theta, rotary_dim)?;
-        let mut k = self.backend.apply_rope_partial(&k, positions, theta, rotary_dim)?;
+        let q = self
+            .backend
+            .apply_rope_partial(&q, positions, theta, rotary_dim)?;
+        let mut k = self
+            .backend
+            .apply_rope_partial(&k, positions, theta, rotary_dim)?;
 
         if use_cache {
             let current_seq = self.cache[layer_idx].seq_len;
