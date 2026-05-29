@@ -1,6 +1,7 @@
 //! SAPIENT CLI — chat, pull, run, bench, inspect, serve
 
 mod hub;
+mod progress;
 mod server;
 mod ui;
 mod update;
@@ -20,6 +21,7 @@ use sapient_telemetry::init_tracing;
 use sapient_tokenizers::ChatMessage;
 
 use sapient_core::Tensor;
+use sapient_hub::HubClient;
 
 // ── CLI definition ────────────────────────────────────────────────────────────
 
@@ -299,11 +301,21 @@ async fn chat_command(model: &str, backend: &str, verbose: bool) -> Result<()> {
 async fn pull_command(model: &str, verbose: bool) -> Result<()> {
     if verbose {
         println!("Pulling {model}…");
-    } else {
-        println!("Downloading {model}…");
     }
 
-    let files = if verbose {
+    // Fetch the total expected size and blobs dir *before* starting the download
+    // so the progress bar can show a real percentage.
+    let hub = HubClient::with_options(sapient_hub::LoadOptions {
+        quiet: false,
+        ..Default::default()
+    })?;
+
+    let total_bytes = hub.repo_total_bytes(model).await.unwrap_or(0);
+    let blobs_dir = HubClient::blobs_dir_for_model(model);
+
+    let handle = progress::start_download_progress(model, blobs_dir, total_bytes);
+
+    let result = if verbose {
         hub::pull_model_with_options(
             model,
             HubLoadOptions {
@@ -311,26 +323,30 @@ async fn pull_command(model: &str, verbose: bool) -> Result<()> {
                 ..Default::default()
             },
         )
-        .await?
+        .await
     } else {
-        hub::pull_model(model).await?
+        hub::pull_model(model).await
     };
 
-    if !verbose {
-        ui::clear_status();
-    }
-
-    println!("✓ Cached {model}");
-    if verbose {
-        println!("  config:    {}", files.config_path.display());
-        if let Some(tok) = &files.tokenizer_path {
-            println!("  tokenizer: {}", tok.display());
+    match result {
+        Ok(files) => {
+            handle.finish_success(model);
+            if verbose {
+                println!("  config:    {}", files.config_path.display());
+                if let Some(tok) = &files.tokenizer_path {
+                    println!("  tokenizer: {}", tok.display());
+                }
+                for w in &files.weight_paths {
+                    println!("  weights:   {}", w.display());
+                }
+            }
+            Ok(())
         }
-        for w in &files.weight_paths {
-            println!("  weights:   {}", w.display());
+        Err(e) => {
+            handle.finish_error();
+            Err(e)
         }
     }
-    Ok(())
 }
 
 fn list_command() -> Result<()> {

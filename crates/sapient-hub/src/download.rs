@@ -52,9 +52,8 @@ pub fn fast_download_enabled(opts: &LoadOptions) -> bool {
 
 /// Apply sapient download settings to an `hf-hub` API builder.
 pub fn configure_api_builder(mut builder: ApiBuilder, opts: &LoadOptions) -> ApiBuilder {
-    if opts.quiet {
-        builder = builder.with_progress(false);
-    }
+    // Always silence hf-hub's own progress bars — the CLI renders its own single-line bar.
+    builder = builder.with_progress(false);
     if fast_download_enabled(opts) {
         builder = builder
             .with_max_files(max_parallel_downloads())

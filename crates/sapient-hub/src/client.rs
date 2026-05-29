@@ -131,6 +131,45 @@ impl HubClient {
         ModelInfo::from_config_file(&config_path)
     }
 
+    /// Returns the total download size (in bytes) for all files in the model repo,
+    /// by querying the HuggingFace REST API for file metadata.
+    pub async fn repo_total_bytes(&self, model_alias: &str) -> Result<u64> {
+        let actual_repo = crate::registry::resolve_model_alias(model_alias)?;
+        // Use the HF REST API which returns sibling sizes
+        let url = format!("https://huggingface.co/api/models/{actual_repo}");
+        let client = reqwest::Client::new();
+        let mut req = client.get(&url);
+        // Forward auth token if available
+        let token = self.opts.token.clone()
+            .or_else(|| std::env::var("HF_TOKEN").ok());
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
+        }
+        let resp: serde_json::Value = req
+            .send()
+            .await
+            .context("Failed to query HF API for model metadata")?
+            .json()
+            .await
+            .context("Failed to parse HF API response")?;
+        let total = resp["siblings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s["size"].as_u64())
+            .sum();
+        Ok(total)
+    }
+
+    /// Returns the on-disk blobs directory for a HuggingFace model, used to poll download progress.
+    /// The path follows HF hub cache conventions: `~/.cache/huggingface/hub/models--<org>--<name>/blobs/`.
+    pub fn blobs_dir_for_model(model_alias: &str) -> Option<std::path::PathBuf> {
+        let actual_repo = crate::registry::resolve_model_alias(model_alias).ok()?;
+        let cache_root = dirs::home_dir()?.join(".cache/huggingface/hub");
+        let dir_name = format!("models--{}", actual_repo.replace('/', "--"));
+        Some(cache_root.join(dir_name).join("blobs"))
+    }
+
     // ── Internals ──────────────────────────────────────────────────────────────
 
     async fn resolve_files(&self, repo: &ApiRepo, model_id: &str) -> Result<ModelFiles> {

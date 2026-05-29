@@ -2947,6 +2947,8 @@ dependencies = [
  "dirs 5.0.1",
  "flate2",
  "futures",
+ "indicatif 0.17.11",
+ "reqwest",
  "sapient-backends-cpu",
  "sapient-backends-metal",
  "sapient-core",
