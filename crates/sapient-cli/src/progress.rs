@@ -2,6 +2,10 @@
 //!
 //! Shows a clean, unified bar for the entire model download:
 //!   pulling openhorizon/phi-2  ████████████░░░░░░  2.3 GB / 5.2 GB  4.1 MB/s  eta 44s
+//!
+//! After all bytes land the bar switches to "verifying checksum…" while hf-hub
+//! does its post-download SHA256 check, so users see meaningful feedback instead
+//! of a confusing near-zero speed.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -72,18 +76,23 @@ pub fn start_download_progress(
     let downloaded = Arc::new(AtomicU64::new(0));
 
     // ── Style ────────────────────────────────────────────────────────────────
+    let download_style = ProgressStyle::with_template(
+        "  {msg:30} {bar:40.cyan/237} {bytes:>10} / {total_bytes:<10} {bytes_per_sec:>10}  eta {eta}",
+    )
+    .unwrap()
+    .progress_chars("█▉▊▋▌▍▎▏░");
+
+    let verify_style = ProgressStyle::with_template(
+        "  {msg:30} {bar:40.yellow/237} {bytes:>10} / {total_bytes:<10}  {spinner:.yellow}",
+    )
+    .unwrap()
+    .progress_chars("█░░░░░░░░");
+
     let bar = if total_bytes > 0 {
         let pb = ProgressBar::new(total_bytes);
-        pb.set_style(
-            ProgressStyle::with_template(
-                "  {msg:30} {bar:40.cyan/237} {bytes:>10} / {total_bytes:<10} {bytes_per_sec:>10}  eta {eta}",
-            )
-            .unwrap()
-            .progress_chars("█▉▊▋▌▍▎▏░"),
-        );
+        pb.set_style(download_style.clone());
         pb
     } else {
-        // Unknown size: use a spinner
         let pb = ProgressBar::new_spinner();
         pb.set_style(
             ProgressStyle::with_template(
@@ -94,7 +103,8 @@ pub fn start_download_progress(
         pb
     };
 
-    bar.set_message(format!("pulling {model}"));
+    let model_name = model.to_string();
+    bar.set_message(format!("pulling {model_name}"));
     bar.enable_steady_tick(Duration::from_millis(120));
 
     // ── Background polling task ───────────────────────────────────────────────
@@ -106,14 +116,17 @@ pub fn start_download_progress(
     // We intentionally use std::thread so we don't need an active tokio runtime
     // during the monitor loop (the download itself runs on the tokio runtime).
     std::thread::spawn(move || {
-        let mut last_sample_time = Instant::now();
-        let mut last_sample_bytes = 0u64;
         let poll = Duration::from_millis(250);
+        // Track when bytes last changed — used to detect the post-download
+        // SHA256 verification phase where hf-hub is CPU-busy but the file
+        // has stopped growing, which otherwise shows near-zero B/s.
+        let mut last_change_bytes = 0u64;
+        let mut last_change_time = Instant::now();
+        let mut in_verify_phase = false;
 
         while !done_flag.load(Ordering::Relaxed) {
             std::thread::sleep(poll);
 
-            // Sum all non-temp blobs on disk
             let on_disk = if let Some(ref dir) = blobs {
                 dir_downloaded_bytes(dir)
             } else {
@@ -122,12 +135,28 @@ pub fn start_download_progress(
 
             bar_clone.set_position(on_disk);
 
-            // Update speed sample every second for stable rate display
-            let elapsed = last_sample_time.elapsed();
-            if elapsed >= Duration::from_secs(1) {
-                let _delta = on_disk.saturating_sub(last_sample_bytes);
-                last_sample_bytes = on_disk;
-                last_sample_time = Instant::now();
+            // Detect the verification phase: bytes have been stable for ≥ 2 seconds
+            // AND we've downloaded a meaningful fraction of the total (≥ 50%).
+            // hf-hub verifies with SHA256 after the transfer completes — for a 1.7 GiB
+            // file that can take 5–30 s. Switch the style + message so users see
+            // "verifying…" rather than a confusing 300 B/s near-stall.
+            if on_disk != last_change_bytes {
+                last_change_bytes = on_disk;
+                last_change_time = Instant::now();
+                if in_verify_phase {
+                    // Bytes changed again — back to downloading (resumed shard).
+                    in_verify_phase = false;
+                    bar_clone.set_style(download_style.clone());
+                    bar_clone.set_message(format!("pulling {model_name}"));
+                }
+            } else if !in_verify_phase
+                && total_bytes > 0
+                && on_disk >= total_bytes / 2          // downloaded ≥ half
+                && last_change_time.elapsed() >= Duration::from_secs(2)
+            {
+                in_verify_phase = true;
+                bar_clone.set_style(verify_style.clone());
+                bar_clone.set_message(format!("verifying {model_name}"));
             }
         }
     });
