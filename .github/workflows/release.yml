@@ -247,3 +247,58 @@ jobs:
             artifacts/**/*.zip.sha256
             install.sh
             install.ps1
+
+  # ── Mirror binaries to public distribution repo ────────────────────────────
+  release-dist:
+    name: Mirror → openstackhq/sapient
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for install scripts)
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lah artifacts/
+
+      - name: Push release to distribution repo
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN_DIST }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+
+          # Collect artifact paths
+          ASSETS=$(find artifacts -type f | sort)
+
+          # Add install scripts if present
+          [ -f install.sh ]  && ASSETS="$ASSETS install.sh"
+          [ -f install.ps1 ] && ASSETS="$ASSETS install.ps1"
+
+          RELEASE_NOTES="Binary distribution for SAPIENT ${TAG}.
+
+          Full source, changelog, and docs: https://github.com/SkidGod4444/sapient"
+
+          # Create the release; if it already exists upload assets to it instead.
+          if gh release view "$TAG" --repo openstackhq/sapient &>/dev/null; then
+            echo "Release $TAG already exists on distribution repo — uploading assets"
+            # shellcheck disable=SC2086
+            gh release upload "$TAG" \
+              --repo openstackhq/sapient \
+              --clobber \
+              $ASSETS
+          else
+            echo "Creating release $TAG on distribution repo"
+            # shellcheck disable=SC2086
+            gh release create "$TAG" \
+              --repo openstackhq/sapient \
+              --title "SAPIENT $TAG" \
+              --notes "$RELEASE_NOTES" \
+              $ASSETS
+          fi
