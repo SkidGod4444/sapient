@@ -111,13 +111,13 @@ pub const CATALOG: &[SupportedModel] = &[
         gated: false,
         extra_aliases: &["tinyllama-1.1b", "tinyllama"],
     },
-    // ── Llama 3.2 (Llama forward engine — gated, needs `sapient login`) ────────
+    // ── Llama 3.2 (Llama forward engine — Meta ungated these in late 2024) ──────
     SupportedModel {
         alias: "openhorizon/llama-3.2-1b",
         repo_id: "meta-llama/Llama-3.2-1B-Instruct",
         family: "Llama",
         params: "1B",
-        gated: true,
+        gated: false,
         extra_aliases: &["llama-3.2-1b", "llama3.2-1b"],
     },
     SupportedModel {
@@ -125,16 +125,17 @@ pub const CATALOG: &[SupportedModel] = &[
         repo_id: "meta-llama/Llama-3.2-3B-Instruct",
         family: "Llama",
         params: "3B",
-        gated: true,
+        gated: false,
         extra_aliases: &["llama-3.2-3b", "llama3.2-3b"],
     },
-    // ── Mistral (Llama forward engine — gated) ────────────────────────────────
+    // ── Mistral (Llama forward engine) ───────────────────────────────────────
+    // Note: safetensors = 13.5 GB — prefer openhorizon/mistral-7b-q4 on edge devices.
     SupportedModel {
         alias: "openhorizon/mistral-7b",
         repo_id: "mistralai/Mistral-7B-Instruct-v0.2",
         family: "Mistral",
         params: "7B",
-        gated: true,
+        gated: false,
         extra_aliases: &["mistral-7b", "mistral-7b-instruct"],
     },
     // ── Phi GGUF variants ─────────────────────────────────────────────────────
@@ -187,6 +188,15 @@ pub const CATALOG: &[SupportedModel] = &[
         params: "3B Q4_K_M",
         gated: false,
         extra_aliases: &["llama-3.2-3b-q4", "llama3.2-3b-q4"],
+    },
+    // ── Mistral GGUF (recommended over the 13.5 GB safetensors version) ──────
+    SupportedModel {
+        alias: "openhorizon/mistral-7b-q4",
+        repo_id: "bartowski/Mistral-7B-Instruct-v0.3-GGUF",
+        family: "Mistral",
+        params: "7B Q4_K_M",
+        gated: false,
+        extra_aliases: &["mistral-7b-q4", "mistral7b-q4"],
     },
 ];
 
