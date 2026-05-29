@@ -340,7 +340,10 @@ impl MlxLlmOps {
     #[cfg(feature = "mlx")]
     fn to_array(tensor: &Tensor) -> Result<mlx_rs::Array> {
         let shape = Self::to_shape(tensor.shape().dims())?;
-        Ok(mlx_rs::Array::from_slice(tensor.as_f32_slice(), &shape))
+        // Weights are commonly F16/BF16; convert to F32 (MLX array dtype here)
+        // instead of asserting F32, which would panic on half-precision tensors.
+        let data = tensor.to_f32_cow();
+        Ok(mlx_rs::Array::from_slice(data.as_ref(), &shape))
     }
 
     #[cfg(feature = "mlx")]
@@ -516,7 +519,10 @@ impl MlxLlmOps {
             Self::to_tensor(mlx_rs::fast::rope(
                 &x,
                 dims[3] as i32,
-                true,
+                // `traditional = false` → rotate-half (NeoX/HF) convention, which
+                // matches how Llama/Qwen/Phi weights are trained and what the CPU
+                // kernel does. `true` (interleaved/GPT-J) produces garbage here.
+                false,
                 Some(base),
                 1.0,
                 offset,
@@ -537,7 +543,7 @@ impl MlxLlmOps {
             let dims = hidden.shape().dims();
             let hidden_size = dims[2];
             let seq = dims[1];
-            let h = hidden.as_f32_slice();
+            let h = hidden.to_f32_cow();
             let last = &h[(seq - 1) * hidden_size..seq * hidden_size];
             let h_last = mlx_rs::Array::from_slice(last, &[1, hidden_size as i32]);
             let head = Self::to_array(lm_head)?.transpose()?;
