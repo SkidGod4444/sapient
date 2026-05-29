@@ -556,8 +556,9 @@ impl GgufLoader {
     pub fn parse_metadata_only(path: &Path) -> Result<HashMap<String, GgufValue>> {
         let file = std::fs::File::open(path)
             .map_err(|e| SapientError::ModelNotFound(format!("{}: {e}", path.display())))?;
-        let mmap = unsafe { Mmap::map(&file) }
-            .map_err(|e| SapientError::GgufParseError(format!("mmap failed for header read: {e}")))?;
+        let mmap = unsafe { Mmap::map(&file) }.map_err(|e| {
+            SapientError::GgufParseError(format!("mmap failed for header read: {e}"))
+        })?;
         let (metadata, _, _) = parse_header(mmap.as_ref())?;
         Ok(metadata)
     }

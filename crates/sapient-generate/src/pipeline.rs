@@ -164,12 +164,8 @@ impl Pipeline {
                 .and_then(|e| e.to_str())
                 == Some("gguf");
         if single_gguf {
-            return Self::from_gguf_opts(
-                &model_files.weight_paths[0],
-                backend,
-                opts.force_mmap,
-            )
-            .await;
+            return Self::from_gguf_opts(&model_files.weight_paths[0], backend, opts.force_mmap)
+                .await;
         }
 
         let model_info = ModelInfo::from_config_file(&model_files.config_path)

@@ -215,9 +215,11 @@ async fn main() -> std::process::ExitCode {
 
 async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
-        Commands::Chat { model, backend, mmap } => {
-            chat_command(model.as_str(), &backend, cli.verbose, mmap).await
-        }
+        Commands::Chat {
+            model,
+            backend,
+            mmap,
+        } => chat_command(model.as_str(), &backend, cli.verbose, mmap).await,
         Commands::Pull { model } => pull_command(model.as_str(), cli.verbose).await,
         Commands::List => list_command(),
         Commands::Models => models_command(),
