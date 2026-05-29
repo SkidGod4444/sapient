@@ -22,8 +22,8 @@ BOLD='\033[1m'
 RESET='\033[0m'
 
 print_banner() {
-  printf "\n${BOLD}${CYAN}  SAPIENT${RESET}\n" >&2
-  printf "  ${BOLD}LLM & SLM Inference Engine${RESET}\n\n" >&2
+  printf "\n${BOLD}${CYAN}  ⚡ SAPIENT${RESET} ${BOLD}— edge inference engine${RESET}\n" >&2
+  printf "  Run small language models locally. No Python. No Docker. No GPU required.\n\n" >&2
 }
 
 info()    { printf "${CYAN}  →${RESET} %s\n" "$1" >&2; }
@@ -197,23 +197,31 @@ install_binary() {
 
 # ── Post-install ──────────────────────────────────────────────────────────────
 post_install() {
-  printf "\n${BOLD}${GREEN}✓ SAPIENT ${VERSION} installed successfully!${RESET}\n\n"
+  printf "\n${BOLD}${GREEN}✓ SAPIENT ${VERSION} installed!${RESET}\n\n"
+
+  # PATH hint — only shown when the binary isn't reachable yet
   if ! command -v "${BINARY_NAME}" > /dev/null 2>&1; then
-    printf "  ${YELLOW}Note:${RESET} ${BINARY_NAME} is not on your PATH yet.\n"
-    printf "  Run: ${BOLD}export PATH=\"\$HOME/.local/bin:\$PATH\"${RESET}\n"
-    printf "  Or:  ${BOLD}${INSTALLED_PATH} --version${RESET}\n\n"
+    printf "  ${YELLOW}⚠  Add sapient to your PATH:${RESET}\n"
+    printf "     ${BOLD}export PATH=\"\$HOME/.local/bin:\$PATH\"${RESET}\n"
+    printf "  Then reload your shell or run: ${BOLD}hash -r${RESET}\n\n"
   fi
-  printf "  Run your first model:\n\n"
-  printf "    ${BOLD}sapient chat <model>${RESET}\n\n"
-  printf "  Other useful commands:\n"
-  printf "    ${CYAN}sapient pull <model>${RESET}                   # Download a model\n"
-  printf "    ${CYAN}sapient list${RESET}                             # List cached models\n"
-  printf "    ${CYAN}sapient rm <model>${RESET}                       # Remove one cached model\n"
-  printf "    ${CYAN}sapient reset${RESET}                            # Clear all cached models\n"
-  printf "    ${CYAN}sapient update${RESET}                           # Update sapient to latest release\n"
-  printf "    ${CYAN}sapient serve <model> --port 8080${RESET}         # Start API server\n"
-  printf "    ${CYAN}sapient --help${RESET}                           # Full help\n\n"
-  printf "  Docs: https://github.com/${REPO}\n\n"
+
+  printf "  ${BOLD}See what models you can run:${RESET}\n\n"
+  printf "    ${CYAN}sapient models${RESET}\n\n"
+
+  printf "  ${BOLD}Start chatting (downloads the model on first use):${RESET}\n\n"
+  printf "    ${BOLD}sapient chat openhorizon/phi-2${RESET}             # 2.7B · Phi\n"
+  printf "    ${BOLD}sapient chat openhorizon/qwen2.5-0.5b${RESET}      # 0.5B · Qwen2.5\n"
+  printf "    ${BOLD}sapient chat openhorizon/qwen2.5-0.5b-q4${RESET}   # 0.5B · GGUF Q8 (~640 MB)\n\n"
+
+  printf "  ${BOLD}Other commands:${RESET}\n"
+  printf "    ${CYAN}sapient pull   openhorizon/phi-2${RESET}    # Pre-download a model\n"
+  printf "    ${CYAN}sapient list${RESET}                         # List downloaded models\n"
+  printf "    ${CYAN}sapient rm     openhorizon/phi-2${RESET}    # Remove a model\n"
+  printf "    ${CYAN}sapient update${RESET}                       # Update sapient\n"
+  printf "    ${CYAN}sapient --help${RESET}                       # Full command reference\n\n"
+
+  printf "  Docs & source: ${BOLD}https://github.com/${REPO}${RESET}\n\n"
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
