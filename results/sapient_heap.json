@@ -1,0 +1,35 @@
+{
+  "backend": "auto",
+  "load_time_ms": 849,
+  "mmap": false,
+  "model": "openhorizon/qwen2.5-0.5b-q4",
+  "prompt": "Explain quantum entanglement in one sentence.",
+  "runs": [
+    {
+      "elapsed_ms": 3112,
+      "run": 1,
+      "total_tokens": 46,
+      "tps": 14.8,
+      "ttft_ms": 672
+    },
+    {
+      "elapsed_ms": 2856,
+      "run": 2,
+      "total_tokens": 46,
+      "tps": 16.1,
+      "ttft_ms": 379
+    },
+    {
+      "elapsed_ms": 2782,
+      "run": 3,
+      "total_tokens": 46,
+      "tps": 16.5,
+      "ttft_ms": 377
+    }
+  ],
+  "summary": {
+    "mean_tps": 15.8,
+    "mean_ttft_ms": 476,
+    "peak_rss_mb": 1727
+  }
+}

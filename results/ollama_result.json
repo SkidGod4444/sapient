@@ -1,0 +1,37 @@
+{
+  "model": "qwen3:4b",
+  "backend": "ollama 0.12.6 (llama.cpp \u00b7 Metal)",
+  "note": "4B parameter model \u2014 8x larger than SAPIENT's 0.5B comparison",
+  "load_time_ms": 1294,
+  "runs": [
+    {
+      "run": 1,
+      "ttft_ms": 231,
+      "elapsed_ms": 1703,
+      "load_ms": 1294,
+      "total_tokens": 50,
+      "tps": 29.4
+    },
+    {
+      "run": 2,
+      "ttft_ms": 41,
+      "elapsed_ms": 1723,
+      "load_ms": 52,
+      "total_tokens": 50,
+      "tps": 29.0
+    },
+    {
+      "run": 3,
+      "ttft_ms": 35,
+      "elapsed_ms": 1805,
+      "load_ms": 44,
+      "total_tokens": 50,
+      "tps": 27.7
+    }
+  ],
+  "summary": {
+    "mean_ttft_ms": 102,
+    "mean_tps": 28.7,
+    "peak_rss_mb": null
+  }
+}
