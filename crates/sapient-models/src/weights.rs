@@ -68,6 +68,19 @@ pub fn resolve_weight<'a>(
         .with_context(|| format!("missing weight '{key}'"))
 }
 
+/// Resolve an optional bias tensor by logical suffix (e.g. `layers.0.self_attn.q_proj`).
+/// Returns `None` when the model has no bias for that layer (e.g. Llama/Mistral).
+pub fn resolve_bias<'a>(
+    weights: &'a HashMap<String, Tensor>,
+    prefix: &str,
+    suffix: &str,
+) -> Option<&'a Tensor> {
+    let key = format!("{prefix}{suffix}.bias");
+    weights
+        .get(&key)
+        .or_else(|| weights.get(&format!("{suffix}.bias")))
+}
+
 /// Resolve lm_head — may live outside the model prefix.
 pub fn resolve_lm_head<'a>(
     weights: &'a HashMap<String, Tensor>,

@@ -39,8 +39,10 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     // Compute batch size from leading dims.
     let batch: usize = a_shape.dims()[..a_rank - 2].iter().product();
 
-    let a_data = a.as_f32_slice();
-    let b_data = b.as_f32_slice();
+    let a_cow = a.to_f32_cow();
+    let a_data = a_cow.as_ref();
+    let b_cow = b.to_f32_cow();
+    let b_data = b_cow.as_ref();
 
     let out_numel = batch * m * n;
     let mut out_data = vec![0.0f32; out_numel];
@@ -88,6 +90,64 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     Tensor::from_f32(&out_data, Shape::new(out_dims))
 }
 
+// ── linear (matmul with implicitly-transposed weight) ─────────────────────────
+
+/// Linear projection: `x [M, K] @ Wᵀ` where `W` is stored row-major as `[N, K]`
+/// (the standard PyTorch `nn.Linear` layout `[out_features, in_features]`).
+/// Returns `[M, N]`.
+///
+/// Unlike `matmul(x, W.t())`, this does NOT build a transposed *view* — the
+/// generic `matmul` assumes contiguous row-major operands and silently drops the
+/// transpose. Instead we read `W` in its natural contiguous layout and let the
+/// GEMM treat it as transposed via strides, which is correct for F32 and
+/// F16/BF16 weights alike. Inputs must be contiguous (forward-pass activations
+/// and loaded weights always are).
+pub fn matmul_nt(x: &Tensor, w: &Tensor) -> Result<Tensor> {
+    let xd = x.shape().dims();
+    let wd = w.shape().dims();
+    if xd.len() != 2 || wd.len() != 2 {
+        return Err(SapientError::internal("matmul_nt expects 2-D tensors"));
+    }
+    let (m, k) = (xd[0], xd[1]);
+    let (n, k2) = (wd[0], wd[1]);
+    if k != k2 {
+        return Err(SapientError::ShapeMismatch {
+            expected: vec![m, k],
+            got: vec![n, k2],
+        });
+    }
+
+    let x_cow = x.to_f32_cow();
+    let w_cow = w.to_f32_cow();
+    let x_data = x_cow.as_ref();
+    let w_data = w_cow.as_ref();
+    let mut out = vec![0.0f32; m * n];
+
+    // x is [M, K] row-major: row stride K, col stride 1.
+    // We want B[l, j] = Wᵀ[l, j] = W[j, l] = w_data[j*K + l], i.e. row stride 1,
+    // col stride K — a stride-only transpose of the contiguous W buffer.
+    unsafe {
+        matrixmultiply::sgemm(
+            m,
+            k,
+            n,
+            1.0,
+            x_data.as_ptr(),
+            k as isize,
+            1,
+            w_data.as_ptr(),
+            1,
+            k as isize,
+            0.0,
+            out.as_mut_ptr(),
+            n as isize,
+            1,
+        );
+    }
+
+    Tensor::from_f32(&out, Shape::new([m, n]))
+}
+
 // ── gemm ─────────────────────────────────────────────────────────────────────
 
 /// General Matrix Multiply with optional transpose and scaling:
@@ -119,8 +179,10 @@ pub fn gemm(
         });
     }
 
-    let a_data = a2.as_f32_slice();
-    let b_data = b2.as_f32_slice();
+    let a_cow = a2.to_f32_cow();
+    let a_data = a_cow.as_ref();
+    let b_cow = b2.to_f32_cow();
+    let b_data = b_cow.as_ref();
     let mut out = vec![0.0f32; m * n];
 
     let a_strides = a2.strides();
@@ -187,6 +249,36 @@ mod tests {
         assert!((data[1] - 22.0).abs() < 1e-5);
         assert!((data[2] - 43.0).abs() < 1e-5);
         assert!((data[3] - 50.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn matmul_nt_linear() {
+        // x = [1,2] (1x2); W = [[1,2],[3,4],[5,6]] shape [3,2] (out=3, in=2).
+        // y = x @ Wᵀ = [1*1+2*2, 1*3+2*4, 1*5+2*6] = [5, 11, 17].
+        let x = Tensor::from_f32(&[1.0, 2.0], vec![1, 2]).unwrap();
+        let w = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![3, 2]).unwrap();
+        let y = matmul_nt(&x, &w).unwrap();
+        let d = y.as_f32_slice();
+        assert_eq!(y.shape().dims(), &[1, 3]);
+        assert!((d[0] - 5.0).abs() < 1e-5, "got {d:?}");
+        assert!((d[1] - 11.0).abs() < 1e-5, "got {d:?}");
+        assert!((d[2] - 17.0).abs() < 1e-5, "got {d:?}");
+    }
+
+    #[test]
+    fn matmul_nt_linear_f16_weight() {
+        // Same as above but W is stored as F16 — must still be correct.
+        let x = Tensor::from_f32(&[1.0, 2.0], vec![1, 2]).unwrap();
+        let bytes: Vec<u8> = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]
+            .iter()
+            .flat_map(|&v| half::f16::from_f32(v).to_le_bytes())
+            .collect();
+        let w = Tensor::from_f16_bytes(&bytes, vec![3, 2]).unwrap();
+        let y = matmul_nt(&x, &w).unwrap();
+        let d = y.as_f32_slice();
+        assert!((d[0] - 5.0).abs() < 1e-2, "got {d:?}");
+        assert!((d[1] - 11.0).abs() < 1e-2, "got {d:?}");
+        assert!((d[2] - 17.0).abs() < 1e-2, "got {d:?}");
     }
 
     #[test]

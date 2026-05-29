@@ -3,9 +3,9 @@
 //! A `Tensor` owns its shape and dtype metadata, and holds a reference-counted
 //! `BufferHandle` for the raw bytes.  Layout is always row-major (C order).
 
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde::{Deserializer, Serializer};
+use std::sync::Arc;
 
 use crate::buffer::{BufferHandle, CpuBuffer};
 use crate::dtype::DType;
@@ -59,6 +59,51 @@ impl Tensor {
         Ok(Self {
             shape,
             dtype: DType::F32,
+            strides,
+            buffer,
+            offset: 0,
+        })
+    }
+
+    /// Create a tensor from raw BF16 bytes, storing them natively without conversion.
+    /// Use `to_f32_vec()` or `to_f32_tensor()` to convert for computation.
+    pub fn from_bf16_bytes(data: &[u8], shape: impl Into<Shape>) -> Result<Self> {
+        let shape = shape.into();
+        shape.validate()?;
+        let expected_bytes = shape.numel() * 2;
+        if data.len() != expected_bytes {
+            return Err(SapientError::ShapeMismatch {
+                expected: shape.dims().to_vec(),
+                got: vec![data.len() / 2],
+            });
+        }
+        let strides = shape.strides();
+        let buffer = BufferHandle::new(CpuBuffer::from_bytes_slice(data)?);
+        Ok(Self {
+            shape,
+            dtype: DType::BF16,
+            strides,
+            buffer,
+            offset: 0,
+        })
+    }
+
+    /// Create a tensor from raw F16 bytes, storing them natively without conversion.
+    pub fn from_f16_bytes(data: &[u8], shape: impl Into<Shape>) -> Result<Self> {
+        let shape = shape.into();
+        shape.validate()?;
+        let expected_bytes = shape.numel() * 2;
+        if data.len() != expected_bytes {
+            return Err(SapientError::ShapeMismatch {
+                expected: shape.dims().to_vec(),
+                got: vec![data.len() / 2],
+            });
+        }
+        let strides = shape.strides();
+        let buffer = BufferHandle::new(CpuBuffer::from_bytes_slice(data)?);
+        Ok(Self {
+            shape,
+            dtype: DType::F16,
             strides,
             buffer,
             offset: 0,
@@ -140,11 +185,56 @@ impl Tensor {
 
     /// Typed `f32` view — panics if dtype is not F32.
     pub fn as_f32_slice(&self) -> &[f32] {
-        assert_eq!(self.dtype, DType::F32, "Tensor dtype is not F32");
+        assert_eq!(
+            self.dtype,
+            DType::F32,
+            "Tensor dtype is not F32 — call to_f32_vec() instead"
+        );
         let bytes = self.as_bytes();
         assert_eq!(bytes.len() % 4, 0);
         // SAFETY: alignment ensured by CpuBuffer, dtype checked above.
         unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, bytes.len() / 4) }
+    }
+
+    /// Returns a `Cow<[f32]>`. Borrows if the tensor is already F32, otherwise allocates a new `Vec<f32>`.
+    pub fn to_f32_cow(&self) -> std::borrow::Cow<'_, [f32]> {
+        if self.dtype == DType::F32 {
+            std::borrow::Cow::Borrowed(self.as_f32_slice())
+        } else {
+            std::borrow::Cow::Owned(self.to_f32_vec())
+        }
+    }
+
+    /// Convert this tensor to a `Vec<f32>`, handling BF16/F16 → F32 on the fly.
+    /// For F32 tensors this is a cheap slice-to-vec copy. For BF16/F16 it converts.
+    pub fn to_f32_vec(&self) -> Vec<f32> {
+        match self.dtype {
+            DType::F32 => self.as_f32_slice().to_vec(),
+            DType::BF16 => {
+                let bytes = self.as_bytes();
+                bytes
+                    .chunks_exact(2)
+                    .map(|c| f32::from(half::bf16::from_le_bytes(c.try_into().unwrap())))
+                    .collect()
+            }
+            DType::F16 => {
+                let bytes = self.as_bytes();
+                bytes
+                    .chunks_exact(2)
+                    .map(|c| half::f16::from_le_bytes(c.try_into().unwrap()).to_f32())
+                    .collect()
+            }
+            _ => self.as_f32_slice().to_vec(), // fallback for other dtypes
+        }
+    }
+
+    /// Returns an F32 tensor, converting BF16/F16 if necessary.
+    /// For already-F32 tensors, clones the buffer. For native types, converts.
+    pub fn to_f32_tensor(&self) -> Result<Tensor> {
+        match self.dtype {
+            DType::F32 => Ok(self.clone()),
+            _ => Tensor::from_f32(&self.to_f32_vec(), self.shape.clone()),
+        }
     }
 
     /// Mutable typed `f32` view — fails if buffer is shared or not F32.
@@ -161,7 +251,9 @@ impl Tensor {
             return Err(SapientError::internal("Buffer length not a multiple of 4"));
         }
         // SAFETY: alignment ensured by CpuBuffer, dtype checked above.
-        Ok(unsafe { std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut f32, bytes.len() / 4) })
+        Ok(unsafe {
+            std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut f32, bytes.len() / 4)
+        })
     }
 
     // ── Shape manipulation ───────────────────────────────────────────────────

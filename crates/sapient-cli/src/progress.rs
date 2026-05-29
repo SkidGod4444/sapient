@@ -82,8 +82,10 @@ pub fn start_download_progress(
         // Unknown size: use a spinner
         let pb = ProgressBar::new_spinner();
         pb.set_style(
-            ProgressStyle::with_template("  {msg:30} {spinner:.cyan} {bytes} downloaded  {bytes_per_sec}")
-                .unwrap(),
+            ProgressStyle::with_template(
+                "  {msg:30} {spinner:.cyan} {bytes} downloaded  {bytes_per_sec}",
+            )
+            .unwrap(),
         );
         pb
     };

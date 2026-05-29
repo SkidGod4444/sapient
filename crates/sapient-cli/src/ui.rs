@@ -1,93 +1,90 @@
 //! Terminal UI helpers for interactive commands.
+//!
+//! Styling goes through the `console` crate, which automatically disables
+//! colours when output is not a TTY or when `NO_COLOR` is set — so piped output
+//! stays clean while interactive sessions look modern.
 
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
+use std::time::Duration;
 
-const RESET: &str = "\x1b[0m";
-const BOLD: &str = "\x1b[1m";
-const DIM: &str = "\x1b[2m";
-const CYAN: &str = "\x1b[36m";
+use console::{style, Emoji};
+use indicatif::{ProgressBar, ProgressStyle};
 
-fn use_color() -> bool {
-    std::env::var("NO_COLOR").is_err() && io::stdout().is_terminal()
-}
+// Emoji with plain-text fallbacks for terminals without unicode/emoji support.
+static BOLT: Emoji<'_, '_> = Emoji("⚡", "*");
+static CHECK: Emoji<'_, '_> = Emoji("✓", "OK");
+static CROSS: Emoji<'_, '_> = Emoji("✗", "x");
+static INFO: Emoji<'_, '_> = Emoji("ℹ", "i");
+static ARROW: Emoji<'_, '_> = Emoji("›", ">");
 
-fn dim() -> &'static str {
-    if use_color() {
-        DIM
-    } else {
-        ""
-    }
-}
-
-fn bold() -> &'static str {
-    if use_color() {
-        BOLD
-    } else {
-        ""
-    }
-}
-
-fn cyan() -> &'static str {
-    if use_color() {
-        CYAN
-    } else {
-        ""
-    }
-}
-
-fn reset() -> &'static str {
-    if use_color() {
-        RESET
-    } else {
-        ""
-    }
-}
-
-/// Clear the current stderr line (spinner / status text).
-pub fn clear_status() {
-    let _ = write!(io::stderr(), "\r\x1b[2K");
-    let _ = io::stderr().flush();
-}
-
-
-pub fn print_chat_banner(model: &str, arch: &str) {
-    let line = "─".repeat(48);
-    println!(
-        "\n{}{}{}\n{}  {}SAPIENT Chat{}\n{}  Model: {}{}\n{}  Type /exit or /help{}",
-        dim(),
-        line,
-        reset(),
-        dim(),
-        cyan(),
-        reset(),
-        dim(),
-        model,
-        reset(),
-        dim(),
-        reset(),
+/// A branded spinner shown on stderr while a long operation runs.
+/// Call [`ProgressBar::finish_and_clear`] when done.
+pub fn spinner(message: impl Into<String>) -> ProgressBar {
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::with_template("{spinner:.cyan} {msg}")
+            .unwrap()
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✓"]),
     );
-    if arch.contains("vision") || model.to_ascii_lowercase().contains("vlm") {
+    pb.set_message(message.into());
+    pb.enable_steady_tick(Duration::from_millis(80));
+    pb
+}
+
+/// The SAPIENT wordmark banner, shown at the top of interactive sessions.
+pub fn print_logo() {
+    let bar = style("━".repeat(52)).dim();
+    println!("{bar}");
+    println!(
+        "  {} {}   {}",
+        BOLT,
+        style("SAPIENT").bold().cyan(),
+        style("edge inference engine").dim()
+    );
+    println!("{bar}");
+}
+
+pub fn print_chat_banner(model: &str, arch: &str, backend: &str) {
+    let bar = style("━".repeat(52)).dim();
+    println!("\n{bar}");
+    println!(
+        "  {} {}",
+        style("SAPIENT Chat").bold().cyan(),
+        style(format!("· {arch} · {backend}")).dim()
+    );
+    println!("  {} {}", style("model").dim(), style(model).bold());
+    println!(
+        "  {}",
+        style("type a message · /help for commands · /exit to quit").dim()
+    );
+    if arch.to_ascii_lowercase().contains("vision") || model.to_ascii_lowercase().contains("vlm") {
         println!(
-            "{}  Note: vision models run in text-only mode for now{}",
-            dim(),
-            reset()
+            "  {}",
+            style("note: vision models run in text-only mode for now").yellow()
         );
     }
-    println!("{}{}{}\n", dim(), line, reset());
+    println!("{bar}");
 }
 
 pub fn print_chat_help() {
-    println!("\n{}Commands:{} /exit  /quit  /help\n", bold(), reset());
+    println!("\n  {}", style("Commands").bold());
+    for (cmd, desc) in [
+        ("/help, /?", "show this help"),
+        ("/clear", "clear the conversation history"),
+        ("/exit, /quit, /q", "leave the chat"),
+    ] {
+        println!("    {:<18} {}", style(cmd).cyan(), style(desc).dim());
+    }
+    println!();
 }
 
 pub fn write_user_prompt() -> io::Result<()> {
+    // Modern "chip" badge for the role, then an inline prompt arrow.
     write!(
         io::stdout(),
-        "\n{}you{} {}›{} ",
-        bold(),
-        reset(),
-        cyan(),
-        reset()
+        "\n{} {} ",
+        style(" you ").black().on_green().bold(),
+        style(ARROW).green().dim()
     )?;
     io::stdout().flush()
 }
@@ -95,11 +92,66 @@ pub fn write_user_prompt() -> io::Result<()> {
 pub fn write_assistant_prompt() -> io::Result<()> {
     write!(
         io::stdout(),
-        "\n{}sapient{} {}›{} ",
-        bold(),
-        reset(),
-        cyan(),
-        reset()
+        "\n{} {} ",
+        style(" sapient ").black().on_cyan().bold(),
+        style(ARROW).cyan().dim()
     )?;
     io::stdout().flush()
+}
+
+/// A dim one-line generation stat shown after a reply (tokens & speed).
+pub fn print_gen_stats(tokens: usize, elapsed: Duration) {
+    let secs = elapsed.as_secs_f64().max(1e-6);
+    let tps = tokens as f64 / secs;
+    println!(
+        "{}",
+        style(format!("  {BOLT} {tokens} tokens · {tps:.1} tok/s · {secs:.1}s")).dim()
+    );
+}
+
+/// `key: value` info row used by `sapient info`.
+pub fn info_row(key: &str, value: impl std::fmt::Display) {
+    println!("  {:<12} {}", style(key).dim(), value);
+}
+
+pub fn success(msg: impl std::fmt::Display) {
+    println!("{} {}", style(CHECK).green().bold(), msg);
+}
+
+pub fn failure(msg: impl std::fmt::Display) {
+    eprintln!("{} {}", style(CROSS).red().bold(), msg);
+}
+
+pub fn hint(msg: impl std::fmt::Display) {
+    println!("{} {}", style(INFO).cyan(), style(msg).dim());
+}
+
+/// Render a simple aligned table with a dim header rule.
+pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i < widths.len() {
+                widths[i] = widths[i].max(cell.len());
+            }
+        }
+    }
+
+    let mut header_line = String::from("  ");
+    for (i, h) in headers.iter().enumerate() {
+        header_line.push_str(&format!("{:<width$}  ", h, width = widths[i]));
+    }
+    println!("{}", style(header_line).bold());
+
+    let rule: usize = widths.iter().map(|w| w + 2).sum::<usize>();
+    println!("  {}", style("─".repeat(rule)).dim());
+
+    for row in rows {
+        let mut line = String::from("  ");
+        for (i, cell) in row.iter().enumerate() {
+            let w = widths.get(i).copied().unwrap_or(cell.len());
+            line.push_str(&format!("{:<width$}  ", cell, width = w));
+        }
+        println!("{line}");
+    }
 }

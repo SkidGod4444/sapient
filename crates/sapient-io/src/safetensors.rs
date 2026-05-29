@@ -94,7 +94,8 @@ impl SafetensorsLoader {
             let raw = &data_section[start..end];
             let shape = Shape::new(meta.shape.clone());
 
-            // For F32 we can directly build a tensor; others → convert to F32.
+            // Store F32 as-is; store BF16/F16 natively (no conversion) to halve memory use.
+            // The backends call `to_f32_vec()` lazily during computation.
             let tensor = match dtype {
                 DType::F32 => {
                     let f32s: Vec<f32> = raw
@@ -104,20 +105,15 @@ impl SafetensorsLoader {
                     Tensor::from_f32(&f32s, shape)
                         .map_err(|e| SapientError::SafetensorsParseError(e.to_string()))?
                 }
-                DType::F16 => {
-                    let f32s: Vec<f32> = raw
-                        .chunks_exact(2)
-                        .map(|c| half::f16::from_le_bytes(c.try_into().unwrap()).to_f32())
-                        .collect();
-                    Tensor::from_f32(&f32s, shape)
+                DType::BF16 => {
+                    // Store raw BF16 bytes — NO conversion to F32 here.
+                    // This keeps phi-2 weights at ~5.4 GB instead of ~10.8 GB.
+                    Tensor::from_bf16_bytes(raw, shape)
                         .map_err(|e| SapientError::SafetensorsParseError(e.to_string()))?
                 }
-                DType::BF16 => {
-                    let f32s: Vec<f32> = raw
-                        .chunks_exact(2)
-                        .map(|c| f32::from(half::bf16::from_le_bytes(c.try_into().unwrap())))
-                        .collect();
-                    Tensor::from_f32(&f32s, shape)
+                DType::F16 => {
+                    // Store raw F16 bytes natively.
+                    Tensor::from_f16_bytes(raw, shape)
                         .map_err(|e| SapientError::SafetensorsParseError(e.to_string()))?
                 }
                 other => {

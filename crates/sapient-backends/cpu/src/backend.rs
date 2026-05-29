@@ -385,7 +385,8 @@ impl CpuBackend {
                 let dims = ids_t.shape().dims();
                 let seq_len: usize = dims.iter().product();
                 let hidden = weight.shape().dims()[1];
-                let w = weight.as_f32_slice();
+                // Use to_f32_vec() to transparently handle BF16/F16 weights
+                let w = weight.to_f32_vec();
                 let ids: Vec<u32> = if ids_t.dtype() == DType::F32 {
                     ids_t.as_f32_slice().iter().map(|&v| v as u32).collect()
                 } else {

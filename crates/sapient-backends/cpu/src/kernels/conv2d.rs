@@ -47,9 +47,12 @@ pub fn conv2d(
     let h_out = (h_in + pads[0] + pads[2] - dilations[0] * (kh - 1) - 1) / strides[0] + 1;
     let w_out = (w_in + pads[1] + pads[3] - dilations[1] * (kw - 1) - 1) / strides[1] + 1;
 
-    let x_data = x.as_f32_slice();
-    let w_data = weight.as_f32_slice();
-    let b_data = bias.map(|t| t.as_f32_slice());
+    let x_cow = x.to_f32_cow();
+    let x_data = x_cow.as_ref();
+    let w_cow = weight.to_f32_cow();
+    let w_data = w_cow.as_ref();
+    let b_cow = bias.map(|t| t.to_f32_cow());
+    let b_data = b_cow.as_ref().map(|c| c.as_ref());
 
     let out_size = n * c_out * h_out * w_out;
     let mut out_data = vec![0.0f32; out_size];

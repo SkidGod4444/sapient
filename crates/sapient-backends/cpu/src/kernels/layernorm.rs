@@ -29,11 +29,14 @@ pub fn layer_norm(
     let outer: usize = shape.dims()[..ax].iter().product();
     let norm_size: usize = shape.dims()[ax..].iter().product();
 
-    let data = x.as_f32_slice();
+    let data_cow = x.to_f32_cow();
+    let data = data_cow.as_ref();
     let mut out = vec![0.0f32; data.len()];
 
-    let w = weight.map(|t| t.as_f32_slice());
-    let b = bias.map(|t| t.as_f32_slice());
+    let w_cow = weight.map(|t| t.to_f32_cow());
+    let w = w_cow.as_ref().map(|c| c.as_ref());
+    let b_cow = bias.map(|t| t.to_f32_cow());
+    let b = b_cow.as_ref().map(|c| c.as_ref());
 
     for o in 0..outer {
         let base = o * norm_size;
@@ -77,10 +80,12 @@ pub fn rms_norm(x: &Tensor, weight: Option<&Tensor>, epsilon: f32) -> Result<Ten
         1
     };
 
-    let data = x.as_f32_slice();
+    let data_cow = x.to_f32_cow();
+    let data = data_cow.as_ref();
     let mut out = vec![0.0f32; data.len()];
 
-    let w = weight.map(|t| t.as_f32_slice());
+    let w_cow = weight.map(|t| t.to_f32_cow());
+    let w = w_cow.as_ref().map(|c| c.as_ref());
 
     for o in 0..outer {
         let base = o * dim;

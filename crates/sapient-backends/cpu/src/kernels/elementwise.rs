@@ -16,15 +16,17 @@ fn unary_f32<F: Fn(f32) -> f32>(x: &Tensor, f: F) -> Result<Tensor> {
             got: x.dtype().to_string(),
         });
     }
-    let data: Vec<f32> = x.as_f32_slice().iter().map(|&v| f(v)).collect();
+    let data: Vec<f32> = x.to_f32_cow().iter().map(|&v| f(v)).collect();
     Tensor::from_f32(&data, x.shape().clone())
 }
 
 /// Apply a binary f32 function element-wise (same shape only).
 fn binary_f32<F: Fn(f32, f32) -> f32>(a: &Tensor, b: &Tensor, f: F) -> Result<Tensor> {
     // Handle scalar broadcast (numel == 1).
-    let a_data = a.as_f32_slice();
-    let b_data = b.as_f32_slice();
+    let a_cow = a.to_f32_cow();
+    let a_data = a_cow.as_ref();
+    let b_cow = b.to_f32_cow();
+    let b_data = b_cow.as_ref();
 
     let (out, shape) = if a_data.len() == b_data.len() {
         let out: Vec<f32> = a_data

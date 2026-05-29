@@ -13,7 +13,9 @@ fn map_err<T>(result: std::result::Result<T, SapientError>) -> Result<T> {
 pub fn embed_tokens(weight: &Tensor, input_ids: &[u32]) -> Result<Tensor> {
     let hidden = weight.shape().dims()[1];
     let seq_len = input_ids.len();
-    let w = weight.as_f32_slice();
+    // Embedding tables are commonly stored in F16/BF16; convert on the fly.
+    let w_cow = weight.to_f32_cow();
+    let w = w_cow.as_ref();
     let mut out = vec![0.0f32; seq_len * hidden];
 
     for (i, &id) in input_ids.iter().enumerate() {
@@ -44,8 +46,9 @@ pub fn linear_3d(x: &Tensor, weight: &Tensor) -> Result<Tensor> {
     }
 
     let x2d = map_err(x.reshape(vec![batch * seq, in_dim]))?;
-    let wt = weight.t().map_err(|e| anyhow::anyhow!("{e}"))?;
-    let y2d = map_err(matmul::matmul(&x2d, &wt))?;
+    // weight is [out, in] (PyTorch nn.Linear layout); matmul_nt computes x @ weightᵀ
+    // directly, honouring the layout and any F16/BF16 weight dtype.
+    let y2d = map_err(matmul::matmul_nt(&x2d, weight))?;
     map_err(y2d.reshape(vec![batch, seq, out_dim]))
 }
 
@@ -141,54 +144,119 @@ fn strides_for(dims: &[usize]) -> Vec<usize> {
 }
 
 /// Update the pre-allocated KV cache in place and return a view of length `seq_len + new_seq`.
-pub fn update_kv_cache(cache: &mut Tensor, current_seq_len: usize, new_k: &Tensor) -> Result<Tensor> {
+pub fn update_kv_cache(
+    cache: &mut Tensor,
+    current_seq_len: usize,
+    new_k: &Tensor,
+) -> Result<Tensor> {
     let cd = cache.shape().dims();
     let nd = new_k.shape().dims();
-    
+
     if cd.len() != 4 || nd.len() != 4 {
         anyhow::bail!("update_kv_cache expects 4-D tensors");
     }
     if cd[0] != nd[0] || cd[1] != nd[1] || cd[3] != nd[3] {
         anyhow::bail!("update_kv_cache shape mismatch");
     }
-    
+
     let max_seq = cd[2];
     let new_seq = nd[2];
-    let total_seq = current_seq_len + new_seq;
-    
-    if total_seq > max_seq {
-        anyhow::bail!("context length {} exceeds max cache size {}", total_seq, max_seq);
+
+    if new_seq > max_seq {
+        anyhow::bail!("new tokens {} exceeds max cache size {}", new_seq, max_seq);
     }
-    
+
+    let mut total_seq = current_seq_len + new_seq;
+    let shift = if total_seq > max_seq {
+        total_seq - max_seq
+    } else {
+        0
+    };
+
     let (b_sz, h, hd) = (cd[0], cd[1], cd[3]);
     let new_k_slice = new_k.as_f32_slice();
-    
     let cache_strides = cache.strides().to_vec();
-    
+
     {
         let cache_slice = cache.as_f32_slice_mut()?;
+
+        // If we need to shift, move existing elements left
+        if shift > 0 {
+            let keep_seq = current_seq_len - shift;
+            for bi in 0..b_sz {
+                for hi in 0..h {
+                    let cache_base = bi * cache_strides[0] + hi * cache_strides[1];
+                    for si in 0..keep_seq {
+                        let src_idx = cache_base + (si + shift) * cache_strides[2];
+                        let dst_idx = cache_base + si * cache_strides[2];
+                        cache_slice.copy_within(src_idx..src_idx + hd, dst_idx);
+                    }
+                }
+            }
+        }
+
+        // Now append the new tokens
+        let insert_pos = if shift > 0 {
+            current_seq_len - shift
+        } else {
+            current_seq_len
+        };
         for bi in 0..b_sz {
             for hi in 0..h {
-                let cache_base = bi * cache_strides[0] + hi * cache_strides[1] + current_seq_len * cache_strides[2];
+                let cache_base =
+                    bi * cache_strides[0] + hi * cache_strides[1] + insert_pos * cache_strides[2];
                 let new_base = ((bi * h + hi) * new_seq) * hd; // new_k is assumed contiguous from split_heads
-                
+
                 for si in 0..new_seq {
                     let c_idx = cache_base + si * cache_strides[2];
                     let n_idx = new_base + si * hd;
-                    
+
                     // Copy head_dim elements
                     cache_slice[c_idx..c_idx + hd].copy_from_slice(&new_k_slice[n_idx..n_idx + hd]);
                 }
             }
         }
     }
-    
+
+    if shift > 0 {
+        total_seq = max_seq;
+    }
+
     // Return a sliced view of the cache from 0 to total_seq
-    cache.slice_axis(2, 0, total_seq).map_err(|e| anyhow::anyhow!("{e}"))
+    cache
+        .slice_axis(2, 0, total_seq)
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 pub fn apply_rope_positions(x: &Tensor, positions: &[usize], base: f32) -> Result<Tensor> {
     map_err(rope::apply_rope(x, positions, base))
+}
+
+/// RoPE applied to only the first `rotary_dim` channels (Phi partial rotary).
+pub fn apply_rope_partial(
+    x: &Tensor,
+    positions: &[usize],
+    base: f32,
+    rotary_dim: usize,
+) -> Result<Tensor> {
+    map_err(rope::apply_rope_partial(x, positions, base, rotary_dim))
+}
+
+/// Add a per-feature bias `[n]` broadcast over the last dimension of `y`
+/// (shape `[.., n]`). `y` must be F32; `bias` may be F16/BF16.
+pub fn add_bias_last_dim(y: &Tensor, bias: &Tensor) -> Result<Tensor> {
+    let dims = y.shape().dims().to_vec();
+    let n = *dims.last().ok_or_else(|| anyhow::anyhow!("empty tensor"))?;
+    let bias_cow = bias.to_f32_cow();
+    let b = bias_cow.as_ref();
+    if b.len() != n {
+        anyhow::bail!("bias length {} does not match last dim {n}", b.len());
+    }
+    let mut data = y.as_f32_slice().to_vec();
+    for (i, v) in data.iter_mut().enumerate() {
+        *v += b[i % n];
+    }
+    map_err(Tensor::from_f32(&data, Shape::new(dims)))
 }
 
 pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
@@ -248,8 +316,8 @@ pub fn logits_from_hidden(hidden: &Tensor, lm_head: &Tensor) -> Result<Vec<f32>>
     let last = &h[(seq - 1) * hidden_size..seq * hidden_size];
     let h_last =
         Tensor::from_f32(last, Shape::new([1, hidden_size])).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let wt = lm_head.t().map_err(|e| anyhow::anyhow!("{e}"))?;
-    let logits = map_err(matmul::matmul(&h_last, &wt))?;
+    // lm_head is [vocab, hidden]; matmul_nt computes h_last @ lm_headᵀ directly.
+    let logits = map_err(matmul::matmul_nt(&h_last, lm_head))?;
     Ok(logits.as_f32_slice().to_vec())
 }
 

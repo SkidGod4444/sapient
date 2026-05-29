@@ -44,9 +44,12 @@ pub fn scaled_dot_product_attention(
     let seq_k = ks[2];
     let scale = scale.unwrap_or(1.0 / (head_dim as f32).sqrt());
 
-    let q_data = q.as_f32_slice();
-    let k_data = k.as_f32_slice();
-    let v_data = v.as_f32_slice();
+    let q_cow = q.to_f32_cow();
+    let q_data = q_cow.as_ref();
+    let k_cow = k.to_f32_cow();
+    let k_data = k_cow.as_ref();
+    let v_cow = v.to_f32_cow();
+    let v_data = v_cow.as_ref();
 
     let q_strides = q.strides();
     let k_strides = k.strides();
@@ -69,7 +72,7 @@ pub fn scaled_dot_product_attention(
                     let mut dot = 0.0f32;
                     let q_base = b * q_strides[0] + h * q_strides[1] + qi * q_strides[2];
                     let k_base = b * k_strides[0] + kv_h * k_strides[1] + ki * k_strides[2];
-                    
+
                     for d in 0..head_dim {
                         let q_idx = q_base + d * q_strides[3];
                         let k_idx = k_base + d * k_strides[3];
@@ -81,7 +84,8 @@ pub fn scaled_dot_product_attention(
 
             // Apply optional additive mask.
             if let Some(m) = mask {
-                let m_data = m.as_f32_slice();
+                let m_cow = m.to_f32_cow();
+                let m_data = m_cow.as_ref();
                 for qi in 0..seq_q {
                     for ki in 0..seq_k {
                         scores[qi * seq_k + ki] += m_data[qi * seq_k + ki];
@@ -115,7 +119,10 @@ pub fn scaled_dot_product_attention(
                     let mut acc = 0.0f32;
                     for ki in 0..seq_k {
                         let s_idx = qi * seq_k + ki;
-                        let v_idx = b * v_strides[0] + kv_h * v_strides[1] + ki * v_strides[2] + d * v_strides[3];
+                        let v_idx = b * v_strides[0]
+                            + kv_h * v_strides[1]
+                            + ki * v_strides[2]
+                            + d * v_strides[3];
                         acc += scores[s_idx] * v_data[v_idx];
                     }
                     out[((b * n_heads + h) * seq_q + qi) * head_dim + d] = acc;

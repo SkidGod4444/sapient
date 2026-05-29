@@ -26,6 +26,13 @@ jobs:
             os: macos-14           # ARM runner
             archive: tar.gz
 
+          # macOS — Apple Silicon, Metal GPU build (MLX backend via `mlx` feature)
+          - target: aarch64-apple-darwin
+            os: macos-14
+            archive: tar.gz
+            features: mlx
+            suffix: -metal
+
           # macOS — Intel (cross-compiled on Apple Silicon runner — avoids macos-13 queue)
           - target: x86_64-apple-darwin
             os: macos-14
@@ -74,6 +81,11 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y pkg-config libssl-dev
 
+      # MLX (the Metal GPU backend) is built from source by mlx-rs and needs CMake.
+      - name: Install MLX build deps (macOS Metal)
+        if: matrix.features == 'mlx'
+        run: brew install cmake
+
       # ── Build ──────────────────────────────────────────────────────────────
       # Windows must use pwsh so MSVC link.exe is on PATH (Git Bash does not inherit it).
       - name: Build (native — Windows)
@@ -84,7 +96,13 @@ jobs:
       - name: Build (native — Linux/macOS)
         if: runner.os != 'Windows'
         shell: bash
-        run: cargo build --release --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }}
+        run: |
+          FEATURES="${{ matrix.features }}"
+          if [ -n "$FEATURES" ]; then
+            cargo build --release -p sapient-cli --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }} --features "$FEATURES"
+          else
+            cargo build --release -p sapient-cli --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }}
+          fi
 
       # ── Strip binary (reduces size ~50-70%) ───────────────────────────────
       - name: Strip binary (Linux/macOS)
@@ -98,7 +116,7 @@ jobs:
         shell: bash
         run: |
           BINARY="target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}"
-          ARCHIVE="${{ env.BINARY_NAME }}-${{ matrix.target }}.tar.gz"
+          ARCHIVE="${{ env.BINARY_NAME }}-${{ matrix.target }}${{ matrix.suffix }}.tar.gz"
           tar czf "$ARCHIVE" -C "$(dirname $BINARY)" "$(basename $BINARY)"
           echo "ARCHIVE=$ARCHIVE" >> $GITHUB_ENV
 
@@ -134,7 +152,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.BINARY_NAME }}-${{ matrix.target }}
+          name: ${{ env.BINARY_NAME }}-${{ matrix.target }}${{ matrix.suffix }}
           path: |
             ${{ env.ARCHIVE }}
             ${{ env.ARCHIVE }}.sha256

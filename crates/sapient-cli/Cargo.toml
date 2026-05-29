@@ -27,6 +27,7 @@ sapient-tokenizers   = { workspace = true }
 anyhow      = { workspace = true }
 axum        = { workspace = true }
 clap        = { workspace = true }
+console     = { workspace = true }
 dirs        = { workspace = true }
 flate2      = { workspace = true }
 futures     = { workspace = true }

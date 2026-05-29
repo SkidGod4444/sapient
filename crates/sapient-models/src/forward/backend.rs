@@ -50,6 +50,23 @@ impl std::fmt::Display for LlmBackendKind {
 pub trait LlmBackend: Send + Sync {
     fn name(&self) -> &'static str;
     fn linear_3d(&self, x: &Tensor, weight: &Tensor) -> Result<Tensor>;
+
+    /// Linear projection with an optional bias added over the last dimension.
+    /// Backend-agnostic: computes `linear_3d` then folds in the bias on the host,
+    /// so every backend gets correct bias handling for free.
+    fn linear_3d_bias(
+        &self,
+        x: &Tensor,
+        weight: &Tensor,
+        bias: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        let y = self.linear_3d(x, weight)?;
+        match bias {
+            None => Ok(y),
+            Some(b) => common::add_bias_last_dim(&y, b),
+        }
+    }
+
     fn rms_norm(&self, x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor>;
     fn layer_norm(
         &self,
@@ -63,6 +80,20 @@ pub trait LlmBackend: Send + Sync {
     fn add(&self, a: &Tensor, b: &Tensor) -> Result<Tensor>;
     fn mul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor>;
     fn apply_rope_positions(&self, x: &Tensor, positions: &[usize], base: f32) -> Result<Tensor>;
+
+    /// RoPE over only the first `rotary_dim` channels (Phi partial rotary).
+    /// Computed on the CPU reference kernel for all backends — it is cheap and
+    /// avoids backend-specific partial-rotary support.
+    fn apply_rope_partial(
+        &self,
+        x: &Tensor,
+        positions: &[usize],
+        base: f32,
+        rotary_dim: usize,
+    ) -> Result<Tensor> {
+        common::apply_rope_partial(x, positions, base, rotary_dim)
+    }
+
     fn gqa_attention(
         &self,
         q: &Tensor,

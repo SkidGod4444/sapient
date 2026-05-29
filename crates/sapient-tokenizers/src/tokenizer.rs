@@ -32,10 +32,26 @@ impl Default for TokenizerOptions {
 /// A tokenizer loaded from a HuggingFace `tokenizer.json`.
 ///
 /// Supports every tokenizer type HF ships: BPE, WordPiece, Unigram (SentencePiece).
+/// Known end-of-turn / end-of-sequence marker tokens across model families.
+/// A model may define several (e.g. Qwen has both `<|endoftext|>` and
+/// `<|im_end|>`); generation must stop on *any* of them.
+const EOS_CANDIDATES: &[&str] = &[
+    "</s>",
+    "<eos>",
+    "<|endoftext|>",
+    "<|end_of_text|>",
+    "<|eot_id|>",
+    "<|im_end|>",
+    "<end_of_turn>",
+    "<|redacted_EOS|>",
+];
+
 pub struct SapientTokenizer {
     inner: Tokenizer,
     pub bos_id: Option<u32>,
     pub eos_id: Option<u32>,
+    /// Every EOS/turn-end token id present in this tokenizer's vocab.
+    pub eos_ids: Vec<u32>,
     pub pad_id: Option<u32>,
     opts: TokenizerOptions,
 }
@@ -61,15 +77,16 @@ impl SapientTokenizer {
         let inner = Tokenizer::from_pretrained(model_id, None)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer for '{model_id}': {e}"))?;
 
-        let bos_id = Self::special_token_id(&inner, &["<s>", "<bos>"]);
-        let eos_id =
-            Self::special_token_id(&inner, &["</s>", "<eos>", "<|endoftext|>", "<|im_end|>"]);
+        let bos_id = Self::special_token_id(&inner, &["<s>", "<bos>", "<|begin_of_text|>"]);
+        let eos_ids = Self::all_special_token_ids(&inner, EOS_CANDIDATES);
+        let eos_id = eos_ids.first().copied();
         let pad_id = Self::special_token_id(&inner, &["<pad>"]);
 
         Ok(Self {
             inner,
             bos_id,
             eos_id,
+            eos_ids,
             pad_id,
             opts: TokenizerOptions::default(),
         })
@@ -127,6 +144,11 @@ impl SapientTokenizer {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    /// True if `id` is any of this tokenizer's end-of-sequence markers.
+    pub fn is_eos(&self, id: u32) -> bool {
+        self.eos_ids.contains(&id)
+    }
+
     fn special_token_id(tok: &Tokenizer, candidates: &[&str]) -> Option<u32> {
         for c in candidates {
             if let Some(id) = tok.token_to_id(c) {
@@ -136,20 +158,24 @@ impl SapientTokenizer {
         None
     }
 
+    /// All ids (in candidate order, deduplicated) for tokens present in the vocab.
+    fn all_special_token_ids(tok: &Tokenizer, candidates: &[&str]) -> Vec<u32> {
+        let mut ids = Vec::new();
+        for c in candidates {
+            if let Some(id) = tok.token_to_id(c) {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        ids
+    }
+
     fn from_inner(inner: Tokenizer, opts: TokenizerOptions) -> Result<Self> {
         let bos_id =
             Self::special_token_id(&inner, &["<s>", "<bos>", "<|begin_of_text|>", "[BOS]"]);
-        let eos_id = Self::special_token_id(
-            &inner,
-            &[
-                "</s>",
-                "<eos>",
-                "<|endoftext|>",
-                "<|end_of_text|>",
-                "<|im_end|>",
-                "<|redacted_EOS|>",
-            ],
-        );
+        let eos_ids = Self::all_special_token_ids(&inner, EOS_CANDIDATES);
+        let eos_id = eos_ids.first().copied();
         let pad_id =
             Self::special_token_id(&inner, &["<pad>", "<|finetune_right_pad_id|>", "[PAD]"]);
 
@@ -157,6 +183,7 @@ impl SapientTokenizer {
             inner,
             bos_id,
             eos_id,
+            eos_ids,
             pad_id,
             opts,
         })

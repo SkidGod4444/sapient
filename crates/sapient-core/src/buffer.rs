@@ -137,6 +137,20 @@ impl CpuBuffer {
         Ok(buf)
     }
 
+    /// Wrap existing raw bytes (e.g., native BF16 or F16 from safetensors).
+    pub fn from_bytes_slice(data: &[u8]) -> Result<Self> {
+        let bytes = data.len();
+        if bytes == 0 {
+            return Self::with_capacity(0, 16);
+        }
+        let buf = Self::with_capacity(bytes, 16)?;
+        // SAFETY: sizes are consistent and both regions are valid.
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr(), buf.ptr.as_ptr(), bytes);
+        }
+        Ok(buf)
+    }
+
     /// View as `f32` slice (panics if not properly aligned/sized).
     pub fn as_f32_slice(&self) -> &[f32] {
         assert_eq!(self.len % 4, 0, "buffer length not a multiple of 4");

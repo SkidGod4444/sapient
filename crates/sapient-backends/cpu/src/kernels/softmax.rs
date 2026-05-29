@@ -39,7 +39,8 @@ fn apply_softmax_impl(x: &Tensor, axis: i64, log_mode: bool) -> Result<Tensor> {
         )));
     }
 
-    let data = x.as_f32_slice();
+    let data_cow = x.to_f32_cow();
+    let data = data_cow.as_ref();
     let mut out = vec![0.0f32; data.len()];
 
     // We iterate over slices along the `ax` dimension.

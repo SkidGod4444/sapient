@@ -105,7 +105,10 @@ impl HubClient {
             Ok(f) => f,
             Err(e) => {
                 if self.opts.fast_download {
-                    eprintln!("Warning: Fast download failed ({}). Retrying in safe mode...", e);
+                    eprintln!(
+                        "Warning: Fast download failed ({}). Retrying in safe mode...",
+                        e
+                    );
                     let mut safe_opts = self.opts.clone();
                     safe_opts.fast_download = false;
                     let safe_client = Self::with_options(safe_opts)?;
@@ -140,7 +143,10 @@ impl HubClient {
         let client = reqwest::Client::new();
         let mut req = client.get(&url);
         // Forward auth token if available
-        let token = self.opts.token.clone()
+        let token = self
+            .opts
+            .token
+            .clone()
             .or_else(|| std::env::var("HF_TOKEN").ok());
         if let Some(t) = token {
             req = req.bearer_auth(t);
@@ -271,7 +277,10 @@ impl HubClient {
                 match repo.get(name).await {
                     Ok(p) => break p,
                     Err(e) if retries > 0 => {
-                        debug!("Retry downloading '{}' ({} retries left) due to: {}", name, retries, e);
+                        debug!(
+                            "Retry downloading '{}' ({} retries left) due to: {}",
+                            name, retries, e
+                        );
                         retries -= 1;
                         tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
                         backoff = std::cmp::min(backoff * 2, 10);
@@ -303,19 +312,24 @@ impl HubClient {
                     .acquire()
                     .await
                     .map_err(|e| anyhow::anyhow!("download worker failed: {e}"))?;
-                
+
                 let mut retries = 5;
                 let mut backoff = 2;
                 loop {
                     match api.model(model_id.clone()).get(&name).await {
                         Ok(p) => return Ok(p),
                         Err(e) if retries > 0 => {
-                            debug!("Retry parallel download '{}' ({} retries left) due to: {}", name, retries, e);
+                            debug!(
+                                "Retry parallel download '{}' ({} retries left) due to: {}",
+                                name, retries, e
+                            );
                             retries -= 1;
                             tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
                             backoff = std::cmp::min(backoff * 2, 10);
                         }
-                        Err(e) => return Err(anyhow::anyhow!("Failed to download '{}': {}", name, e)),
+                        Err(e) => {
+                            return Err(anyhow::anyhow!("Failed to download '{}': {}", name, e))
+                        }
                     }
                 }
             }));

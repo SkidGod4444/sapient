@@ -17,7 +17,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version       = "0.1.10"
+version       = "0.1.11"
 edition       = "2021"
 authors       = ["SAPIENT Contributors"]
 license       = "GPL-3.0-only"
@@ -81,6 +81,7 @@ minijinja  = "2.0"
 # HTTP & Download
 reqwest   = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
 indicatif = "0.17"
+console   = "0.15"
 sha2      = "0.10"
 dirs      = "5.0"
 

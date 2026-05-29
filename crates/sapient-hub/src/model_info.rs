@@ -93,6 +93,9 @@ pub struct ModelInfo {
     // RoPE
     pub rope_theta: f64,
 
+    // Fraction of head_dim that RoPE is applied to (Phi uses 0.4; most models 1.0).
+    pub partial_rotary_factor: f64,
+
     // Head dimension (derived)
     pub head_dim: usize,
 
@@ -134,9 +137,16 @@ impl ModelInfo {
         let intermediate_size = cfg["intermediate_size"].as_u64().unwrap_or(11008) as usize;
         let max_position_embeddings =
             cfg["max_position_embeddings"].as_u64().unwrap_or(4096) as usize;
-        let rms_norm_eps = cfg["rms_norm_eps"].as_f64().unwrap_or(1e-5);
+        // Models that use LayerNorm (e.g. Phi, GPT-2) name this `layer_norm_eps` /
+        // `layer_norm_epsilon` rather than `rms_norm_eps`.
+        let rms_norm_eps = cfg["rms_norm_eps"]
+            .as_f64()
+            .or_else(|| cfg["layer_norm_eps"].as_f64())
+            .or_else(|| cfg["layer_norm_epsilon"].as_f64())
+            .unwrap_or(1e-5);
         let hidden_act = cfg["hidden_act"].as_str().unwrap_or("silu").to_owned();
         let rope_theta = cfg["rope_theta"].as_f64().unwrap_or(10000.0);
+        let partial_rotary_factor = cfg["partial_rotary_factor"].as_f64().unwrap_or(1.0);
         let head_dim = cfg["head_dim"]
             .as_u64()
             .map(|d| d as usize)
@@ -155,6 +165,7 @@ impl ModelInfo {
             rms_norm_eps,
             hidden_act,
             rope_theta,
+            partial_rotary_factor,
             head_dim,
             raw: raw.clone(),
         })

@@ -134,17 +134,22 @@ impl Pipeline {
             )
         };
 
-        let chat_template = model_files
+        // Prefer the model's own chat template; otherwise fall back to a builtin
+        // and remember the stop string(s) that builtin uses to end a turn.
+        let mut builtin_stops: Vec<String> = Vec::new();
+        let chat_template = match model_files
             .tokenizer_config_path
             .as_ref()
             .and_then(|p| ChatTemplate::from_tokenizer_config(p).ok())
-            .or_else(|| {
-                Some(builtin_template_for(
-                    &model_info.arch,
-                    model_id,
-                    &model_info.model_type,
-                ))
-            });
+        {
+            Some(tmpl) => Some(tmpl),
+            None => {
+                let (tmpl, stops) =
+                    builtin_template_for(&model_info.arch, model_id, &model_info.model_type);
+                builtin_stops = stops;
+                Some(tmpl)
+            }
+        };
 
         validate_tokenizer_model_compat(model_id, &model_info, &tokenizer)?;
 
@@ -158,6 +163,12 @@ impl Pipeline {
         let mut config = opts.generation;
         if config.eos_token_id.is_none() {
             config.eos_token_id = tokenizer.eos_id;
+        }
+        // Register the builtin template's turn-terminator(s) as stop sequences.
+        for s in builtin_stops {
+            if !config.stop_sequences.contains(&s) {
+                config.stop_sequences.push(s);
+            }
         }
 
         debug!(
@@ -190,7 +201,8 @@ impl Pipeline {
     pub async fn generate(&self, prompt: &str) -> Result<String> {
         let input_ids = self.tokenizer.encode(prompt)?;
         let output_ids = self.generate_from_tokens(input_ids).await?;
-        self.tokenizer.decode(&output_ids, true)
+        let text = self.tokenizer.decode(&output_ids, true)?;
+        Ok(self.trim_stop_sequences(text))
     }
 
     /// Generate with a custom generation config.
@@ -203,7 +215,29 @@ impl Pipeline {
         let output_ids = self
             .generate_from_tokens_with_config(input_ids, config)
             .await?;
-        self.tokenizer.decode(&output_ids, true)
+        let text = self.tokenizer.decode(&output_ids, true)?;
+        Ok(self.trim_stop_sequences(text))
+    }
+
+    /// All token ids that should terminate generation: the configured EOS plus
+    /// every end-of-turn marker the tokenizer knows (e.g. Qwen's `<|im_end|>`,
+    /// which `decode` strips, so it can't be caught as a stop *string*).
+    fn eos_token_ids(&self) -> Vec<u32> {
+        let mut ids = self.tokenizer.eos_ids.clone();
+        if let Some(e) = self.config.eos_token_id {
+            if !ids.contains(&e) {
+                ids.push(e);
+            }
+        }
+        ids
+    }
+
+    /// Cut the reply at the first stop sequence (for non-streaming callers).
+    fn trim_stop_sequences(&self, text: String) -> String {
+        match earliest_stop(&text, &self.config.stop_sequences) {
+            Some(idx) => text[..idx].to_string(),
+            None => text,
+        }
     }
 
     /// Render the chat prompt string for a message history.
@@ -242,7 +276,7 @@ impl Pipeline {
     pub async fn generate_stream(&self, prompt: &str) -> ReceiverStream<String> {
         let (tx, rx) = mpsc::channel(64);
         let input_ids = self.tokenizer.encode(prompt).unwrap_or_default();
-        let eos = self.config.eos_token_id;
+        let eos_ids = self.eos_token_ids();
         let max_new = self.config.max_new_tokens;
         let strategy = self.config.strategy.clone();
         let stop = self.config.stop_sequences.clone();
@@ -266,6 +300,12 @@ impl Pipeline {
             let mut sampler = Sampler::new(strategy);
             let mut all_tokens = input_ids;
             let mut generated: Vec<u32> = Vec::new();
+            // Bytes of the decoded reply already streamed to the caller. We decode
+            // the whole reply each step (stable, unlike per-token pieces) and only
+            // emit text that cannot be part of a stop marker, so markers like
+            // `<|im_end|>` never leak even though they span several tokens.
+            let mut emitted = 0usize;
+            let mut clean_stop = false;
 
             engine.reset_cache();
             for step in 0..max_new {
@@ -293,21 +333,40 @@ impl Pipeline {
                 generated.push(next);
                 all_tokens.push(next);
 
-                if let Ok(piece) = tok.decode_token(next) {
-                    if tx.blocking_send(piece).is_err() {
-                        break;
-                    }
-                }
-
-                if eos == Some(next) {
+                if eos_ids.contains(&next) {
+                    clean_stop = true;
                     break;
                 }
 
-                if !stop.is_empty() {
-                    if let Ok(text) = tok.decode(&generated, true) {
-                        if stop.iter().any(|s| text.contains(s.as_str())) {
-                            break;
-                        }
+                let text = match tok.decode(&generated, true) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+
+                // A stop sequence appeared: emit everything before it, then stop.
+                if let Some(idx) = earliest_stop(&text, &stop) {
+                    if idx > emitted {
+                        let _ = tx.blocking_send(text[emitted..idx].to_string());
+                    }
+                    clean_stop = true;
+                    break;
+                }
+
+                // Emit all but a trailing tail that could still grow into a stop.
+                let safe = safe_emit_end(&text, &stop);
+                if safe > emitted {
+                    if tx.blocking_send(text[emitted..safe].to_string()).is_err() {
+                        break;
+                    }
+                    emitted = safe;
+                }
+            }
+
+            // Reached max tokens without hitting a stop: flush the held-back tail.
+            if !clean_stop {
+                if let Ok(text) = tok.decode(&generated, true) {
+                    if text.len() > emitted {
+                        let _ = tx.blocking_send(text[emitted..].to_string());
                     }
                 }
             }
@@ -339,6 +398,7 @@ impl Pipeline {
         let mut sampler = Sampler::new(config.strategy.clone());
         let mut generated: Vec<u32> = Vec::new();
         let mut all_tokens = input_ids;
+        let eos_ids = self.eos_token_ids();
 
         engine.reset_cache();
 
@@ -348,7 +408,7 @@ impl Pipeline {
         generated.push(next);
         all_tokens.push(next);
 
-        if config.eos_token_id == Some(next) {
+        if eos_ids.contains(&next) {
             return Ok(generated);
         }
 
@@ -358,7 +418,7 @@ impl Pipeline {
             generated.push(next);
             all_tokens.push(next);
 
-            if config.eos_token_id == Some(next) {
+            if eos_ids.contains(&next) {
                 debug!("EOS token generated at step {step}");
                 break;
             }
@@ -430,22 +490,78 @@ fn validate_tokenizer_model_compat(
     Ok(())
 }
 
-fn builtin_template_for(arch: &ArchType, model_id: &str, model_type: &str) -> ChatTemplate {
+/// Byte index of the earliest stop-sequence occurrence in `text`, if any.
+fn earliest_stop(text: &str, stops: &[String]) -> Option<usize> {
+    stops
+        .iter()
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| text.find(s.as_str()))
+        .min()
+}
+
+/// Largest byte index (a char boundary) up to which `text` is safe to emit
+/// without streaming a partial stop marker. Holds back the longest suffix of
+/// `text` that is a proper prefix of any stop sequence.
+fn safe_emit_end(text: &str, stops: &[String]) -> usize {
+    let mut hold = 0usize;
+    for s in stops {
+        let max_k = s.len().min(text.len());
+        for k in (1..max_k).rev() {
+            if !s.is_char_boundary(k) {
+                continue;
+            }
+            if text.ends_with(&s[..k]) {
+                hold = hold.max(k);
+                break;
+            }
+        }
+    }
+    text.len() - hold
+}
+
+/// Pick a builtin chat template and the stop string(s) that terminate an
+/// assistant turn under that template. When we fall back to a builtin template
+/// (because the model ships no `chat_template`), the model's plain EOS often
+/// isn't what the template trains the turn to end with (e.g. ChatML uses
+/// `<|im_end|>`), so these stops must be registered or the marker leaks into
+/// the output.
+fn builtin_template_for(
+    arch: &ArchType,
+    model_id: &str,
+    model_type: &str,
+) -> (ChatTemplate, Vec<String>) {
     let id = model_id.to_ascii_lowercase();
     let mt = model_type.to_ascii_lowercase();
+    let chatml = || {
+        (
+            ChatTemplate::from_template(builtin::CHATML),
+            vec!["<|im_end|>".to_string()],
+        )
+    };
     match arch {
-        ArchType::Llama if id.contains("tinyllama") => ChatTemplate::from_template(builtin::ZEPHYR),
+        ArchType::Llama if id.contains("tinyllama") => (
+            ChatTemplate::from_template(builtin::ZEPHYR),
+            vec!["</s>".to_string()],
+        ),
         ArchType::Llama
             if id.contains("llama-2")
                 || id.contains("llama2")
                 || (mt.contains("llama") && !id.contains("llama-3") && !id.contains("llama3")) =>
         {
-            ChatTemplate::from_template(builtin::LLAMA2)
+            (
+                ChatTemplate::from_template(builtin::LLAMA2),
+                vec!["</s>".to_string()],
+            )
         }
-        ArchType::Llama => ChatTemplate::from_template(builtin::LLAMA3),
-        ArchType::Phi => ChatTemplate::from_template(builtin::CHATML),
-        ArchType::Gemma => ChatTemplate::from_template(builtin::GEMMA),
-        ArchType::Qwen => ChatTemplate::from_template(builtin::CHATML),
-        _ => ChatTemplate::from_template(builtin::CHATML),
+        ArchType::Llama => (
+            ChatTemplate::from_template(builtin::LLAMA3),
+            vec!["<|eot_id|>".to_string()],
+        ),
+        ArchType::Gemma => (
+            ChatTemplate::from_template(builtin::GEMMA),
+            vec!["<end_of_turn>".to_string()],
+        ),
+        ArchType::Phi | ArchType::Qwen => chatml(),
+        _ => chatml(),
     }
 }

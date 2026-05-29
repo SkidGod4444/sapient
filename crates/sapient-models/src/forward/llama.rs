@@ -9,7 +9,7 @@ use sapient_hub::model_info::ModelInfo;
 use super::backend::{LlmBackend, LlmBackendDispatch, LlmBackendKind};
 use super::common::{embed_tokens, mean_pool_hidden, merge_heads, split_heads};
 use crate::weights::{
-    detect_weight_prefix, load_hf_weights, resolve_lm_head, resolve_weight,
+    detect_weight_prefix, load_hf_weights, resolve_bias, resolve_lm_head, resolve_weight,
     tie_word_embeddings_from_config,
 };
 
@@ -70,7 +70,7 @@ impl LlamaForward {
         let n_kv = info.num_key_value_heads;
         let hd = info.head_dim;
         let cache_shape = vec![1, n_kv, max_seq, hd];
-        
+
         let cache = (0..info.num_hidden_layers)
             .map(|_| {
                 let keys = Tensor::zeros(cache_shape.clone(), sapient_core::DType::F32).unwrap();
@@ -121,10 +121,7 @@ impl LlamaForward {
         let mut x = embed_tokens(embed, input_ids)?;
 
         let start_pos = if use_cache {
-            self.cache
-                .first()
-                .map(|l| l.seq_len)
-                .unwrap_or(0)
+            self.cache.first().map(|l| l.seq_len).unwrap_or(0)
         } else {
             self.reset_cache();
             0
@@ -162,30 +159,11 @@ impl LlamaForward {
         )?;
         let h = self.backend.rms_norm(&x, attn_norm_w, eps)?;
 
-        let q = self.backend.linear_3d(
-            &h,
-            resolve_weight(
-                &self.weights,
-                &self.prefix,
-                &format!("{pfx}.self_attn.q_proj"),
-            )?,
-        )?;
-        let k = self.backend.linear_3d(
-            &h,
-            resolve_weight(
-                &self.weights,
-                &self.prefix,
-                &format!("{pfx}.self_attn.k_proj"),
-            )?,
-        )?;
-        let v = self.backend.linear_3d(
-            &h,
-            resolve_weight(
-                &self.weights,
-                &self.prefix,
-                &format!("{pfx}.self_attn.v_proj"),
-            )?,
-        )?;
+        // Q/K/V projections. Llama/Mistral have no bias; Qwen2 has q/k/v biases —
+        // resolve_bias returns None when absent, so this is correct for both.
+        let q = self.linear(&h, &format!("{pfx}.self_attn.q_proj"))?;
+        let k = self.linear(&h, &format!("{pfx}.self_attn.k_proj"))?;
+        let v = self.linear(&h, &format!("{pfx}.self_attn.v_proj"))?;
 
         let mut q = split_heads(&q, n_heads, head_dim)?;
         let mut k = split_heads(&k, n_kv, head_dim)?;
@@ -210,14 +188,7 @@ impl LlamaForward {
 
         let attn = self.backend.gqa_attention(&q, &k, &v, n_kv, true)?;
         let attn = merge_heads(&attn)?;
-        let o = self.backend.linear_3d(
-            &attn,
-            resolve_weight(
-                &self.weights,
-                &self.prefix,
-                &format!("{pfx}.self_attn.o_proj"),
-            )?,
-        )?;
+        let o = self.linear(&attn, &format!("{pfx}.self_attn.o_proj"))?;
         let x = self.backend.add(&x, &o)?;
 
         let ffn_norm_w = resolve_weight(
@@ -242,6 +213,14 @@ impl LlamaForward {
             resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.mlp.down_proj"))?,
         )?;
         self.backend.add(&x, &down)
+    }
+
+    /// Linear projection that automatically applies a bias when the model has one
+    /// (Qwen2 q/k/v), and is a plain matmul otherwise (Llama, Mistral).
+    fn linear(&self, x: &Tensor, name: &str) -> Result<Tensor> {
+        let weight = resolve_weight(&self.weights, &self.prefix, name)?;
+        let bias = resolve_bias(&self.weights, &self.prefix, name);
+        self.backend.linear_3d_bias(x, weight, bias)
     }
 }
 

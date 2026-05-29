@@ -63,8 +63,12 @@ enum Commands {
         model: String,
     },
 
-    /// List models in the local HuggingFace cache.
+    /// List models downloaded to the local cache.
     List,
+
+    /// List all models SAPIENT supports (the registry catalog).
+    #[command(visible_aliases = ["available", "catalog"])]
+    Models,
 
     /// Remove one cached model from this device.
     #[command(name = "rm", visible_aliases = ["remove"])]
@@ -182,14 +186,27 @@ enum Commands {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     init_tracing(cli.json_logs, cli.verbose);
 
+    match dispatch(cli).await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            ui::failure(format!("{e:#}"));
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
-        Commands::Chat { model, backend } => chat_command(model.as_str(), &backend, cli.verbose).await,
+        Commands::Chat { model, backend } => {
+            chat_command(model.as_str(), &backend, cli.verbose).await
+        }
         Commands::Pull { model } => pull_command(model.as_str(), cli.verbose).await,
         Commands::List => list_command(),
+        Commands::Models => models_command(),
         Commands::Rm { model } => rm_command(model.as_str()),
         Commands::Reset { model, yes, stale } => reset_command(model.as_deref(), yes, stale),
         Commands::Info { model } => info_command(model.as_str()).await,
@@ -241,23 +258,28 @@ async fn chat_command(model: &str, backend: &str, verbose: bool) -> Result<()> {
     let mut load_opts = LoadOptions::default();
     load_opts.hub.quiet = false; // Always show progress!
     load_opts.backend = parse_generation_backend(backend)?;
+    let backend_label = load_opts.backend.to_string();
 
+    let load_spinner = (!verbose).then(|| ui::spinner(format!("loading {model}…")));
     if verbose {
-        eprintln!("Loading {model} with backend {}…", load_opts.backend);
-    } else {
-        eprintln!("Loading model {model}…");
+        eprintln!("Loading {model} with backend {backend_label}…");
     }
 
-    let pipeline = Pipeline::from_pretrained_with_opts(model, load_opts)
-        .await
-        .with_context(|| format!("failed to load model '{model}'"))?;
-
-    if !verbose {
-        ui::clear_status();
+    let pipeline = match Pipeline::from_pretrained_with_opts(model, load_opts).await {
+        Ok(p) => p,
+        Err(e) => {
+            if let Some(pb) = load_spinner {
+                pb.finish_and_clear();
+            }
+            return Err(e).with_context(|| format!("failed to load model '{model}'"));
+        }
+    };
+    if let Some(pb) = load_spinner {
+        pb.finish_and_clear();
     }
 
     let arch = format!("{:?}", pipeline.arch());
-    ui::print_chat_banner(model, &arch);
+    ui::print_chat_banner(model, &arch, &backend_label);
 
     let mut history: Vec<ChatMessage> = Vec::new();
     loop {
@@ -280,18 +302,43 @@ async fn chat_command(model: &str, backend: &str, verbose: bool) -> Result<()> {
             ui::print_chat_help();
             continue;
         }
+        if matches!(line, "/clear" | "/reset") {
+            history.clear();
+            ui::hint("conversation history cleared");
+            continue;
+        }
 
         history.push(ChatMessage::user(line));
-        ui::write_assistant_prompt()?;
 
+        // Spinner shows "thinking" until the first token arrives, then is cleared
+        // and replaced by the assistant prompt + streamed reply.
+        let think = ui::spinner("thinking…");
+        let start = std::time::Instant::now();
         let mut stream = pipeline.chat_stream(&history).await;
         let mut reply = String::new();
+        let mut first = true;
         while let Some(token) = stream.next().await {
+            if first {
+                think.finish_and_clear();
+                ui::write_assistant_prompt()?;
+                first = false;
+            }
             print!("{token}");
             reply.push_str(&token);
             io::stdout().flush()?;
         }
+        if first {
+            think.finish_and_clear();
+        }
         println!();
+        if !reply.is_empty() {
+            let tokens = pipeline
+                .tokenizer()
+                .encode(&reply)
+                .map(|t| t.len())
+                .unwrap_or(0);
+            ui::print_gen_stats(tokens, start.elapsed());
+        }
         history.push(ChatMessage::assistant(reply));
     }
 
@@ -340,6 +387,7 @@ async fn pull_command(model: &str, verbose: bool) -> Result<()> {
                     println!("  weights:   {}", w.display());
                 }
             }
+            ui::hint(format!("start chatting with:  sapient chat {model}"));
             Ok(())
         }
         Err(e) => {
@@ -352,23 +400,67 @@ async fn pull_command(model: &str, verbose: bool) -> Result<()> {
 fn list_command() -> Result<()> {
     let models = hub::list_cached_models()?;
     if models.is_empty() {
-        println!("No cached models yet. Download one with:");
-        println!("  sapient pull <model>");
+        ui::hint("No models downloaded yet.");
+        println!("  Pull one with:  sapient pull openhorizon/phi-2");
+        println!("  See all models: sapient models");
         return Ok(());
     }
-    println!("Cached models ({}):", models.len());
-    for m in models {
-        println!("  {m}");
-    }
+
+    let catalog = sapient_hub::registry::catalog();
+    let rows: Vec<Vec<String>> = models
+        .iter()
+        .map(|alias| {
+            let meta = catalog.iter().find(|m| m.alias == alias);
+            vec![
+                alias.clone(),
+                meta.map(|m| m.family.to_string()).unwrap_or_default(),
+                meta.map(|m| m.params.to_string()).unwrap_or_default(),
+            ]
+        })
+        .collect();
+
+    println!("\nDownloaded models ({})\n", models.len());
+    ui::print_table(&["MODEL", "FAMILY", "SIZE"], &rows);
+    println!();
+    Ok(())
+}
+
+fn models_command() -> Result<()> {
+    let catalog = sapient_hub::registry::catalog();
+    let cached = hub::list_cached_models().unwrap_or_default();
+
+    let rows: Vec<Vec<String>> = catalog
+        .iter()
+        .map(|m| {
+            let status = if cached.iter().any(|c| c == m.alias) {
+                "downloaded".to_string()
+            } else if m.gated {
+                "gated".to_string()
+            } else {
+                "—".to_string()
+            };
+            vec![
+                m.alias.to_string(),
+                m.family.to_string(),
+                m.params.to_string(),
+                status,
+            ]
+        })
+        .collect();
+
+    println!("\nSupported models ({})\n", catalog.len());
+    ui::print_table(&["MODEL", "FAMILY", "SIZE", "STATUS"], &rows);
+    println!();
+    ui::hint("run any of these with:  sapient chat <model>");
     Ok(())
 }
 
 fn rm_command(model: &str) -> Result<()> {
     let bytes = hub::clear_cached_model(model)?;
-    println!(
+    ui::success(format!(
         "Removed {model} from cache ({} freed).",
         hub::format_bytes(bytes)
-    );
+    ));
     Ok(())
 }
 
@@ -430,15 +522,18 @@ async fn info_command(model: &str) -> Result<()> {
         .await
         .with_context(|| format!("failed to fetch info for '{model}'"))?;
 
-    println!("Model:      {model}");
-    println!("Type:       {}", info.model_type);
-    println!("Arch:       {:?}", info.arch);
-    println!("Layers:     {}", info.num_hidden_layers);
-    println!("Hidden:     {}", info.hidden_size);
-    println!("Heads:      {}", info.num_attention_heads);
-    println!("KV heads:   {}", info.num_key_value_heads);
-    println!("Vocab:      {}", info.vocab_size);
-    println!("Context:    {}", info.max_position_embeddings);
+    ui::print_logo();
+    println!();
+    ui::info_row("model", model);
+    ui::info_row("type", &info.model_type);
+    ui::info_row("arch", format!("{:?}", info.arch));
+    ui::info_row("layers", info.num_hidden_layers);
+    ui::info_row("hidden", info.hidden_size);
+    ui::info_row("heads", info.num_attention_heads);
+    ui::info_row("kv heads", info.num_key_value_heads);
+    ui::info_row("vocab", info.vocab_size);
+    ui::info_row("context", info.max_position_embeddings);
+    println!();
     Ok(())
 }
 
@@ -455,8 +550,8 @@ fn login_command(token: Option<&str>) -> Result<()> {
     };
 
     let path = hub::save_hf_token(&token)?;
-    println!("✓ Token saved to {}", path.display());
-    println!("  Gated models (Llama, Gemma, etc.) are now accessible.");
+    ui::success(format!("Token saved to {}", path.display()));
+    ui::hint("Gated models (Llama, Mistral, etc.) are now accessible.");
     Ok(())
 }
 

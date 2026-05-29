@@ -25,7 +25,8 @@ where
     F: Fn(f32, f32) -> f32,
 {
     let shape = x.shape();
-    let data = x.as_f32_slice();
+    let data_cow = x.to_f32_cow();
+    let data = data_cow.as_ref();
     let norm_axes = normalise_axes(axes, shape.ndim());
 
     // Output shape.

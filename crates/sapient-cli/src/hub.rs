@@ -90,11 +90,14 @@ pub fn list_cached_models() -> Result<Vec<String>> {
         return Ok(vec![]);
     };
 
+    // Build reverse map: hf_repo_id -> alias (e.g. "microsoft/phi-2" -> "openhorizon/phi-2")
+    let reverse_aliases = sapient_hub::registry::reverse_alias_map();
+
     let mut models = Vec::new();
     for entry in std::fs::read_dir(&hub_cache)? {
         let entry = entry?;
         let path = entry.path();
-        
+
         let name = entry.file_name().to_string_lossy().into_owned();
         if let Some(rest) = name.strip_prefix("models--") {
             // Verify it's a properly installed model, not an empty or failed directory
@@ -104,9 +107,13 @@ pub fn list_cached_models() -> Result<Vec<String>> {
                 let has_commits = std::fs::read_dir(&snapshots_dir)
                     .map(|mut dirs| dirs.next().is_some())
                     .unwrap_or(false);
-                
+
                 if has_commits {
-                    models.push(rest.replace("--", "/"));
+                    let hf_id = rest.replace("--", "/");
+                    // Show the registry alias if one exists, otherwise skip (hide internal models)
+                    if let Some(alias) = reverse_aliases.get(hf_id.to_lowercase().as_str()) {
+                        models.push(alias.clone());
+                    }
                 }
             }
         }

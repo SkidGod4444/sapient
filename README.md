@@ -1,6 +1,6 @@
 <div align="center">
   <h1>⚡ SAPIENT</h1>
-  <p><strong>Run any HuggingFace LLM or SLM locally — one command to install, one line to run</strong></p>
+  <p><strong>A fast, pure-Rust edge inference engine for small language models — one command to install, one line to run</strong></p>
   <p>
     <a href="https://crates.io/crates/sapient-generate"><img src="https://img.shields.io/crates/v/sapient-generate.svg" alt="Crates.io"/></a>
     <a href="https://docs.rs/sapient-generate"><img src="https://docs.rs/sapient-generate/badge.svg" alt="docs.rs"/></a>
@@ -46,6 +46,7 @@ Grab a pre-built binary for your platform from the [**latest release**](https://
 | Platform | Binary |
 |---|---|
 | macOS (Apple Silicon) | `sapient-aarch64-apple-darwin.tar.gz` |
+| macOS (Apple Silicon, Metal GPU) | `sapient-aarch64-apple-darwin-metal.tar.gz` |
 | macOS (Intel) | `sapient-x86_64-apple-darwin.tar.gz` |
 | Linux (x86_64) | `sapient-x86_64-unknown-linux-gnu.tar.gz` |
 | Linux (ARM64 — Pi 4/5 64-bit OS, cloud ARM) | `sapient-aarch64-unknown-linux-gnu.tar.gz` |
@@ -59,40 +60,40 @@ Grab a pre-built binary for your platform from the [**latest release**](https://
 ## CLI — 30 Seconds to Running a Model
 
 ```bash
-# Interactive chat — streaming replies, clean UI
-sapient chat <model>
-sapient chat <model> --backend auto   # auto | cpu | metal
+# See every model SAPIENT supports (the registry catalog)
+sapient models
+
+# Interactive chat — streaming replies, modern UI
+sapient chat openhorizon/phi-2
+sapient chat openhorizon/qwen2.5-0.5b --backend auto   # auto | cpu | metal
 
 # One-shot completion (Hub models need --prompt)
-sapient run <model> --prompt "Explain transformers in simple terms"
-sapient run <model> --prompt "Explain transformers" --backend cpu
+sapient run openhorizon/phi-2 --prompt "Explain transformers in simple terms"
 
 # Download a model to local cache
-sapient pull <model>
+sapient pull openhorizon/phi-2
 
-# List / remove cached models
+# List / remove downloaded models
 sapient list
-sapient rm <model>          # remove one model
-sapient reset               # clear entire cache
+sapient rm openhorizon/phi-2   # remove one model
+sapient reset                  # clear entire cache
 
 # Update sapient to the latest release
 sapient update
 
-# Gated models (Llama, Gemma) — set token first
+# Gated models (Llama, Mistral) — set token first
 sapient login
 
-# Start an HTTP inference server (ONNX/GGUF files)
-sapient serve <model> --port 8080
-
-# Show info about a model
-sapient info <model>
+# Show config/architecture info for a model
+sapient info openhorizon/phi-2
 sapient backend-info
 
-# Verbose mode — show internal logs and file paths
-sapient -v pull <model>
+# Verbose mode — show internal logs, file paths, and generation stats
+sapient -v chat openhorizon/phi-2
 ```
 
-Use `/exit` or `/quit` to leave chat. Type `/help` for chat commands.
+Inside chat: type your message and press Enter. Use `/help` for commands, `/clear` to
+reset the conversation, and `/exit` to quit.
 
 ---
 
@@ -179,39 +180,59 @@ let text = p.generate_with_config("Write a haiku about Rust", &cfg).await?;
 
 ## Supported Models
 
-Sapient's native generation path is currently focused exclusively on optimizing the **openhorizon/phi-2** model for edge devices. Our built-in registry resolves `openhorizon/phi-2` directly to the Hugging Face repository, while providing $O(1)$ KV-caching optimizations.
+SAPIENT ships a **curated registry** — every model below is one whose architecture is
+implemented and verified in the native generation engine. Each `openhorizon/*` alias
+resolves to the upstream Hugging Face repository it downloads from. Run `sapient models`
+to see this list (and which models you've already downloaded) at any time.
 
-| Registry Alias | Format | Backend |
-|---|---|---|
-| **`openhorizon/phi-2`** | Safetensors | CPU, MLX on Apple Silicon when built with `--features mlx` |
+| Alias | Family | Size | Notes |
+|---|---|---|---|
+| `openhorizon/phi-2` | Phi | 2.7B | Default; LayerNorm + partial RoPE |
+| `openhorizon/phi-1.5` | Phi | 1.3B | |
+| `openhorizon/phi-1` | Phi | 1.3B | |
+| `openhorizon/qwen2.5-0.5b` | Qwen2.5 | 0.5B | Smallest; great for quick tests |
+| `openhorizon/qwen2.5-1.5b` | Qwen2.5 | 1.5B | |
+| `openhorizon/qwen2.5-3b` | Qwen2.5 | 3B | |
+| `openhorizon/smollm2-360m` | Llama | 360M | |
+| `openhorizon/smollm2-1.7b` | Llama | 1.7B | |
+| `openhorizon/tinyllama-1.1b` | Llama | 1.1B | |
+| `openhorizon/llama-3.2-1b` | Llama | 1B | Gated — run `sapient login` |
+| `openhorizon/llama-3.2-3b` | Llama | 3B | Gated — run `sapient login` |
+| `openhorizon/mistral-7b` | Mistral | 7B | Gated — run `sapient login` |
 
-*Note: Other model builders exist in the IR layer but are not officially supported or validated in the current registry focus.*
+All models run on the **CPU** backend everywhere; on Apple Silicon, building with
+`--features mlx` enables the **Metal** GPU backend. Weights are loaded from Safetensors
+(F16/BF16/F32). To request another model, open an issue — adding one means implementing
+and validating its architecture in `sapient-models`.
 
 ---
 
-## OpenAI-Compatible API
+## HTTP Server (advanced)
+
+`sapient serve` exposes a low-level **raw-tensor** inference server for compiled
+ONNX/GGUF graph files — not the chat pipeline. It is intended for embedding SAPIENT's
+graph runtime into other services.
 
 ```bash
-sapient serve openhorizon/phi-2 --port 8080
+sapient serve ./model.onnx --port 8080
 ```
 
-```bash
-# Works with any OpenAI SDK — just change the base URL
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "openhorizon/phi-2",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
-```
+| Endpoint | Purpose |
+|---|---|
+| `POST /v1/infer` | Run a single inference (tensors in → tensors out) |
+| `POST /v1/batch_infer` | Run an explicit batch |
+| `GET /v1/health` | Health check |
+| `GET /v1/metrics` | Prometheus-style text metrics |
 
-Compatible with the **OpenAI Python SDK**, **LangChain**, **LlamaIndex**, and any tool that speaks the OpenAI API format.
+> A high-level OpenAI-compatible chat endpoint (`/v1/chat/completions`) is on the
+> roadmap but **not implemented yet** — use `sapient chat` / the Rust `Pipeline` API
+> for text generation today.
 
 ---
 
 ## HuggingFace Token (Gated Models)
 
-For models that require access approval (Llama 3, Gemma):
+For models that require access approval (Llama 3.2, Mistral):
 
 ```bash
 # Set via environment variable
@@ -225,21 +246,26 @@ sapient login
 
 ## Architecture
 
-Built in Rust for maximum performance, zero dependencies on Python, ONNX Runtime, or CUDA.
+Built in Rust for maximum performance, with zero dependencies on Python, ONNX Runtime, or CUDA.
 
 ```
 sapient-generate          ← Pipeline API — from_pretrained, generate, chat, embed, stream
-├── sapient-hub           ← HuggingFace Hub client — parallel downloads, auth, cache
+├── sapient-hub           ← HuggingFace Hub client — parallel downloads, auth, cache, registry
 ├── sapient-tokenizers    ← All HF tokenizer types + Jinja2 chat templates
-├── sapient-models        ← Llama / Phi / Gemma / GPT-2 / BERT / Qwen / Mixtral builders
+├── sapient-models        ← Forward engines: Phi (Phi-1/1.5/2) and Llama (Llama/Qwen2.5/SmolLM2/TinyLlama/Mistral)
 │
-├── sapient-runtime       ← InferenceSession — execution + telemetry
-│   ├── sapient-ir        ← Computation graph IR (90+ ops)
-│   └── sapient-io        ← GGUF (Q4/Q8 dequant), Safetensors, ONNX loaders
+├── sapient-runtime       ← InferenceSession — graph execution + telemetry
+│   ├── sapient-ir        ← Computation graph IR + optimization passes
+│   └── sapient-io        ← Safetensors, GGUF (Q4/Q8/Q5 dequant), ONNX loaders
 │
-├── sapient-backends-cpu    ← CPU kernels: GQA attention, RoPE, RMSNorm, MatMul...
-└── sapient-backends-metal  ← macOS Metal backend selection and kernel integration point
+├── sapient-backends-cpu    ← CPU kernels: GQA attention, RoPE, RMSNorm/LayerNorm, MatMul…
+└── sapient-backends-metal  ← Apple Silicon Metal/MLX backend (built with `--features mlx`)
 ```
+
+> Generation runs through two validated forward engines — **Phi** and **Llama** (the
+> latter also serves Qwen2.5, SmolLM2, TinyLlama and Mistral). Additional architecture
+> builders (Gemma, GPT-2, BERT, Mixtral) exist in the IR layer but are not yet wired into
+> the chat/generation path.
 
 ---
 
