@@ -249,6 +249,53 @@ impl Tensor {
         unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, bytes.len() / 4) }
     }
 
+    /// Convert this tensor to a contiguous `Vec<f32>` that matches `shape().numel()`
+    /// exactly, even when the tensor is a **non-contiguous view** (e.g. a KV-cache
+    /// slice from `slice_axis`).
+    ///
+    /// For contiguous tensors this is a fast bounded copy.  For non-contiguous
+    /// tensors (strides don't match the natural row-major strides, or offset ≠ 0)
+    /// it uses stride-based indexing to extract only the logically-reachable elements
+    /// in row-major order — the approach that `as_f32_slice` / `to_f32_cow` cannot
+    /// do because they return the full backing buffer.
+    pub fn to_contiguous_f32_vec(&self) -> Vec<f32> {
+        let numel = self.numel();
+        if self.is_contiguous() {
+            // Fast path: elements are dense starting at offset.
+            // Limit to numel to avoid reading past the logical tensor.
+            match self.dtype {
+                DType::F32 => self.as_f32_slice()[..numel].to_vec(),
+                _ => {
+                    let v = self.to_f32_vec();
+                    v[..numel.min(v.len())].to_vec()
+                }
+            }
+        } else {
+            // Slow path: stride-based copy.
+            // `raw` gives us the full backing buffer from `self.offset` as f32 units.
+            let raw: Vec<f32> = match self.dtype {
+                DType::F32 => self.as_f32_slice().to_vec(),
+                _ => self.to_f32_vec(),
+            };
+            let dims = self.shape.dims();
+            let strides = &self.strides; // element strides (not byte strides)
+            let mut out = vec![0.0f32; numel];
+            for (flat, dst) in out.iter_mut().enumerate() {
+                // Convert flat (row-major) index to per-dimension indices, then
+                // compute the element offset using the tensor's actual strides.
+                let mut rem = flat;
+                let mut src = 0usize;
+                for d in (0..dims.len()).rev() {
+                    let idx_d = rem % dims[d];
+                    rem /= dims[d];
+                    src += idx_d * strides[d];
+                }
+                *dst = *raw.get(src).unwrap_or(&0.0);
+            }
+            out
+        }
+    }
+
     /// Returns a `Cow<[f32]>`. Borrows if the tensor is already F32, otherwise allocates a new `Vec<f32>`.
     pub fn to_f32_cow(&self) -> std::borrow::Cow<'_, [f32]> {
         if self.dtype == DType::F32 {

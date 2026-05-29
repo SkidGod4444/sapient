@@ -396,11 +396,23 @@ impl MlxLlmOps {
     }
 
     /// Convert without caching — for activation tensors created fresh each step.
+    ///
+    /// `to_f32_cow` on a non-contiguous tensor (e.g. KV-cache slices from
+    /// `slice_axis`) returns the full backing buffer, which is far larger than the
+    /// tensor's logical `numel`. `Array::from_slice` asserts `data.len == shape.product`
+    /// and panics. We limit the slice to `numel` elements to prevent the assert.
+    ///
+    /// For contiguous tensors (the common case for activations and weights) the
+    /// buffer length already equals `numel` so this limit is a no-op.
     #[cfg(feature = "mlx")]
     fn to_array_uncached(tensor: &Tensor) -> Result<mlx_rs::Array> {
         let shape = Self::to_shape(tensor.shape().dims())?;
-        let data = tensor.to_f32_cow();
-        Ok(mlx_rs::Array::from_slice(data.as_ref(), &shape))
+        let numel = tensor.numel();
+        let cow = tensor.to_f32_cow();
+        // Limit to the logical element count so non-contiguous view tensors (KV
+        // cache slices) don't overflow the MLX assert.
+        let data = &cow[..numel.min(cow.len())];
+        Ok(mlx_rs::Array::from_slice(data, &shape))
     }
 
     #[cfg(feature = "mlx")]
@@ -638,6 +650,17 @@ impl MlxLlmOps {
             let (batch, n_heads, seq_q, head_dim) = (qs[0], qs[1], qs[2], qs[3]);
             let seq_k = ks[2];
             let scale = 1.0 / (head_dim as f32).sqrt();
+
+            // GQA (n_heads > n_kv_heads): mlx_rs 0.25.3's fast::scaled_dot_product_attention
+            // does not correctly handle grouped-query attention when query head count ≠
+            // key/value head count — it produces garbage logits. Fall back to the
+            // verified CPU reference kernel for all GQA models (Qwen2.5, Llama 3.x,
+            // Mistral). Standard MHA (n_heads == n_kv_heads) can use MLX directly.
+            if n_heads != n_kv_heads {
+                anyhow::bail!(
+                    "GQA (n_heads={n_heads} ≠ n_kv_heads={n_kv_heads}): using CPU attention"
+                );
+            }
 
             // q: [batch, n_heads, seq_q, head_dim]
             // k: [batch, n_kv_heads, seq_k, head_dim]
