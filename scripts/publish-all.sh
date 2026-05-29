@@ -3,11 +3,15 @@
 #
 # `cargo publish --workspace` is NOT resumable (it errors on the first
 # already-published crate), so we publish each crate individually instead:
-#   - already-published crates are skipped,
+#   - already-published versions are skipped (uses the /download endpoint to
+#     check the exact version, not just whether the crate name exists),
 #   - crates.io's new-crate rate limit (429) is waited out and retried.
 # Idempotent and safe to re-run until everything is live.
 set -uo pipefail
 cd "$(dirname "$0")/.."
+
+VERSION=$(grep '^version' Cargo.toml | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+echo "Publishing workspace version: $VERSION"
 
 # Dependency-topological order.
 CRATES=(
@@ -26,27 +30,33 @@ CRATES=(
   sapient-cli
 )
 
+is_published() {
+  local crate="$1"
+  # The /download endpoint redirects (3xx) when the version exists; 404 when not.
+  local code
+  code=$(curl -s -A "sapient-publish" -o /dev/null -w "%{http_code}" -L \
+    "https://static.crates.io/crates/$crate/$crate-$VERSION.crate")
+  [ "$code" = "200" ]
+}
+
 for c in "${CRATES[@]}"; do
-  # Skip if already on crates.io.
-  code=$(curl -s -A "sapient-publish" -o /dev/null -w "%{http_code}" \
-    "https://crates.io/api/v1/crates/$c/0.1.11")
-  if [ "$code" = "200" ]; then
-    echo "✓ $c already published — skipping"
+  if is_published "$c"; then
+    echo "✓ $c@$VERSION already published — skipping"
     continue
   fi
 
   while true; do
-    echo "=== publishing $c ($(date -u)) ==="
+    echo "=== publishing $c@$VERSION ($(date -u)) ==="
     out=$(cargo publish -p "$c" 2>&1)
     rc=$?
     echo "$out" | grep -iE "Uploaded|error|429|Too Many|already exists" || true
 
     if [ $rc -eq 0 ]; then
-      echo "✓ published $c"
+      echo "✓ published $c@$VERSION"
       break
     fi
     if echo "$out" | grep -qiE "already exists"; then
-      echo "✓ $c already exists — continuing"
+      echo "✓ $c@$VERSION already exists — continuing"
       break
     fi
     if echo "$out" | grep -qiE "429|Too Many Requests"; then
@@ -60,4 +70,4 @@ for c in "${CRATES[@]}"; do
   done
 done
 
-echo "=== ALL 13 CRATES PUBLISHED ==="
+echo "=== ALL 13 CRATES PUBLISHED @ $VERSION ==="
