@@ -157,6 +157,42 @@ enum Commands {
         iters: usize,
     },
 
+    /// LLM generation benchmark: measures load time, TTFT, tok/s, and peak RAM.
+    /// Outputs a side-by-side comparison table suitable for competing with Ollama.
+    #[command(name = "bench-llm", visible_aliases = ["bllm"])]
+    BenchLlm {
+        /// Model alias (e.g. `openhorizon/qwen2.5-0.5b-q4`) or local .gguf path.
+        model: String,
+
+        /// Prompt to use for generation (same prompt repeated across runs).
+        #[arg(
+            short,
+            long,
+            default_value = "Explain quantum entanglement in one sentence."
+        )]
+        prompt: String,
+
+        /// Maximum tokens to generate per run.
+        #[arg(long, default_value = "50")]
+        max_tokens: usize,
+
+        /// Number of generation runs (more = better statistics).
+        #[arg(long, default_value = "3")]
+        runs: usize,
+
+        /// Force memory-mapped weight loading.
+        #[arg(long)]
+        mmap: bool,
+
+        /// Generation backend: auto | cpu | metal.
+        #[arg(short, long, default_value = "auto")]
+        backend: String,
+
+        /// Output raw JSON (for scripted comparisons with Ollama).
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Print graph structure in DOT format (file-based models).
     Inspect {
         /// HuggingFace model ID or path to a model file.
@@ -254,6 +290,26 @@ async fn dispatch(cli: Cli) -> Result<()> {
             warmup,
             iters,
         } => bench_command(model.as_str(), &batch_sizes, backend, warmup, iters).await,
+        Commands::BenchLlm {
+            model,
+            prompt,
+            max_tokens,
+            runs,
+            mmap,
+            backend,
+            json,
+        } => {
+            bench_llm_command(
+                model.as_str(),
+                &prompt,
+                max_tokens,
+                runs,
+                mmap,
+                &backend,
+                json,
+            )
+            .await
+        }
         Commands::Inspect { model, output } => inspect_command(model.as_str(), output).await,
         Commands::Serve {
             model,
@@ -407,8 +463,10 @@ async fn chat_command(model: &str, backend: &str, verbose: bool, force_mmap: boo
         let mut stream = pipeline.chat_stream(&history).await;
         let mut reply = String::new();
         let mut first = true;
+        let mut ttft: Option<std::time::Duration> = None;
         while let Some(token) = stream.next().await {
             if first {
+                ttft = Some(start.elapsed());
                 think.finish_and_clear();
                 ui::write_assistant_prompt()?;
                 first = false;
@@ -427,7 +485,7 @@ async fn chat_command(model: &str, backend: &str, verbose: bool, force_mmap: boo
                 .encode(&reply)
                 .map(|t| t.len())
                 .unwrap_or(0);
-            ui::print_gen_stats(tokens, start.elapsed());
+            ui::print_gen_stats(tokens, start.elapsed(), ttft);
         }
         history.push(ChatMessage::assistant(reply));
     }
@@ -928,4 +986,164 @@ fn make_dummy_inputs(session: &InferenceSession, _batch_size: usize) -> HashMap<
         }
     }
     inputs
+}
+
+// ── bench-llm ─────────────────────────────────────────────────────────────────
+
+/// Current process resident set size in bytes.
+/// Linux: reads /proc/self/status VmRSS.
+/// macOS: spawns `ps -o rss= -p PID` (no libc required).
+fn resident_set_bytes() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            for line in status.lines() {
+                if let Some(rest) = line.strip_prefix("VmRSS:") {
+                    if let Ok(kb) = rest.trim().trim_end_matches(" kB").trim().parse::<u64>() {
+                        return kb * 1024;
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let pid = std::process::id();
+        if let Ok(out) = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &pid.to_string()])
+            .output()
+        {
+            if let Ok(s) = std::str::from_utf8(&out.stdout) {
+                if let Ok(kb) = s.trim().parse::<u64>() {
+                    return kb * 1024;
+                }
+            }
+        }
+    }
+    0
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn bench_llm_command(
+    model: &str,
+    prompt: &str,
+    max_tokens: usize,
+    runs: usize,
+    force_mmap: bool,
+    backend: &str,
+    json_out: bool,
+) -> Result<()> {
+    let backend_kind = parse_generation_backend(backend)?;
+
+    // ── Load model (timed) ──────────────────────────────────────────────────
+    let load_start = Instant::now();
+    let opts = LoadOptions {
+        backend: backend_kind,
+        force_mmap,
+        generation: sapient_generate::GenerationConfig {
+            max_new_tokens: max_tokens,
+            ..Default::default()
+        },
+        ..LoadOptions::default()
+    };
+
+    let load_spinner = (!json_out).then(|| ui::spinner(format!("loading {model}…")));
+    let pipeline = Pipeline::from_pretrained_with_opts(model, opts)
+        .await
+        .with_context(|| format!("failed to load model '{model}'"))?;
+    let load_ms = load_start.elapsed().as_millis() as u64;
+
+    if let Some(pb) = load_spinner {
+        pb.finish_and_clear();
+    }
+
+    let backend_label = format!(
+        "{}{}",
+        backend,
+        if pipeline.is_mmap() { " · mmap" } else { "" }
+    );
+
+    // ── Benchmark runs ──────────────────────────────────────────────────────
+    let messages = vec![ChatMessage::user(prompt)];
+    let mut run_results: Vec<ui::BenchRun> = Vec::with_capacity(runs);
+    let mut json_runs: Vec<serde_json::Value> = Vec::with_capacity(runs);
+
+    for i in 0..runs {
+        pipeline.reset_cache();
+
+        let gen_start = Instant::now();
+        let mut stream = pipeline.chat_stream(&messages).await;
+
+        let mut reply = String::new();
+        let mut ttft_ms = 0u64;
+        let mut first = true;
+
+        while let Some(chunk) = stream.next().await {
+            if first {
+                ttft_ms = gen_start.elapsed().as_millis() as u64;
+                first = false;
+            }
+            reply.push_str(&chunk);
+        }
+
+        let elapsed_ms = gen_start.elapsed().as_millis() as u64;
+        let total_tokens = pipeline
+            .tokenizer()
+            .encode(&reply)
+            .map(|t| t.len())
+            .unwrap_or_default();
+        let tps = if elapsed_ms > 0 {
+            total_tokens as f64 / (elapsed_ms as f64 / 1000.0)
+        } else {
+            0.0
+        };
+
+        run_results.push(ui::BenchRun {
+            run: i + 1,
+            ttft_ms,
+            tps,
+            total_tokens,
+        });
+        json_runs.push(serde_json::json!({
+            "run": i + 1,
+            "ttft_ms": ttft_ms,
+            "elapsed_ms": elapsed_ms,
+            "total_tokens": total_tokens,
+            "tps": (tps * 10.0).round() / 10.0,
+        }));
+    }
+
+    let peak_rss_mb = resident_set_bytes() / (1024 * 1024);
+
+    // ── Output ──────────────────────────────────────────────────────────────
+    if json_out {
+        let mean_ttft = if run_results.is_empty() {
+            0
+        } else {
+            run_results.iter().map(|r| r.ttft_ms).sum::<u64>() / run_results.len() as u64
+        };
+        let mean_tps = if run_results.is_empty() {
+            0.0
+        } else {
+            run_results.iter().map(|r| r.tps).sum::<f64>() / run_results.len() as f64
+        };
+        let out = serde_json::json!({
+            "model": model,
+            "backend": backend_label,
+            "mmap": pipeline.is_mmap(),
+            "load_time_ms": load_ms,
+            "prompt": prompt,
+            "runs": json_runs,
+            "summary": {
+                "mean_ttft_ms": mean_ttft,
+                "mean_tps": (mean_tps * 10.0).round() / 10.0,
+                "peak_rss_mb": peak_rss_mb,
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        ui::print_bench_table(model, &backend_label, load_ms, &run_results, peak_rss_mb);
+    }
+
+    Ok(())
 }

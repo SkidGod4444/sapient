@@ -625,6 +625,14 @@ impl Pipeline {
         self.mmap
     }
 
+    /// Reset the KV cache so the next generation starts from a clean state.
+    /// Call this between benchmark runs to avoid cache pollution.
+    pub fn reset_cache(&self) {
+        if let Ok(mut engine) = self.engine.lock() {
+            engine.reset_cache();
+        }
+    }
+
     fn configured_backend(&self) -> LlmBackendKind {
         self.backend
     }

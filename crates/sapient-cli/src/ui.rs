@@ -100,16 +100,85 @@ pub fn write_assistant_prompt() -> io::Result<()> {
 }
 
 /// A dim one-line generation stat shown after a reply (tokens & speed).
-pub fn print_gen_stats(tokens: usize, elapsed: Duration) {
+/// `ttft` is the time-to-first-token — shown when available.
+pub fn print_gen_stats(tokens: usize, elapsed: Duration, ttft: Option<Duration>) {
     let secs = elapsed.as_secs_f64().max(1e-6);
     let tps = tokens as f64 / secs;
+    let ttft_str = ttft
+        .map(|d| format!("  (first token: {}ms)", d.as_millis()))
+        .unwrap_or_default();
     println!(
         "{}",
         style(format!(
-            "  {BOLT} {tokens} tokens · {tps:.1} tok/s · {secs:.1}s"
+            "  {BOLT} {tokens} tokens · {tps:.1} tok/s · {secs:.1}s{ttft_str}"
         ))
         .dim()
     );
+}
+
+/// Per-run result for `bench-llm`.
+pub struct BenchRun {
+    pub run: usize,
+    pub ttft_ms: u64,
+    pub tps: f64,
+    pub total_tokens: usize,
+}
+
+/// Print a bench-llm results table.
+pub fn print_bench_table(
+    model: &str,
+    backend: &str,
+    load_ms: u64,
+    runs: &[BenchRun],
+    peak_rss_mb: u64,
+) {
+    let bar = style("━".repeat(52)).dim();
+    println!("\n{bar}");
+    println!(
+        "  {} {}",
+        style("SAPIENT bench-llm").bold().cyan(),
+        style(format!("· {backend}")).dim()
+    );
+    println!("  {} {}", style("model").dim(), style(model).bold());
+    println!("{bar}");
+    println!(
+        "  {} {:.2}s",
+        style("Load time").dim(),
+        load_ms as f64 / 1000.0
+    );
+    println!();
+
+    let headers = &["Run", "TTFT", "Tok/s", "Tokens"];
+    let rows: Vec<Vec<String>> = runs
+        .iter()
+        .map(|r| {
+            vec![
+                format!("{}", r.run),
+                format!("{} ms", r.ttft_ms),
+                format!("{:.1}", r.tps),
+                format!("{}", r.total_tokens),
+            ]
+        })
+        .collect();
+    print_table(headers, &rows);
+
+    if !runs.is_empty() {
+        let mean_ttft = runs.iter().map(|r| r.ttft_ms).sum::<u64>() / runs.len() as u64;
+        let mean_tps = runs.iter().map(|r| r.tps).sum::<f64>() / runs.len() as f64;
+        println!();
+        println!(
+            "  {} {}ms  {}  {} {}  {}  {} {} MB",
+            style("Mean TTFT:").dim(),
+            style(mean_ttft).bold().cyan(),
+            style("|").dim(),
+            style("Mean tok/s:").dim(),
+            style(format!("{mean_tps:.1}")).bold().cyan(),
+            style("|").dim(),
+            style("Peak RSS:").dim(),
+            style(peak_rss_mb).bold(),
+        );
+    }
+    println!("{bar}\n");
 }
 
 /// `key: value` info row used by `sapient info`.

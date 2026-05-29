@@ -505,5 +505,35 @@ CUDA is not yet supported. Until it is, use GGUF Q4/Q8 models on CPU — they ru
 rayon + NEON parallel kernels and are the fastest CPU path. The DGX Spark (ARM64 Grace)
 also has NEON, so the Q8_0 path gets the full SIMD benefit.
 
+### Benchmarking (SAPIENT vs Ollama)
+
+SAPIENT ships a dedicated LLM benchmark command:
+
+```bash
+# Human-readable table
+sapient bench-llm openhorizon/qwen2.5-0.5b-q4 \
+    --prompt "Explain quantum entanglement in one sentence." \
+    --max-tokens 50 --runs 3 --mmap
+
+# Machine-readable JSON (for scripted comparisons)
+sapient bench-llm openhorizon/qwen2.5-0.5b-q4 --json > results.json
+```
+
+Metrics reported: model load time, time-to-first-token (TTFT), decode tok/s, peak RSS.
+
+Full Ollama comparison (requires `ollama serve` running):
+
+```bash
+bash scripts/benchmark.sh --model 0.5b --runs 3 --out results/
+python3 scripts/gen-benchmark-report.py \
+    --sapient results/sapient_result.json \
+    --ollama  results/ollama_result.json \
+    --out docs/BENCHMARKS.md
+```
+
+See `docs/BENCHMARKS.md` for methodology, reproducibility instructions, and a full side-by-side
+comparison table. The short story: SAPIENT wins on TTFT, peak RAM, binary size, and cold-start
+latency; Ollama wins on sustained tok/s for larger models (acknowledged openly in the report).
+
 *Happy hacking! If anything here ever stops matching the code, the code wins — please open
 a PR to fix the docs.* 🦜
