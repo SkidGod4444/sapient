@@ -366,7 +366,7 @@ pub fn dot_q4_k_row_f32(row_data: &[u8], x: &[f32]) -> f32 {
     let mut acc = 0.0f32;
     let mut x_off = 0usize;
     for block in row_data.chunks_exact(Q4_K_BLOCK_BYTES) {
-        let d    = f16::from_le_bytes([block[0], block[1]]).to_f32();
+        let d = f16::from_le_bytes([block[0], block[1]]).to_f32();
         let dmin = f16::from_le_bytes([block[2], block[3]]).to_f32();
         let scales = &block[4..16];
         let qs = &block[16..Q4_K_BLOCK_BYTES];
@@ -374,10 +374,10 @@ pub fn dot_q4_k_row_f32(row_data: &[u8], x: &[f32]) -> f32 {
         let mut is = 0usize;
         for _ in 0..(QK_K / 64) {
             let (sc1, m1) = get_scale_min_k4(is, scales);
-            let d1  = d * sc1 as f32;
+            let d1 = d * sc1 as f32;
             let m1v = dmin * m1 as f32;
             let (sc2, m2) = get_scale_min_k4(is + 1, scales);
-            let d2  = d * sc2 as f32;
+            let d2 = d * sc2 as f32;
             let m2v = dmin * m2 as f32;
             for l in 0..32 {
                 acc += (d1 * (qs[q_off + l] & 0x0F) as f32 - m1v) * x[x_off + l];
@@ -401,7 +401,7 @@ pub fn dot_q5_k_row_f32(row_data: &[u8], x: &[f32]) -> f32 {
     let mut acc = 0.0f32;
     let mut x_off = 0usize;
     for block in row_data.chunks_exact(Q5_K_BLOCK_BYTES) {
-        let d    = f16::from_le_bytes([block[0], block[1]]).to_f32();
+        let d = f16::from_le_bytes([block[0], block[1]]).to_f32();
         let dmin = f16::from_le_bytes([block[2], block[3]]).to_f32();
         let scales = &block[4..16];
         let qh = &block[16..48];
@@ -412,10 +412,10 @@ pub fn dot_q5_k_row_f32(row_data: &[u8], x: &[f32]) -> f32 {
         let mut u2: u8 = 2;
         for _ in 0..(QK_K / 64) {
             let (sc1, m1) = get_scale_min_k4(is, scales);
-            let d1  = d * sc1 as f32;
+            let d1 = d * sc1 as f32;
             let m1v = dmin * m1 as f32;
             let (sc2, m2) = get_scale_min_k4(is + 1, scales);
-            let d2  = d * sc2 as f32;
+            let d2 = d * sc2 as f32;
             let m2v = dmin * m2 as f32;
             let qh_byte = qh[is / 8];
             for l in 0..32 {
@@ -424,10 +424,16 @@ pub fn dot_q5_k_row_f32(row_data: &[u8], x: &[f32]) -> f32 {
                 acc += (d1 * ((ql[ql_off + l] & 0x0F) as f32 + hi1) - m1v) * x[x_off + l];
                 acc += (d2 * ((ql[ql_off + l] >> 4) as f32 + hi2) - m2v) * x[x_off + l + 32];
             }
-            x_off  += 64;
+            x_off += 64;
             ql_off += 32;
-            is     += 2;
-            if is % 8 == 0 { u1 = 1; u2 = 2; } else { u1 <<= 2; u2 <<= 2; }
+            is += 2;
+            if is % 8 == 0 {
+                u1 = 1;
+                u2 = 2;
+            } else {
+                u1 <<= 2;
+                u2 <<= 2;
+            }
         }
     }
     acc
@@ -447,25 +453,30 @@ pub fn dot_q6_k_row_f32(row_data: &[u8], x: &[f32]) -> f32 {
         let ql = &block[0..128];
         let qh = &block[128..192];
         let sc = &block[192..208];
-        let d  = f16::from_le_bytes([block[208], block[209]]).to_f32();
+        let d = f16::from_le_bytes([block[208], block[209]]).to_f32();
         let mut ql_off = 0usize;
         let mut qh_off = 0usize;
         let mut ib = 0usize;
         for _ in 0..(QK_K / 128) {
             for l in 0..32 {
-                let q1 = (((ql[ql_off + l     ] & 0x0F) | ((qh[qh_off + l] & 3) << 4)) as i32 - 32) as f32;
-                let q2 = (((ql[ql_off + l + 32] & 0x0F) | (((qh[qh_off + l] >> 2) & 3) << 4)) as i32 - 32) as f32;
-                let q3 = (((ql[ql_off + l     ] >> 4)   | (((qh[qh_off + l] >> 4) & 3) << 4)) as i32 - 32) as f32;
-                let q4 = (((ql[ql_off + l + 32] >> 4)   | (((qh[qh_off + l] >> 6) & 3) << 4)) as i32 - 32) as f32;
-                acc += d * sc[ib    ] as i8 as f32 * q1 * x[x_off + l      ];
-                acc += d * sc[ib + 1] as i8 as f32 * q2 * x[x_off + l + 32 ];
-                acc += d * sc[ib + 2] as i8 as f32 * q3 * x[x_off + l + 64 ];
-                acc += d * sc[ib + 3] as i8 as f32 * q4 * x[x_off + l + 96 ];
+                let q1 =
+                    (((ql[ql_off + l] & 0x0F) | ((qh[qh_off + l] & 3) << 4)) as i32 - 32) as f32;
+                let q2 = (((ql[ql_off + l + 32] & 0x0F) | (((qh[qh_off + l] >> 2) & 3) << 4))
+                    as i32
+                    - 32) as f32;
+                let q3 = (((ql[ql_off + l] >> 4) | (((qh[qh_off + l] >> 4) & 3) << 4)) as i32 - 32)
+                    as f32;
+                let q4 = (((ql[ql_off + l + 32] >> 4) | (((qh[qh_off + l] >> 6) & 3) << 4)) as i32
+                    - 32) as f32;
+                acc += d * sc[ib] as i8 as f32 * q1 * x[x_off + l];
+                acc += d * sc[ib + 1] as i8 as f32 * q2 * x[x_off + l + 32];
+                acc += d * sc[ib + 2] as i8 as f32 * q3 * x[x_off + l + 64];
+                acc += d * sc[ib + 3] as i8 as f32 * q4 * x[x_off + l + 96];
             }
-            x_off  += 128;
+            x_off += 128;
             ql_off += 64;
             qh_off += 32;
-            ib     += 4;
+            ib += 4;
         }
     }
     acc

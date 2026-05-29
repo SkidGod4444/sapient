@@ -389,7 +389,13 @@ fn dequantize_q5_k(data: &[u8], numel: usize) -> Vec<f32> {
             out_idx += 64;
             ql_off += 32;
             is += 2;
-            if is % 8 == 0 { u1 = 1; u2 = 2; } else { u1 <<= 2; u2 <<= 2; }
+            if is % 8 == 0 {
+                u1 = 1;
+                u2 = 2;
+            } else {
+                u1 <<= 2;
+                u2 <<= 2;
+            }
         }
     }
     out
@@ -411,14 +417,19 @@ fn dequantize_q6_k(data: &[u8], numel: usize) -> Vec<f32> {
         let mut ib = 0usize;
         for _ in 0..(QK_K / 128) {
             for l in 0..32usize {
-                let q1 = (((ql[ql_off + l     ] & 0x0F) | ((qh[qh_off + l] & 3) << 4)) as i32 - 32) as f32;
-                let q2 = (((ql[ql_off + l + 32] & 0x0F) | (((qh[qh_off + l] >> 2) & 3) << 4)) as i32 - 32) as f32;
-                let q3 = (((ql[ql_off + l     ] >> 4)   | (((qh[qh_off + l] >> 4) & 3) << 4)) as i32 - 32) as f32;
-                let q4 = (((ql[ql_off + l + 32] >> 4)   | (((qh[qh_off + l] >> 6) & 3) << 4)) as i32 - 32) as f32;
-                out[out_idx + l      ] = d * sc[ib    ] as i8 as f32 * q1;
-                out[out_idx + l + 32 ] = d * sc[ib + 1] as i8 as f32 * q2;
-                out[out_idx + l + 64 ] = d * sc[ib + 2] as i8 as f32 * q3;
-                out[out_idx + l + 96 ] = d * sc[ib + 3] as i8 as f32 * q4;
+                let q1 =
+                    (((ql[ql_off + l] & 0x0F) | ((qh[qh_off + l] & 3) << 4)) as i32 - 32) as f32;
+                let q2 = (((ql[ql_off + l + 32] & 0x0F) | (((qh[qh_off + l] >> 2) & 3) << 4))
+                    as i32
+                    - 32) as f32;
+                let q3 = (((ql[ql_off + l] >> 4) | (((qh[qh_off + l] >> 4) & 3) << 4)) as i32 - 32)
+                    as f32;
+                let q4 = (((ql[ql_off + l + 32] >> 4) | (((qh[qh_off + l] >> 6) & 3) << 4)) as i32
+                    - 32) as f32;
+                out[out_idx + l] = d * sc[ib] as i8 as f32 * q1;
+                out[out_idx + l + 32] = d * sc[ib + 1] as i8 as f32 * q2;
+                out[out_idx + l + 64] = d * sc[ib + 2] as i8 as f32 * q3;
+                out[out_idx + l + 96] = d * sc[ib + 3] as i8 as f32 * q4;
             }
             out_idx += 128;
             ql_off += 64;

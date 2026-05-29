@@ -165,14 +165,21 @@ fn parse_stop(stop: Option<serde_json::Value>) -> Vec<String> {
     }
 }
 
-fn build_config(max_tokens: Option<usize>, temperature: Option<f32>, stop: Vec<String>) -> GenerationConfig {
+fn build_config(
+    max_tokens: Option<usize>,
+    temperature: Option<f32>,
+    stop: Vec<String>,
+) -> GenerationConfig {
     let mut cfg = GenerationConfig::default();
     if let Some(n) = max_tokens {
         cfg.max_new_tokens = n;
     }
     if let Some(t) = temperature {
         if t > 0.0 {
-            cfg.strategy = SamplingStrategy::TopP { temperature: t, p: 0.95 };
+            cfg.strategy = SamplingStrategy::TopP {
+                temperature: t,
+                p: 0.95,
+            };
         }
     }
     cfg.stop_sequences = stop;
@@ -233,7 +240,10 @@ async fn handle_chat_completions(
             model: model_id.clone(),
             choices: vec![DeltaChoice {
                 index: 0,
-                delta: Delta { role: Some("assistant"), content: None },
+                delta: Delta {
+                    role: Some("assistant"),
+                    content: None,
+                },
                 finish_reason: None,
             }],
         })
@@ -253,12 +263,19 @@ async fn handle_chat_completions(
                     model: model_id.clone(),
                     choices: vec![DeltaChoice {
                         index: 0,
-                        delta: Delta { role: None, content: Some(token) },
+                        delta: Delta {
+                            role: None,
+                            content: Some(token),
+                        },
                         finish_reason: None,
                     }],
                 })
                 .unwrap();
-                if tx2.send(Ok(sse::Event::default().data(chunk_json))).await.is_err() {
+                if tx2
+                    .send(Ok(sse::Event::default().data(chunk_json)))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -293,7 +310,10 @@ async fn handle_chat_completions(
                 model: model_id,
                 choices: vec![ChatChoice {
                     index: 0,
-                    message: OAIMessage { role: "assistant".into(), content: reply },
+                    message: OAIMessage {
+                        role: "assistant".into(),
+                        content: reply,
+                    },
                     finish_reason: "stop",
                 }],
                 usage: Usage::default(),
@@ -328,7 +348,11 @@ async fn handle_completions(
                     "choices": [{"text": token, "index": 0, "finish_reason": null}]
                 }))
                 .unwrap();
-                if tx2.send(Ok(sse::Event::default().data(data))).await.is_err() {
+                if tx2
+                    .send(Ok(sse::Event::default().data(data)))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -347,7 +371,11 @@ async fn handle_completions(
                 object: "text_completion",
                 created: now_secs(),
                 model: model_id,
-                choices: vec![CompletionChoice { index: 0, text, finish_reason: "stop" }],
+                choices: vec![CompletionChoice {
+                    index: 0,
+                    text,
+                    finish_reason: "stop",
+                }],
                 usage: Usage::default(),
             })
             .into_response(),
@@ -396,13 +424,26 @@ pub async fn serve_llm(model_id: &str, port: u16, backend: &str, mmap: bool) -> 
         console::style("⚡ SAPIENT serve").cyan().bold(),
         console::style(format!("· {arch} · {backend}{mmap_label}")).dim()
     );
-    println!("  {} {}", console::style("model  ").dim(), console::style(model_id).bold());
-    println!("  {} http://0.0.0.0:{port}", console::style("address").dim());
+    println!(
+        "  {} {}",
+        console::style("model  ").dim(),
+        console::style(model_id).bold()
+    );
+    println!(
+        "  {} http://0.0.0.0:{port}",
+        console::style("address").dim()
+    );
     println!();
     println!("  {}", console::style("OpenAI-compatible endpoints:").dim());
     println!("  {}  GET  /v1/models", console::style("·").dim());
-    println!("  {}  POST /v1/chat/completions  (stream=true|false)", console::style("·").dim());
-    println!("  {}  POST /v1/completions       (stream=true|false)", console::style("·").dim());
+    println!(
+        "  {}  POST /v1/chat/completions  (stream=true|false)",
+        console::style("·").dim()
+    );
+    println!(
+        "  {}  POST /v1/completions       (stream=true|false)",
+        console::style("·").dim()
+    );
     println!();
     println!(
         "  {}",

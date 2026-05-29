@@ -7,8 +7,8 @@ use super::quant;
 use rayon::prelude::*;
 use sapient_core::error::{Result, SapientError};
 use sapient_core::{
-    DType, Shape, Tensor, Q4_0_BLOCK_BYTES, Q8_0_BLOCK_BYTES, QUANT_BLOCK_SIZE,
-    Q4_K_BLOCK_BYTES, Q5_K_BLOCK_BYTES, Q6_K_BLOCK_BYTES,
+    DType, Shape, Tensor, Q4_0_BLOCK_BYTES, Q4_K_BLOCK_BYTES, Q5_K_BLOCK_BYTES, Q6_K_BLOCK_BYTES,
+    Q8_0_BLOCK_BYTES, QUANT_BLOCK_SIZE,
 };
 
 // ── matmul ───────────────────────────────────────────────────────────────────
