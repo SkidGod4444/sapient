@@ -65,14 +65,14 @@ Architecture builder files in `sapient-models/src/architectures/` (gemma, gpt2, 
 ### Quantized storage (Phase 1)
 `DType::Q4_0` and `DType::Q8_0` store raw ggml block bytes — no F32 expansion at load time. Key invariant: `as_bytes()` on non-quantized tensors returns the full buffer from `offset`; on quantized tensors it returns exactly `byte_count(numel)` bytes. Use `as_quant_blocks()` to access raw blocks, and `to_f32_vec()` to dequantize. `matmul_nt` dispatches on weight dtype: float weights use SGEMM, quant weights use per-block dot products.
 
-### GGUF loading
-`GgufLoader::load_tensors_with_metadata` in `sapient-io` returns `(HashMap<String, GgufValue>, HashMap<String, Tensor>)`. GGUF dims are in ggml column-major order (`[in, out]`); `map_gguf_tensors_to_hf` in `sapient-models/src/gguf_weights.rs` flips 2-D weight shapes to HF `[out, in]`. Q4_0/Q8_0 tensors come out quantized; all others (F16, BF16, K-quants) are dequantized to F32.
+### GGUF loading (Phase 4: mmap)
+Three loading paths in `sapient-io/src/gguf.rs`: `parse_metadata_only` (header KV only, zero tensor alloc), `load_tensors_with_metadata` (heap CpuBuffer), `load_tensors_mmap` (OS-managed paging via `MmapBuffer` — Q4_0/Q8_0 zero-copy, K-quants dequantized from mmap bytes). GGUF dims are ggml column-major `[in, out]`; `map_gguf_tensors_to_hf` flips to HF `[out, in]`. The pipeline auto-detects mmap when file > 80% of available RAM (`available_ram_bytes()` reads `/proc/meminfo` on Linux, `sysctl` on macOS). `--mmap` flag forces it; `Pipeline::is_mmap()` reports which path was taken.
 
 ### Model registry (curated, not open)
 `sapient-hub/src/registry.rs` contains a hardcoded `CATALOG` of `SupportedModel` entries. Every model resolves through `resolve_model_alias` — unrecognised names error with the catalog list. Fuzzy matching (prefix + Levenshtein) handles near-miss typos. Add a model by: (1) verify its arch is supported in a forward engine, (2) add a `SupportedModel` row with `openhorizon/*` branding.
 
 ### GGUF-only repos
-When `from_pretrained` downloads a GGUF-only repo (no `config.json`), the hub client sets `config_path` to the GGUF file itself. The pipeline detects this via extension and routes to `from_gguf_with_backend`, bypassing `ModelInfo::from_config_file`.
+When `from_pretrained` downloads a GGUF-only repo (no `config.json`), the hub client sets `config_path` to the GGUF file itself. The pipeline detects this via extension and routes to `from_gguf_opts`, bypassing `ModelInfo::from_config_file`.
 
 ### SIMD hot paths
 `kernels/quant.rs` has three dispatch layers:

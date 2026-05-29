@@ -435,7 +435,7 @@ quantized model rather than F16 safetensors:
 | Model | Format | RAM needed | Typical tok/s (Apple M4, CPU) |
 |---|---|---|---|
 | `openhorizon/qwen2.5-0.5b-q4` | GGUF Q8_0 | ~640 MB | ~17 tok/s |
-| `openhorizon/phi-2-q4` | GGUF Q4_K_M | ~1.5 GB | ~5 tok/s |
+| `openhorizon/phi-2-q4` | GGUF Q8_0 | ~2.8 GB | ~5 tok/s |
 | `openhorizon/phi-2` | F16 safetensors | ~5.2 GB | ~0.8 tok/s |
 
 The F16 safetensors path is slow on CPU because every token requires converting
@@ -449,11 +449,55 @@ Build with `--features mlx` to enable the Metal GPU backend. MLX uses Apple Sili
 unified memory — there's no CPU↔GPU copy overhead. The engine picks Metal automatically
 when the model fits in memory (`sapient backend-info` shows the capacity).
 
-Key changes shipped in Phase 2/3:
+Key changes shipped in Phase 2/3/4:
 - **Phase 2**: rayon parallel dot products across output rows + NEON SIMD (Q4_0, Q8_0).
 - **Phase 3**: MLX persistent weight cache (upload each weight to GPU once, reuse per token),
-  native MLX `gqa_attention` via `fast::scaled_dot_product_attention` (removes CPU fallback),
-  auto backend selection by available unified memory.
+  GQA fallback to CPU attention, auto backend selection by available unified memory.
+- **Phase 4** (v0.2.3): memory-mapped GGUF loading — run models larger than your RAM.
+
+### Phase 4: Memory-mapped GGUF (bigger-than-RAM models, Raspberry Pi)
+
+SAPIENT v0.2.3 adds `memmap2`-backed tensor loading for GGUF files. Instead of reading
+the whole file into heap memory, the engine maps it into virtual address space and lets the
+OS page in weight blocks on demand. Only the transformer layers being computed right now
+need to be in physical RAM.
+
+**What this means in practice:**
+- A 4 GB Q4_K_M model on a device with 2 GB RAM — no OOM, just slower token throughput
+  because of page faults when the OS swaps layers in.
+- Peak RAM during load drops from `file_size + F32_size` to just the active layer footprint
+  (~30–200 MB depending on the model).
+- Q4_0/Q8_0 tensors: **zero copy** — the tensor points directly into the mmap'd file region.
+- K-quants / F16 / BF16: dequantized to F32 at load time (the raw bytes still come from
+  the mmap, so no heap copy of the raw file during load).
+
+**How to use it:**
+
+```bash
+# Auto: mmap activates when GGUF file > 80% of available RAM
+sapient chat openhorizon/qwen2.5-1.5b-q4
+
+# Forced: always use mmap (useful on constrained devices like Raspberry Pi)
+sapient chat --mmap openhorizon/qwen2.5-1.5b-q4
+
+# Also fixed in v0.2.3: double-load bug
+# Previously, the pipeline loaded tensors twice (once for metadata, once for forward engine).
+# Now it uses GgufLoader::parse_metadata_only() for the header step — one load only.
+```
+
+**Raspberry Pi and ARM SBCs:**
+
+RPi 4 (4 GB) and RPi 5 (8 GB) run aarch64 Linux, so the NEON SIMD kernels apply.
+SAPIENT's Q8_0 and Q4_0 dot products use `vld1q_u8`/`vfmaq_f32` intrinsics — the same
+fast path as Apple M-series chips. Expected throughput:
+
+| Device | Model | Mode | tok/s |
+|---|---|---|---|
+| RPi 5 (8 GB) | qwen2.5-0.5b-q4 | heap | ~3–5 tok/s |
+| RPi 5 (8 GB) | qwen2.5-1.5b-q4 | mmap | ~1–2 tok/s |
+| RPi 4 (4 GB) | smollm2-360m-q4 | heap | ~5–8 tok/s |
+
+(Measured numbers are estimates — actual performance depends on SD card speed for mmap paging.)
 
 ### Linux / NVIDIA (DGX, cloud)
 

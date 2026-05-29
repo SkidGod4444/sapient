@@ -55,6 +55,12 @@ enum Commands {
         /// Generation backend: auto | cpu | metal.
         #[arg(short, long, default_value = "auto")]
         backend: String,
+
+        /// Load weights from disk on demand via memory-mapping.
+        /// Enabled automatically when the model file is larger than available RAM.
+        /// Use this flag to force it on smaller devices (e.g. Raspberry Pi).
+        #[arg(long)]
+        mmap: bool,
     },
 
     /// Download a model from HuggingFace Hub to the local cache.
@@ -209,8 +215,8 @@ async fn main() -> std::process::ExitCode {
 
 async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
-        Commands::Chat { model, backend } => {
-            chat_command(model.as_str(), &backend, cli.verbose).await
+        Commands::Chat { model, backend, mmap } => {
+            chat_command(model.as_str(), &backend, cli.verbose, mmap).await
         }
         Commands::Pull { model } => pull_command(model.as_str(), cli.verbose).await,
         Commands::List => list_command(),
@@ -271,11 +277,12 @@ async fn dispatch(cli: Cli) -> Result<()> {
 
 // ── Hub commands ──────────────────────────────────────────────────────────────
 
-async fn chat_command(model: &str, backend: &str, verbose: bool) -> Result<()> {
+async fn chat_command(model: &str, backend: &str, verbose: bool, force_mmap: bool) -> Result<()> {
     let backend_kind = parse_generation_backend(backend)?;
     let backend_label = backend_kind.to_string();
     let mut load_opts = LoadOptions {
         backend: backend_kind,
+        force_mmap,
         ..LoadOptions::default()
     };
 
@@ -315,7 +322,12 @@ async fn chat_command(model: &str, backend: &str, verbose: bool) -> Result<()> {
 
     let pipeline = if is_local_gguf {
         // Local GGUF file: load directly without Hub download.
-        match Pipeline::from_gguf_with_backend(model, load_opts.backend).await {
+        let gguf_result = if load_opts.force_mmap {
+            Pipeline::from_gguf_mmap_with_backend(model, load_opts.backend).await
+        } else {
+            Pipeline::from_gguf_with_backend(model, load_opts.backend).await
+        };
+        match gguf_result {
             Ok(p) => p,
             Err(e) => {
                 if let Some(h) = dl_handle {
@@ -350,7 +362,12 @@ async fn chat_command(model: &str, backend: &str, verbose: bool) -> Result<()> {
     }
 
     let arch = format!("{:?}", pipeline.arch());
-    ui::print_chat_banner(model, &arch, &backend_label);
+    let effective_backend = if pipeline.is_mmap() {
+        format!("{backend_label} · mmap")
+    } else {
+        backend_label.clone()
+    };
+    ui::print_chat_banner(model, &arch, &effective_backend);
 
     let mut history: Vec<ChatMessage> = Vec::new();
     loop {

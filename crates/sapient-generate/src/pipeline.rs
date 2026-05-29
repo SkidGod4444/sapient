@@ -59,6 +59,58 @@ pub struct LoadOptions {
     pub generation: GenerationConfig,
     /// Native LLM backend for Hub generation.
     pub backend: LlmBackendKind,
+    /// Force memory-mapped GGUF loading regardless of available RAM.
+    /// When `false` (default), mmap is enabled automatically when the GGUF file
+    /// is larger than ~80% of available free RAM.
+    pub force_mmap: bool,
+}
+
+/// Available physical RAM in bytes. Returns 0 if detection fails (treated as
+/// "unknown" — auto-mmap won't be triggered, but `--mmap` flag still works).
+fn available_ram_bytes() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(info) = std::fs::read_to_string("/proc/meminfo") {
+            for line in info.lines() {
+                if let Some(rest) = line.strip_prefix("MemAvailable:") {
+                    if let Ok(kb) = rest.trim().trim_end_matches(" kB").trim().parse::<u64>() {
+                        return kb * 1024;
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let page_size: u64 = std::process::Command::new("sysctl")
+            .args(["-n", "hw.pagesize"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(16384);
+
+        let free_pages: u64 = std::process::Command::new("sysctl")
+            .args(["-n", "vm.page_free_count"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+
+        let inactive: u64 = std::process::Command::new("sysctl")
+            .args(["-n", "vm.page_inactive_count"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+
+        if free_pages > 0 || inactive > 0 {
+            return (free_pages + inactive) * page_size;
+        }
+    }
+    0
 }
 
 // ── Pipeline ─────────────────────────────────────────────────────────────────
@@ -72,6 +124,8 @@ pub struct Pipeline {
     engine: Mutex<ForwardEngine>,
     config: GenerationConfig,
     backend: LlmBackendKind,
+    /// Whether weights are mmap'd from disk (true) or fully heap-resident (false).
+    mmap: bool,
 }
 
 impl Pipeline {
@@ -102,7 +156,7 @@ impl Pipeline {
         ensure_weights_present(&model_files)?;
 
         // GGUF-only repos: the hub's config_path is a sentinel pointing at the
-        // GGUF file itself.  Route directly to from_gguf_with_backend instead of
+        // GGUF file itself.  Route directly to from_gguf_opts instead of
         // trying to parse a config.json that doesn't exist.
         let single_gguf = model_files.weight_paths.len() == 1
             && model_files.weight_paths[0]
@@ -110,7 +164,12 @@ impl Pipeline {
                 .and_then(|e| e.to_str())
                 == Some("gguf");
         if single_gguf {
-            return Self::from_gguf_with_backend(&model_files.weight_paths[0], backend).await;
+            return Self::from_gguf_opts(
+                &model_files.weight_paths[0],
+                backend,
+                opts.force_mmap,
+            )
+            .await;
         }
 
         let model_info = ModelInfo::from_config_file(&model_files.config_path)
@@ -197,6 +256,7 @@ impl Pipeline {
             engine: Mutex::new(engine),
             config,
             backend,
+            mmap: false,
         })
     }
 
@@ -209,25 +269,59 @@ impl Pipeline {
         Self::from_gguf_with_backend(path, LlmBackendKind::Auto).await
     }
 
+    /// Load a GGUF model, auto-detecting mmap if the file exceeds available RAM.
     pub async fn from_gguf_with_backend(
         path: impl Into<PathBuf>,
         backend: LlmBackendKind,
     ) -> Result<Self> {
+        Self::from_gguf_opts(path, backend, false).await
+    }
+
+    /// Load a GGUF model with memory-mapping forced on (for bigger-than-RAM models).
+    pub async fn from_gguf_mmap_with_backend(
+        path: impl Into<PathBuf>,
+        backend: LlmBackendKind,
+    ) -> Result<Self> {
+        Self::from_gguf_opts(path, backend, true).await
+    }
+
+    async fn from_gguf_opts(
+        path: impl Into<PathBuf>,
+        backend: LlmBackendKind,
+        force_mmap: bool,
+    ) -> Result<Self> {
         let path = path.into();
         debug!("Loading GGUF: {}", path.display());
 
-        // Parse metadata + load tensors (quantized types stay quantized).
-        let (metadata, _) = GgufLoader::load_tensors_with_metadata(&path)
-            .with_context(|| format!("failed to load GGUF: {}", path.display()))?;
+        // Parse only the header — no tensor data allocated yet.
+        // This avoids the previous double-load where load_tensors_with_metadata
+        // was called just to get metadata, then ForwardEngine loaded tensors again.
+        let metadata = GgufLoader::parse_metadata_only(&path)
+            .with_context(|| format!("failed to parse GGUF header: {}", path.display()))?;
 
         // Build ModelInfo from GGUF KV metadata (no config.json needed).
         let model_info = ModelInfo::from_gguf_metadata(&metadata)
             .context("failed to build ModelInfo from GGUF metadata")?;
 
-        // Build the forward engine directly from the file (it calls
-        // load_gguf_hf_weights internally, which keeps quantized types intact).
-        let engine = ForwardEngine::from_gguf_with_backend(model_info.clone(), &path, backend)
-            .context("failed to initialise ForwardEngine from GGUF")?;
+        // Decide loading strategy: mmap if forced or if file won't fit in free RAM.
+        let file_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let avail = available_ram_bytes();
+        let use_mmap = force_mmap || (avail > 0 && file_bytes > avail * 4 / 5);
+
+        if use_mmap {
+            debug!(
+                "Using mmap GGUF loading (file {:.1} GB, available RAM {:.1} GB)",
+                file_bytes as f64 / 1e9,
+                avail as f64 / 1e9,
+            );
+        }
+
+        let engine = if use_mmap {
+            ForwardEngine::from_gguf_mmap_with_backend(model_info.clone(), &path, backend)
+        } else {
+            ForwardEngine::from_gguf_with_backend(model_info.clone(), &path, backend)
+        }
+        .context("failed to initialise ForwardEngine from GGUF")?;
 
         // Tokenizer: try the model ID from GGUF metadata, else arch-based fallback.
         let model_id = metadata
@@ -273,6 +367,7 @@ impl Pipeline {
             engine: Mutex::new(engine),
             config,
             backend,
+            mmap: use_mmap,
         })
     }
 
@@ -527,6 +622,11 @@ impl Pipeline {
     }
     pub fn arch(&self) -> &ArchType {
         &self.model_info.arch
+    }
+
+    /// True when weights are memory-mapped from disk (OS pages on demand).
+    pub fn is_mmap(&self) -> bool {
+        self.mmap
     }
 
     fn configured_backend(&self) -> LlmBackendKind {

@@ -140,11 +140,11 @@ pub const CATALOG: &[SupportedModel] = &[
     // ── Phi GGUF variants ─────────────────────────────────────────────────────
     SupportedModel {
         alias: "openhorizon/phi-2-q4",
-        repo_id: "bartowski/phi-2-GGUF",
+        repo_id: "TheBloke/phi-2-GGUF",
         family: "Phi",
-        params: "2.7B Q4_K_M",
+        params: "2.7B Q8_0",
         gated: false,
-        extra_aliases: &["phi-2-q4", "phi2-q4"],
+        extra_aliases: &["phi-2-q4", "phi2-q4", "phi-2-gguf"],
     },
     // ── Quantized GGUF models (Phase 1: huge models on small devices) ─────────
     // These download a single .gguf file; RAM ≈ file size (no F32 expansion).

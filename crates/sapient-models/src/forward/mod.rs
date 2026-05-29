@@ -11,7 +11,7 @@ use anyhow::{bail, Context, Result};
 use sapient_hub::model_info::{ArchType, ModelInfo};
 use sapient_hub::resolver::WeightFormat;
 
-use crate::gguf_weights::load_gguf_hf_weights;
+use crate::gguf_weights::{load_gguf_hf_weights, load_gguf_hf_weights_mmap};
 
 pub use backend::{mac_gpu_support, total_system_ram_bytes, LlmBackendKind, MacGpuSupport};
 pub use llama::LlamaForward;
@@ -89,6 +89,25 @@ impl ForwardEngine {
         backend: LlmBackendKind,
     ) -> Result<Self> {
         let weights = load_gguf_hf_weights(path)?;
+        Self::from_gguf_weights(info, weights, backend)
+    }
+
+    /// Load via memory-mapping — Q4_0/Q8_0 tensors are zero-copy from disk.
+    /// The OS pages in weight blocks on demand; only active layers are resident.
+    pub fn from_gguf_mmap_with_backend(
+        info: ModelInfo,
+        path: &Path,
+        backend: LlmBackendKind,
+    ) -> Result<Self> {
+        let weights = load_gguf_hf_weights_mmap(path)?;
+        Self::from_gguf_weights(info, weights, backend)
+    }
+
+    fn from_gguf_weights(
+        info: ModelInfo,
+        weights: std::collections::HashMap<String, sapient_core::Tensor>,
+        backend: LlmBackendKind,
+    ) -> Result<Self> {
         match info.arch {
             ArchType::Llama | ArchType::Qwen | ArchType::Gemma | ArchType::Mixtral => {
                 Ok(Self::Llama(LlamaForward::from_weights_with_backend(

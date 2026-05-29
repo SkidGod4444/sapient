@@ -15,6 +15,14 @@ pub fn load_gguf_hf_weights(path: &Path) -> Result<HashMap<String, Tensor>> {
     map_gguf_tensors_to_hf(raw)
 }
 
+/// Load a GGUF file via memory-mapping and remap tensor names to HF layout.
+/// Q4_0/Q8_0 tensors point directly into the mmap'd file — zero heap copy.
+pub fn load_gguf_hf_weights_mmap(path: &Path) -> Result<HashMap<String, Tensor>> {
+    let (_, raw) = sapient_io::GgufLoader::load_tensors_mmap(path)
+        .with_context(|| format!("failed to mmap GGUF {}", path.display()))?;
+    map_gguf_tensors_to_hf(raw)
+}
+
 /// Convert a GGUF name → HF weight key map into the layout expected by `LlamaForward`.
 ///
 /// GGUF stores tensor dims in ggml convention: 2-D weight matrices are `[n_cols, n_rows]`
