@@ -97,3 +97,8 @@ The streaming generator (`generate_stream`) buffers decoded text and withholds u
 - Internal workspace deps also carry `version = "x.y.z"` for crates.io publishing.
 - Release is triggered by pushing a `vX.Y.Z` tag; the workflow in `.github/workflows/release.yml` builds all platform binaries including a `-metal` variant for Apple Silicon.
 - `scripts/publish-all.sh` publishes all 13 crates in dependency order, checking `static.crates.io` for the exact version before attempting each publish.
+
+
+## Must follow
+
+- always update the docs/PROJECT_GUIDE.md file when making changes to the codebase and keep it updated with the latest changes.

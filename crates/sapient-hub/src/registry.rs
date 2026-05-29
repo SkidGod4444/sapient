@@ -137,6 +137,15 @@ pub const CATALOG: &[SupportedModel] = &[
         gated: true,
         extra_aliases: &["mistral-7b", "mistral-7b-instruct"],
     },
+    // ── Phi GGUF variants ─────────────────────────────────────────────────────
+    SupportedModel {
+        alias: "openhorizon/phi-2-q4",
+        repo_id: "bartowski/phi-2-GGUF",
+        family: "Phi",
+        params: "2.7B Q4_K_M",
+        gated: false,
+        extra_aliases: &["phi-2-q4", "phi2-q4"],
+    },
     // ── Quantized GGUF models (Phase 1: huge models on small devices) ─────────
     // These download a single .gguf file; RAM ≈ file size (no F32 expansion).
     SupportedModel {

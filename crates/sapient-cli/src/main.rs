@@ -272,21 +272,55 @@ async fn dispatch(cli: Cli) -> Result<()> {
 // ── Hub commands ──────────────────────────────────────────────────────────────
 
 async fn chat_command(model: &str, backend: &str, verbose: bool) -> Result<()> {
-    let mut load_opts = LoadOptions::default();
-    load_opts.hub.quiet = false; // Always show progress!
-    load_opts.backend = parse_generation_backend(backend)?;
-    let backend_label = load_opts.backend.to_string();
+    let backend_kind = parse_generation_backend(backend)?;
+    let backend_label = backend_kind.to_string();
+    let mut load_opts = LoadOptions {
+        backend: backend_kind,
+        ..LoadOptions::default()
+    };
 
-    let load_spinner = (!verbose).then(|| ui::spinner(format!("loading {model}…")));
+    let is_local_gguf = model.ends_with(".gguf") || std::path::Path::new(model).is_file();
+
+    // If the model isn't cached and we need to download, show a live download
+    // progress bar with bytes + speed instead of a silent spinner.
+    let already_cached = is_local_gguf
+        || hub::list_cached_models()
+            .unwrap_or_default()
+            .iter()
+            .any(|m| m == model);
+
+    let dl_handle = if !already_cached && !verbose {
+        let hub_check = HubClient::with_options(sapient_hub::LoadOptions {
+            quiet: true,
+            ..Default::default()
+        })?;
+        let total_bytes = hub_check.repo_total_bytes(model).await.unwrap_or(0);
+        let blobs_dir = HubClient::blobs_dir_for_model(model);
+        load_opts.hub.quiet = true; // progress bar takes over
+        Some(progress::start_download_progress(
+            model,
+            blobs_dir,
+            total_bytes,
+        ))
+    } else {
+        load_opts.hub.quiet = false;
+        None
+    };
+
+    let load_spinner =
+        (already_cached && !verbose).then(|| ui::spinner(format!("loading {model}…")));
     if verbose {
         eprintln!("Loading {model} with backend {backend_label}…");
     }
 
-    let pipeline = if model.ends_with(".gguf") || std::path::Path::new(model).is_file() {
+    let pipeline = if is_local_gguf {
         // Local GGUF file: load directly without Hub download.
         match Pipeline::from_gguf_with_backend(model, load_opts.backend).await {
             Ok(p) => p,
             Err(e) => {
+                if let Some(h) = dl_handle {
+                    h.finish_error();
+                }
                 if let Some(pb) = load_spinner {
                     pb.finish_and_clear();
                 }
@@ -297,6 +331,9 @@ async fn chat_command(model: &str, backend: &str, verbose: bool) -> Result<()> {
         match Pipeline::from_pretrained_with_opts(model, load_opts).await {
             Ok(p) => p,
             Err(e) => {
+                if let Some(h) = dl_handle {
+                    h.finish_error();
+                }
                 if let Some(pb) = load_spinner {
                     pb.finish_and_clear();
                 }
@@ -304,6 +341,10 @@ async fn chat_command(model: &str, backend: &str, verbose: bool) -> Result<()> {
             }
         }
     };
+
+    if let Some(h) = dl_handle {
+        h.finish_success(model);
+    }
     if let Some(pb) = load_spinner {
         pb.finish_and_clear();
     }
@@ -586,23 +627,70 @@ fn login_command(token: Option<&str>) -> Result<()> {
 }
 
 fn backend_info_command() -> Result<()> {
-    println!("Backends:");
-    println!("  cpu    available");
+    let ram = query_system_ram_bytes();
+    fn query_system_ram_bytes() -> u64 {
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(out) = std::process::Command::new("sysctl")
+                .args(["-n", "hw.memsize"])
+                .output()
+            {
+                if let Ok(s) = std::str::from_utf8(&out.stdout) {
+                    if let Ok(n) = s.trim().parse::<u64>() {
+                        return n;
+                    }
+                }
+            }
+        }
+        0
+    }
+    let _ = ram; // may be 0 on non-mac
+    let ram = query_system_ram_bytes();
+    let ram_gb = ram as f64 / (1024.0 * 1024.0 * 1024.0);
+
+    println!("\n  {}", console::style("Hardware").bold());
+    if ram > 0 {
+        println!(
+            "    Unified memory:  {:.0} GB{}",
+            ram_gb,
+            if cfg!(target_os = "macos") {
+                " (Apple Silicon shared CPU/GPU pool)"
+            } else {
+                ""
+            }
+        );
+    }
+
+    println!("\n  {}", console::style("Backends").bold());
+    println!("    cpu    always available");
 
     let gpu = mac_gpu_support();
     if gpu.available {
         #[cfg(target_os = "macos")]
         let device = sapient_backends_metal::MlxBackend::device_name()
-            .unwrap_or_else(|| "Apple Silicon GPU".to_string());
+            .unwrap_or_else(|| "Apple Silicon".to_string());
         #[cfg(not(target_os = "macos"))]
         let device = "GPU".to_string();
 
-        println!("  metal  available via {} ({device})", gpu.backend);
-        println!("  auto   selects metal on this host");
+        let auto_target = if ram > 0 {
+            format!(
+                "metal ({device}) — fits up to {:.0} GB models",
+                (ram as f64 - 2e9) / (1.5 * 1e9)
+            )
+        } else {
+            format!("metal ({device})")
+        };
+        println!("    metal  available — {device}");
+        println!("    auto   → {auto_target}");
+        println!(
+            "\n  {} sapient chat --backend metal <model>",
+            console::style("Tip:").dim()
+        );
     } else {
-        println!("  metal  unavailable ({})", gpu.reason);
-        println!("  auto   selects cpu on this host");
+        println!("    metal  unavailable ({})", gpu.reason);
+        println!("    auto   → cpu");
     }
+    println!();
 
     Ok(())
 }

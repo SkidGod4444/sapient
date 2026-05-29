@@ -423,5 +423,43 @@ muscles, and everyone shares the basic toolbox at the bottom.
 
 ---
 
+---
+
+## 9. Performance guide — how to get fast inference
+
+### Recommended: GGUF quantized models
+
+For **CPU inference** on any platform (Linux, Raspberry Pi, etc.), always use a GGUF
+quantized model rather than F16 safetensors:
+
+| Model | Format | RAM needed | Typical tok/s (Apple M4, CPU) |
+|---|---|---|---|
+| `openhorizon/qwen2.5-0.5b-q4` | GGUF Q8_0 | ~640 MB | ~17 tok/s |
+| `openhorizon/phi-2-q4` | GGUF Q4_K_M | ~1.5 GB | ~5 tok/s |
+| `openhorizon/phi-2` | F16 safetensors | ~5.2 GB | ~0.8 tok/s |
+
+The F16 safetensors path is slow on CPU because every token requires converting
+large weight matrices from F16 → F32 (phi-2 MLP weights are 52 MB each × 64 per layer).
+GGUF Q4/Q8 keeps weights quantized in memory and dequantizes one 32-element block at
+a time inside the dot product, so memory bandwidth is 4–8× lower.
+
+### Apple Silicon: Metal GPU
+
+Build with `--features mlx` to enable the Metal GPU backend. MLX uses Apple Silicon's
+unified memory — there's no CPU↔GPU copy overhead. The engine picks Metal automatically
+when the model fits in memory (`sapient backend-info` shows the capacity).
+
+Key changes shipped in Phase 2/3:
+- **Phase 2**: rayon parallel dot products across output rows + NEON SIMD (Q4_0, Q8_0).
+- **Phase 3**: MLX persistent weight cache (upload each weight to GPU once, reuse per token),
+  native MLX `gqa_attention` via `fast::scaled_dot_product_attention` (removes CPU fallback),
+  auto backend selection by available unified memory.
+
+### Linux / NVIDIA (DGX, cloud)
+
+CUDA is not yet supported. Until it is, use GGUF Q4/Q8 models on CPU — they run the
+rayon + NEON parallel kernels and are the fastest CPU path. The DGX Spark (ARM64 Grace)
+also has NEON, so the Q8_0 path gets the full SIMD benefit.
+
 *Happy hacking! If anything here ever stops matching the code, the code wins — please open
 a PR to fix the docs.* 🦜

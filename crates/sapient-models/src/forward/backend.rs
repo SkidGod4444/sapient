@@ -172,13 +172,6 @@ impl MetalLlmBackend {
     pub fn is_available() -> bool {
         MlxLlmOps::is_available()
     }
-
-    fn fallback(&self, op: &str) {
-        tracing::warn!(
-            op = op,
-            "native Metal LLM kernel is not implemented yet; using CPU reference kernel"
-        );
-    }
 }
 
 impl LlmBackend for MetalLlmBackend {
@@ -260,11 +253,16 @@ impl LlmBackend for MetalLlmBackend {
         n_kv_heads: usize,
         causal: bool,
     ) -> Result<Tensor> {
-        // Keep this on the CPU reference path for now. Sapient's CPU attention
-        // mask handles cached decoding with q_len < kv_len; using MLX's
-        // causal shortcut without an offset would corrupt generation.
-        self.fallback("gqa_attention");
-        self.cpu.gqa_attention(q, k, v, n_kv_heads, causal)
+        // Run on the Metal GPU. MlxLlmOps::gqa_attention builds an explicit
+        // causal mask for prefill (seq_q > 1) so the KV-cache offset case
+        // (seq_q < seq_k at decode) is handled correctly.
+        self.mlx
+            .gqa_attention(q, k, v, n_kv_heads, causal)
+            .or_else(|e| {
+                tracing::warn!(op = "gqa_attention", error = %e,
+                    "MLX attention failed; falling back to CPU");
+                self.cpu.gqa_attention(q, k, v, n_kv_heads, causal)
+            })
     }
 
     fn logits_from_hidden(&self, hidden: &Tensor, lm_head: &Tensor) -> Result<Vec<f32>> {
@@ -275,8 +273,40 @@ impl LlmBackend for MetalLlmBackend {
     }
 }
 
-#[derive(Debug, Default, Clone)]
-struct MlxLlmOps;
+/// Converts a `Tensor` to an `mlx_rs::Array`, caching the result by buffer pointer so
+/// that weight tensors (which have a stable `Arc<CpuBuffer>` address) are uploaded to
+/// the GPU exactly once across all tokens, instead of re-converted on every `linear_3d`
+/// call.  Activation tensors are ephemeral (different pointer each step) and never
+/// accumulate in the cache.
+#[cfg(feature = "mlx")]
+type MlxWeightCache =
+    std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<usize, mlx_rs::Array>>>;
+
+#[derive(Clone)]
+struct MlxLlmOps {
+    /// Shared weight cache: `buffer_ptr → GPU Array`. Clones share the same cache so
+    /// the MetalLlmBackend (which clones MlxLlmOps per call site) reuses uploads.
+    #[cfg(feature = "mlx")]
+    cache: MlxWeightCache,
+}
+
+impl std::fmt::Debug for MlxLlmOps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MlxLlmOps").finish()
+    }
+}
+
+// Can't use #[derive(Default)] because the `cache` field is cfg-gated on
+// the `mlx` feature and derive doesn't understand that.
+#[allow(clippy::derivable_impls)]
+impl Default for MlxLlmOps {
+    fn default() -> Self {
+        Self {
+            #[cfg(feature = "mlx")]
+            cache: std::sync::Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+}
 
 #[cfg(target_os = "macos")]
 impl MlxLlmOps {
@@ -332,11 +362,43 @@ impl MlxLlmOps {
             .collect()
     }
 
+    /// Convert a `Tensor` to an `mlx_rs::Array`.
+    ///
+    /// For tensors with stable buffer addresses (weights stored in `Arc<CpuBuffer>`) this
+    /// returns a cached copy — the upload to GPU happens only on the first call.  Activations
+    /// have a fresh allocation each decode step so they are converted without caching.
     #[cfg(feature = "mlx")]
-    fn to_array(tensor: &Tensor) -> Result<mlx_rs::Array> {
+    fn to_array(&self, tensor: &Tensor) -> Result<mlx_rs::Array> {
+        let ptr_key = tensor.as_bytes().as_ptr() as usize;
+
+        // Fast path: already uploaded.
+        {
+            let guard = self.cache.lock();
+            if let Some(arr) = guard.get(&ptr_key) {
+                return Ok(arr.clone());
+            }
+        }
+
+        // Slow path: convert and cache.
         let shape = Self::to_shape(tensor.shape().dims())?;
-        // Weights are commonly F16/BF16; convert to F32 (MLX array dtype here)
-        // instead of asserting F32, which would panic on half-precision tensors.
+        let data = tensor.to_f32_cow();
+        let arr = mlx_rs::Array::from_slice(data.as_ref(), &shape);
+
+        // Only cache when the tensor looks like a weight (> 1 KiB and numel > 256).
+        // This avoids caching tiny scalars or ephemeral activation buffers that happen
+        // to share the same size.
+        let numel = tensor.numel();
+        if numel > 256 {
+            self.cache.lock().insert(ptr_key, arr.clone());
+        }
+
+        Ok(arr)
+    }
+
+    /// Convert without caching — for activation tensors created fresh each step.
+    #[cfg(feature = "mlx")]
+    fn to_array_uncached(tensor: &Tensor) -> Result<mlx_rs::Array> {
+        let shape = Self::to_shape(tensor.shape().dims())?;
         let data = tensor.to_f32_cow();
         Ok(mlx_rs::Array::from_slice(data.as_ref(), &shape))
     }
@@ -377,8 +439,10 @@ impl MlxLlmOps {
                 anyhow::bail!("linear weight in_dim mismatch: {} vs {in_dim}", w_dims[1]);
             }
 
-            let x_arr = Self::to_array(x)?.reshape(&Self::to_shape(&[batch * seq, in_dim])?)?;
-            let w_arr = Self::to_array(weight)?.transpose()?;
+            // x is a fresh activation (ephemeral); weight is a stable weight (cache it).
+            let x_arr =
+                Self::to_array_uncached(x)?.reshape(&Self::to_shape(&[batch * seq, in_dim])?)?;
+            let w_arr = self.to_array(weight)?.transpose()?;
             let y = x_arr.matmul(&w_arr)?;
             Self::to_tensor(y.reshape(&Self::to_shape(&[batch, seq, out_dim])?)?)
         }
@@ -393,8 +457,8 @@ impl MlxLlmOps {
 
         #[cfg(feature = "mlx")]
         {
-            let x = Self::to_array(x)?;
-            let weight = Self::to_array(weight)?;
+            let x = Self::to_array_uncached(x)?;
+            let weight = self.to_array(weight)?;
             Self::to_tensor(mlx_rs::fast::rms_norm(&x, &weight, eps)?)
         }
     }
@@ -414,9 +478,9 @@ impl MlxLlmOps {
 
         #[cfg(feature = "mlx")]
         {
-            let x = Self::to_array(x)?;
-            let weight = Self::to_array(weight)?;
-            let bias = bias.map(Self::to_array).transpose()?;
+            let x = Self::to_array_uncached(x)?;
+            let weight = self.to_array(weight)?;
+            let bias = bias.map(|b| self.to_array(b)).transpose()?;
             Self::to_tensor(mlx_rs::fast::layer_norm(
                 &x,
                 Some(&weight),
@@ -435,7 +499,7 @@ impl MlxLlmOps {
 
         #[cfg(feature = "mlx")]
         {
-            let x = Self::to_array(x)?;
+            let x = Self::to_array_uncached(x)?;
             Self::to_tensor(mlx_rs::nn::silu(&x)?)
         }
     }
@@ -449,7 +513,7 @@ impl MlxLlmOps {
 
         #[cfg(feature = "mlx")]
         {
-            let x = Self::to_array(x)?;
+            let x = Self::to_array_uncached(x)?;
             Self::to_tensor(mlx_rs::nn::gelu(&x)?)
         }
     }
@@ -463,8 +527,8 @@ impl MlxLlmOps {
 
         #[cfg(feature = "mlx")]
         {
-            let a = Self::to_array(a)?;
-            let b = Self::to_array(b)?;
+            let a = Self::to_array_uncached(a)?;
+            let b = Self::to_array_uncached(b)?;
             Self::to_tensor(a.add(&b)?)
         }
     }
@@ -478,8 +542,8 @@ impl MlxLlmOps {
 
         #[cfg(feature = "mlx")]
         {
-            let a = Self::to_array(a)?;
-            let b = Self::to_array(b)?;
+            let a = Self::to_array_uncached(a)?;
+            let b = Self::to_array_uncached(b)?;
             Self::to_tensor(a.multiply(&b)?)
         }
     }
@@ -510,7 +574,7 @@ impl MlxLlmOps {
                 anyhow::bail!("MLX RoPE requires contiguous positions");
             }
 
-            let x = Self::to_array(x)?;
+            let x = Self::to_array_uncached(x)?;
             Self::to_tensor(mlx_rs::fast::rope(
                 &x,
                 dims[3] as i32,
@@ -541,9 +605,79 @@ impl MlxLlmOps {
             let h = hidden.to_f32_cow();
             let last = &h[(seq - 1) * hidden_size..seq * hidden_size];
             let h_last = mlx_rs::Array::from_slice(last, &[1, hidden_size as i32]);
-            let head = Self::to_array(lm_head)?.transpose()?;
+            let head = self.to_array(lm_head)?.transpose()?;
             let logits = h_last.matmul(&head)?;
             Ok(logits.as_slice::<f32>().to_vec())
+        }
+    }
+
+    /// Grouped-query attention (GQA) on the Metal GPU via MLX.
+    ///
+    /// MLX's `fast::scaled_dot_product_attention` dispatches to an optimised Metal
+    /// kernel when `seq_q = 1` (every decode step).  At prefill we build an explicit
+    /// additive causal mask in order to correctly handle `seq_q < seq_k` (cached
+    /// prefix) — MLX's built-in `"causal"` mode would assume square attention.
+    fn gqa_attention(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        n_kv_heads: usize,
+        causal: bool,
+    ) -> Result<Tensor> {
+        #[cfg(not(feature = "mlx"))]
+        {
+            let _ = (q, k, v, n_kv_heads, causal);
+            anyhow::bail!("{}", Self::support().reason);
+        }
+
+        #[cfg(feature = "mlx")]
+        {
+            let qs = q.shape().dims().to_vec();
+            let ks = k.shape().dims().to_vec();
+            let (batch, n_heads, seq_q, head_dim) = (qs[0], qs[1], qs[2], qs[3]);
+            let seq_k = ks[2];
+            let scale = 1.0 / (head_dim as f32).sqrt();
+
+            // q: [batch, n_heads, seq_q, head_dim]
+            // k: [batch, n_kv_heads, seq_k, head_dim]
+            // MLX SDPA expects [batch, heads, seq, dim].
+            let q_arr = Self::to_array_uncached(q)?;
+            let k_arr = Self::to_array_uncached(k)?;
+            let v_arr = Self::to_array_uncached(v)?;
+
+            // Build the causal mask when needed.
+            // - seq_q = 1 (decode): every cached key is in the past → no masking needed.
+            // - seq_q > 1 (prefill): need a [seq_q, seq_k] upper-triangular -inf mask.
+            let mask_arr: Option<mlx_rs::Array> = if causal && seq_q > 1 {
+                let offset = seq_k.saturating_sub(seq_q);
+                let mut data = vec![0.0f32; seq_q * seq_k];
+                for qi in 0..seq_q {
+                    for ki in 0..seq_k {
+                        if ki > qi + offset {
+                            data[qi * seq_k + ki] = f32::NEG_INFINITY;
+                        }
+                    }
+                }
+                Some(mlx_rs::Array::from_slice(
+                    &data,
+                    &[seq_q as i32, seq_k as i32],
+                ))
+            } else {
+                None
+            };
+
+            // IntoOption<ScaledDotProductAttentionMask> is implemented for
+            // Option<ScaledDotProductAttentionMask>, so wrap our optional mask.
+            let mlx_mask = mask_arr
+                .as_ref()
+                .map(mlx_rs::fast::ScaledDotProductAttentionMask::from);
+            let out_arr = mlx_rs::fast::scaled_dot_product_attention(
+                &q_arr, &k_arr, &v_arr, scale, mlx_mask,
+            )?;
+
+            // out_arr: [batch, n_heads, seq_q, head_dim]
+            Self::to_tensor(out_arr)
         }
     }
 }
@@ -618,10 +752,34 @@ pub enum LlmBackendDispatch {
 
 impl LlmBackendDispatch {
     pub fn from_kind(kind: LlmBackendKind) -> Result<Self> {
+        Self::from_kind_with_model_bytes(kind, 0)
+    }
+
+    /// Select a backend, optionally accounting for the model's weight footprint.
+    ///
+    /// `model_bytes` is the total weight size in bytes (0 = unknown).  On Apple
+    /// Silicon (unified memory), Metal is chosen for Auto when the model fits
+    /// with a 1.5× KV-cache headroom factor; otherwise CPU is used to avoid
+    /// swapping GPU memory which kills throughput.
+    pub fn from_kind_with_model_bytes(kind: LlmBackendKind, model_bytes: u64) -> Result<Self> {
         match kind {
             LlmBackendKind::Cpu => Ok(Self::Cpu(CpuLlmBackend)),
             LlmBackendKind::Auto if MetalLlmBackend::is_available() => {
-                Ok(Self::Metal(MetalLlmBackend::default()))
+                let fits = metal_memory_fits(model_bytes);
+                if fits {
+                    tracing::debug!(
+                        model_bytes,
+                        "auto-backend: Metal (model fits in unified memory)"
+                    );
+                    Ok(Self::Metal(MetalLlmBackend::default()))
+                } else {
+                    tracing::info!(
+                        model_bytes,
+                        "auto-backend: CPU (model too large for Metal GPU memory headroom — \
+                         use --backend metal to force GPU anyway)"
+                    );
+                    Ok(Self::Cpu(CpuLlmBackend))
+                }
             }
             LlmBackendKind::Auto => Ok(Self::Cpu(CpuLlmBackend)),
             LlmBackendKind::Metal if MetalLlmBackend::is_available() => {
@@ -636,6 +794,39 @@ impl LlmBackendDispatch {
             }
         }
     }
+}
+
+/// Returns true when `model_bytes` fit in the Apple Silicon unified memory pool
+/// with 1.5× headroom for KV cache and activations.  Returns true when
+/// `model_bytes == 0` (unknown size) so we don't block models we can't measure.
+fn metal_memory_fits(model_bytes: u64) -> bool {
+    if model_bytes == 0 {
+        return true;
+    }
+    let total_ram = total_system_ram_bytes();
+    // Reserve 2 GB for the OS + app overhead; require 1.5× headroom for the model.
+    let usable = total_ram.saturating_sub(2 * 1024 * 1024 * 1024);
+    model_bytes as f64 * 1.5 <= usable as f64
+}
+
+/// Total system RAM in bytes via `sysctl hw.memsize` (macOS) or `/proc/meminfo`.
+/// Returns 0 on failure (treated as unknown → Metal allowed).
+pub fn total_system_ram_bytes() -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+            .ok();
+        if let Some(out) = output {
+            if let Ok(s) = std::str::from_utf8(&out.stdout) {
+                if let Ok(n) = s.trim().parse::<u64>() {
+                    return n;
+                }
+            }
+        }
+    }
+    0
 }
 
 impl LlmBackend for LlmBackendDispatch {

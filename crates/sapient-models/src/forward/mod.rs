@@ -13,7 +13,7 @@ use sapient_hub::resolver::WeightFormat;
 
 use crate::gguf_weights::load_gguf_hf_weights;
 
-pub use backend::{mac_gpu_support, LlmBackendKind, MacGpuSupport};
+pub use backend::{mac_gpu_support, total_system_ram_bytes, LlmBackendKind, MacGpuSupport};
 pub use llama::LlamaForward;
 pub use phi::PhiForward;
 

@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use indicatif::{ProgressBar, ProgressStyle};
 
-/// Walk a directory tree and sum the sizes of all non-lock, non-part files.
+/// Walk a directory tree and sum the sizes of all data files, including
+/// in-progress `.sync.part` downloads (written by hf-hub during active transfers).
+/// Only advisory `.lock` files are excluded since they contain no model data.
 fn dir_downloaded_bytes(root: &PathBuf) -> u64 {
     let Ok(entries) = std::fs::read_dir(root) else {
         return 0;
@@ -20,8 +22,10 @@ fn dir_downloaded_bytes(root: &PathBuf) -> u64 {
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        // Skip lock files and in-progress temp files
-        if name.ends_with(".lock") || name.ends_with(".part") || name.ends_with(".incomplete") {
+        // Skip only advisory lock files — NOT .sync.part, which are the active
+        // download temp files hf-hub writes during transfers. Excluding them makes
+        // the bar appear stuck at 0 B/s while data is actually being written.
+        if name.ends_with(".lock") {
             continue;
         }
         if path.is_dir() {

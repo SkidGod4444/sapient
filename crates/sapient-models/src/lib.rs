@@ -20,5 +20,7 @@ pub mod gguf_weights;
 pub mod registry;
 pub mod weights;
 
-pub use forward::{mac_gpu_support, ForwardEngine, LlmBackendKind, MacGpuSupport};
+pub use forward::{
+    mac_gpu_support, total_system_ram_bytes, ForwardEngine, LlmBackendKind, MacGpuSupport,
+};
 pub use registry::{build_graph, ModelGraph};
