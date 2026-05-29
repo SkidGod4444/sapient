@@ -2,12 +2,15 @@
 linker = "aarch64-linux-gnu-gcc"
 
 [target.aarch64-apple-darwin]
-# On Apple Silicon, enable every ISA extension the M-series ships with:
-# dotprod (SDOT/UDOT), fp16, sha3, etc.  This tells LLVM to use the full
-# native ISA for auto-vectorisation — the NEON baseline is always on anyway.
-# CI targets specific triples and will NOT inherit these flags.
-rustflags = ["-C", "target-cpu=native",
-             "-C", "link-arg=-framework", "-C", "link-arg=Metal",
+# Link Metal framework for the optional MLX/GPU backend.
+# NOTE: do NOT add -C target-cpu=native here — it causes ring's compile-time
+# CPU-feature const assertions to fail on CI runners (GitHub macos-14 may have
+# different feature flags than a local M-series Mac).
+# NEON intrinsics use #[target_feature(enable = "neon")] which is always-on
+# baseline on aarch64 and doesn't require target-cpu=native.
+# To opt into native-CPU LLVM auto-vectorisation locally, run:
+#   RUSTFLAGS="-C target-cpu=native" cargo build --release
+rustflags = ["-C", "link-arg=-framework", "-C", "link-arg=Metal",
              "-C", "link-arg=-framework", "-C", "link-arg=Foundation"]
 
 [target.'cfg(target_os = "macos")']
