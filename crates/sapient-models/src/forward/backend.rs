@@ -739,6 +739,17 @@ impl MlxLlmOps {
         anyhow::bail!("MLX is only available on macOS")
     }
 
+    fn gqa_attention(
+        &self,
+        _q: &Tensor,
+        _k: &Tensor,
+        _v: &Tensor,
+        _n_kv_heads: usize,
+        _causal: bool,
+    ) -> Result<Tensor> {
+        anyhow::bail!("MLX is only available on macOS")
+    }
+
     fn logits_from_hidden(&self, _hidden: &Tensor, _lm_head: &Tensor) -> Result<Vec<f32>> {
         anyhow::bail!("MLX is only available on macOS")
     }
