@@ -101,6 +101,18 @@ impl Pipeline {
 
         ensure_weights_present(&model_files)?;
 
+        // GGUF-only repos: the hub's config_path is a sentinel pointing at the
+        // GGUF file itself.  Route directly to from_gguf_with_backend instead of
+        // trying to parse a config.json that doesn't exist.
+        let single_gguf = model_files.weight_paths.len() == 1
+            && model_files.weight_paths[0]
+                .extension()
+                .and_then(|e| e.to_str())
+                == Some("gguf");
+        if single_gguf {
+            return Self::from_gguf_with_backend(&model_files.weight_paths[0], backend).await;
+        }
+
         let model_info = ModelInfo::from_config_file(&model_files.config_path)
             .context("Failed to parse config.json")?;
         debug!("Detected architecture: {:?}", model_info.arch);

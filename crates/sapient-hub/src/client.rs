@@ -179,26 +179,45 @@ impl HubClient {
     // ── Internals ──────────────────────────────────────────────────────────────
 
     async fn resolve_files(&self, repo: &ApiRepo, model_id: &str) -> Result<ModelFiles> {
-        let (config_path, tokenizer_path, tokenizer_config_path, weight_paths) = tokio::join!(
-            async {
-                repo.get("config.json")
-                    .await
-                    .context("config.json not found — is this a valid model repo?")
-            },
+        let (config_result, tokenizer_path, tokenizer_config_path, weight_paths) = tokio::join!(
+            async { repo.get("config.json").await.ok() },
             async { repo.get("tokenizer.json").await.ok() },
             async { repo.get("tokenizer_config.json").await.ok() },
             self.fetch_weights(repo, model_id),
         );
 
-        let config_path = config_path?;
-        debug!("config.json cached for {model_id}");
+        let weight_paths = weight_paths?;
+
+        // GGUF-only repos (e.g. `…-GGUF`) have no config.json; that is acceptable
+        // when the weights are a single GGUF file (ModelInfo comes from the GGUF
+        // metadata). For safetensors repos a missing config.json is a hard error.
+        let config_path = match config_result {
+            Some(p) => {
+                debug!("config.json cached for {model_id}");
+                p
+            }
+            None => {
+                let is_gguf_only = weight_paths
+                    .iter()
+                    .all(|p| p.extension().and_then(|e| e.to_str()) == Some("gguf"));
+                if !is_gguf_only {
+                    anyhow::bail!(
+                        "config.json not found — is this a valid model repo? \
+                         (GGUF-only repos are allowed to omit config.json)"
+                    );
+                }
+                debug!("GGUF-only repo — skipping config.json for {model_id}");
+                // Return a sentinel that the pipeline will ignore for GGUF loads.
+                weight_paths[0].clone()
+            }
+        };
 
         Ok(ModelFiles {
             model_id: model_id.to_owned(),
             config_path,
             tokenizer_path,
             tokenizer_config_path,
-            weight_paths: weight_paths?,
+            weight_paths,
         })
     }
 

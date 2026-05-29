@@ -4,6 +4,7 @@
 //! It beats a naive loop by ~10-30× on modern CPUs.
 
 use super::quant;
+use rayon::prelude::*;
 use sapient_core::error::{Result, SapientError};
 use sapient_core::{DType, Shape, Tensor, Q4_0_BLOCK_BYTES, Q8_0_BLOCK_BYTES, QUANT_BLOCK_SIZE};
 
@@ -157,8 +158,11 @@ fn matmul_nt_float(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resu
     Tensor::from_f32(&out, Shape::new([m, n]))
 }
 
-/// Q4_0 quantized weight path: each weight row is `k/QK` blocks of 18 bytes.
-/// The dot product dequantizes one block at a time, never making a full F32 copy.
+/// Q4_0 quantized weight path — parallel over output columns (the n dimension).
+///
+/// During decode m = 1, so all n = hidden_size dot products are independent and
+/// trivially parallel. Each thread computes one dot product over k/32 blocks
+/// without touching any shared state.
 fn matmul_nt_q4_0(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Result<Tensor> {
     if k % QUANT_BLOCK_SIZE != 0 {
         return Err(SapientError::internal(
@@ -166,22 +170,27 @@ fn matmul_nt_q4_0(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
         ));
     }
     let x_cow = x.to_f32_cow();
-    let x_data = x_cow.as_ref();
-    let w_blocks = w.as_quant_blocks();
+    let x_data: &[f32] = x_cow.as_ref();
+    let w_blocks: &[u8] = w.as_quant_blocks();
     let row_bytes = k / QUANT_BLOCK_SIZE * Q4_0_BLOCK_BYTES;
+
     let mut out = vec![0.0f32; m * n];
 
     for i in 0..m {
         let x_row = &x_data[i * k..(i + 1) * k];
-        for j in 0..n {
-            let w_row = &w_blocks[j * row_bytes..(j + 1) * row_bytes];
-            out[i * n + j] = quant::dot_q4_0_row_f32(w_row, x_row);
-        }
+        // Each slot out[i*n + j] is written by exactly one j — fully parallel.
+        out[i * n..(i + 1) * n]
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(j, slot)| {
+                *slot =
+                    quant::dot_q4_0_row_f32(&w_blocks[j * row_bytes..(j + 1) * row_bytes], x_row);
+            });
     }
     Tensor::from_f32(&out, Shape::new([m, n]))
 }
 
-/// Q8_0 quantized weight path: each weight row is `k/QK` blocks of 34 bytes.
+/// Q8_0 quantized weight path — parallel over output columns (the n dimension).
 fn matmul_nt_q8_0(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Result<Tensor> {
     if k % QUANT_BLOCK_SIZE != 0 {
         return Err(SapientError::internal(
@@ -189,17 +198,21 @@ fn matmul_nt_q8_0(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
         ));
     }
     let x_cow = x.to_f32_cow();
-    let x_data = x_cow.as_ref();
-    let w_blocks = w.as_quant_blocks();
+    let x_data: &[f32] = x_cow.as_ref();
+    let w_blocks: &[u8] = w.as_quant_blocks();
     let row_bytes = k / QUANT_BLOCK_SIZE * Q8_0_BLOCK_BYTES;
+
     let mut out = vec![0.0f32; m * n];
 
     for i in 0..m {
         let x_row = &x_data[i * k..(i + 1) * k];
-        for j in 0..n {
-            let w_row = &w_blocks[j * row_bytes..(j + 1) * row_bytes];
-            out[i * n + j] = quant::dot_q8_0_row_f32(w_row, x_row);
-        }
+        out[i * n..(i + 1) * n]
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(j, slot)| {
+                *slot =
+                    quant::dot_q8_0_row_f32(&w_blocks[j * row_bytes..(j + 1) * row_bytes], x_row);
+            });
     }
     Tensor::from_f32(&out, Shape::new([m, n]))
 }

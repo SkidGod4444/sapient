@@ -2,12 +2,17 @@
 linker = "aarch64-linux-gnu-gcc"
 
 [target.aarch64-apple-darwin]
-# Use the system linker on Apple Silicon Macs — no override needed.
+# On Apple Silicon, enable every ISA extension the M-series ships with:
+# dotprod (SDOT/UDOT), fp16, sha3, etc.  This tells LLVM to use the full
+# native ISA for auto-vectorisation — the NEON baseline is always on anyway.
+# CI targets specific triples and will NOT inherit these flags.
+rustflags = ["-C", "target-cpu=native",
+             "-C", "link-arg=-framework", "-C", "link-arg=Metal",
+             "-C", "link-arg=-framework", "-C", "link-arg=Foundation"]
 
 [target.'cfg(target_os = "macos")']
-# Reserve headroom for Metal framework dylibs.
-rustflags = ["-C", "link-arg=-framework", "-C", "link-arg=Metal",
-             "-C", "link-arg=-framework", "-C", "link-arg=Foundation"]
+# Reserve headroom for Metal framework dylibs (Intel Mac / old linker compat).
+# aarch64-apple-darwin has its own entry above; this is a no-op fallback.
 
 [build]
 # Parallel build jobs.

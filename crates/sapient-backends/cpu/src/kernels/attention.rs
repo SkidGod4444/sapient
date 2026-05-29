@@ -8,6 +8,7 @@
 //!   - Grouped-Query Attention (Llama2/3, Mistral) — KV head repeat
 //!   - Rotary Position Embedding (RoPE) inline application
 
+use rayon::prelude::*;
 use sapient_core::error::{Result, SapientError};
 use sapient_core::{Shape, Tensor};
 
@@ -58,42 +59,46 @@ pub fn scaled_dot_product_attention(
     // KV head repetition for GQA.
     let kv_rep = n_heads / n_kv_heads; // 1 for MHA, >1 for GQA
 
-    let mut out = vec![0.0f32; batch * n_heads * seq_q * head_dim];
+    // Each (b, h) pair writes exactly one `seq_q * head_dim`-element slice.
+    // par_chunks_mut hands each worker a disjoint slice — no synchronisation needed.
+    let head_out_size = seq_q * head_dim;
+    let mut out = vec![0.0f32; batch * n_heads * head_out_size];
 
-    for b in 0..batch {
-        for h in 0..n_heads {
-            let kv_h = h / kv_rep; // which KV head this Q head maps to
+    // Pre-compute mask data once (if present) so all threads share the reference.
+    let mask_cow = mask.map(|m| m.to_f32_cow());
+    let mask_data: Option<&[f32]> = mask_cow.as_deref();
 
-            // QK^T: (seq_q, head_dim) × (head_dim, seq_k) → (seq_q, seq_k)
+    out.par_chunks_mut(head_out_size)
+        .enumerate()
+        .for_each(|(bh, out_chunk)| {
+            let b = bh / n_heads;
+            let h = bh % n_heads;
+            let kv_h = h / kv_rep;
+
+            // QK^T → scores[seq_q × seq_k]
             let mut scores = vec![0.0f32; seq_q * seq_k];
 
             for qi in 0..seq_q {
                 for ki in 0..seq_k {
-                    let mut dot = 0.0f32;
                     let q_base = b * q_strides[0] + h * q_strides[1] + qi * q_strides[2];
                     let k_base = b * k_strides[0] + kv_h * k_strides[1] + ki * k_strides[2];
-
-                    for d in 0..head_dim {
-                        let q_idx = q_base + d * q_strides[3];
-                        let k_idx = k_base + d * k_strides[3];
-                        dot += q_data[q_idx] * k_data[k_idx];
-                    }
+                    let dot: f32 = (0..head_dim)
+                        .map(|d| {
+                            q_data[q_base + d * q_strides[3]] * k_data[k_base + d * k_strides[3]]
+                        })
+                        .sum();
                     scores[qi * seq_k + ki] = dot * scale;
                 }
             }
 
-            // Apply optional additive mask.
-            if let Some(m) = mask {
-                let m_cow = m.to_f32_cow();
-                let m_data = m_cow.as_ref();
-                for qi in 0..seq_q {
-                    for ki in 0..seq_k {
-                        scores[qi * seq_k + ki] += m_data[qi * seq_k + ki];
-                    }
+            // Additive mask (causal or custom).
+            if let Some(m) = mask_data {
+                for (s, &mv) in scores.iter_mut().zip(m.iter()) {
+                    *s += mv;
                 }
             }
 
-            // Softmax over seq_k for each query position.
+            // Softmax per query position.
             for qi in 0..seq_q {
                 let row = &mut scores[qi * seq_k..(qi + 1) * seq_k];
                 let mut max_v = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -101,35 +106,34 @@ pub fn scaled_dot_product_attention(
                     max_v = 0.0;
                 }
                 let mut sum = 0.0f32;
-                for v in row.iter_mut() {
-                    *v = (*v - max_v).exp();
-                    sum += *v;
+                for s in row.iter_mut() {
+                    *s = (*s - max_v).exp();
+                    sum += *s;
                 }
                 if sum == 0.0 {
                     sum = f32::EPSILON;
                 }
-                for v in row.iter_mut() {
-                    *v /= sum;
+                for s in row.iter_mut() {
+                    *s /= sum;
                 }
             }
 
-            // scores × V: (seq_q, seq_k) × (seq_k, head_dim) → (seq_q, head_dim)
+            // scores × V → out_chunk[seq_q × head_dim]
             for qi in 0..seq_q {
                 for d in 0..head_dim {
-                    let mut acc = 0.0f32;
-                    for ki in 0..seq_k {
-                        let s_idx = qi * seq_k + ki;
-                        let v_idx = b * v_strides[0]
-                            + kv_h * v_strides[1]
-                            + ki * v_strides[2]
-                            + d * v_strides[3];
-                        acc += scores[s_idx] * v_data[v_idx];
-                    }
-                    out[((b * n_heads + h) * seq_q + qi) * head_dim + d] = acc;
+                    let acc: f32 = (0..seq_k)
+                        .map(|ki| {
+                            let v_idx = b * v_strides[0]
+                                + kv_h * v_strides[1]
+                                + ki * v_strides[2]
+                                + d * v_strides[3];
+                            scores[qi * seq_k + ki] * v_data[v_idx]
+                        })
+                        .sum();
+                    out_chunk[qi * head_dim + d] = acc;
                 }
             }
-        }
-    }
+        });
 
     Tensor::from_f32(&out, Shape::new([batch, n_heads, seq_q, head_dim]))
 }
