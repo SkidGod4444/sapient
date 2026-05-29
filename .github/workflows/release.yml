@@ -86,6 +86,14 @@ jobs:
         if: matrix.features == 'mlx'
         run: brew install cmake
 
+      # mlx-rs compiles C++/Metal objects against the runner's SDK (macOS 14.x).
+      # Pin the deployment target so Rust's linker and those objects agree —
+      # otherwise the link fails with a min-version mismatch. Scoped to the
+      # Metal build so the plain CPU macOS binaries keep their macOS 11+ floor.
+      - name: Set macOS deployment target (Metal)
+        if: matrix.features == 'mlx'
+        run: echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
+
       # ── Build ──────────────────────────────────────────────────────────────
       # Windows must use pwsh so MSVC link.exe is on PATH (Git Bash does not inherit it).
       - name: Build (native — Windows)
