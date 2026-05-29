@@ -88,17 +88,33 @@ pub fn gguf_preference_score(name: &str) -> i32 {
 pub fn tokenizer_fallback_model(model_id: &str) -> Option<&'static str> {
     let id = model_id.to_ascii_lowercase();
 
+    // SmolLM / SmolLM2
+    if id.contains("smollm") {
+        return Some("HuggingFaceTB/SmolLM2-360M-Instruct");
+    }
+    // DeepSeek R1 distills use Llama 3.1 tokenizer
+    if id.contains("deepseek") {
+        return Some("meta-llama/Meta-Llama-3-8B-Instruct");
+    }
     if id.contains("llama-2") || id.contains("llama2") {
         return Some("NousResearch/Llama-2-7b-hf");
     }
     if id.contains("llama-3") || id.contains("llama3") {
         return Some("meta-llama/Meta-Llama-3-8B-Instruct");
     }
-    if id.contains("mistral") {
+    // Plain "llama" arch from GGUF metadata (no version suffix)
+    if id == "llama" {
+        return Some("meta-llama/Meta-Llama-3-8B-Instruct");
+    }
+    if id.contains("mistral") || id.contains("ministral") {
         return Some("mistralai/Mistral-7B-v0.1");
     }
     if id.contains("codellama") || id.contains("code-llama") {
         return Some("codellama/CodeLlama-7b-hf");
+    }
+    // Phi-4 uses the same tokenizer as Phi-3
+    if id.contains("phi-4") || id.contains("phi4") {
+        return Some("microsoft/Phi-3-mini-4k-instruct");
     }
     if id.contains("phi-3") || id.contains("phi3") {
         return Some("microsoft/Phi-3-mini-4k-instruct");
