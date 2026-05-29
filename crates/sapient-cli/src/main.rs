@@ -180,6 +180,14 @@ enum Commands {
         /// Reinstall even if already on the latest version.
         #[arg(long)]
         force: bool,
+
+        /// Install the Apple Silicon Metal (GPU) build.
+        #[arg(long, conflicts_with = "cpu")]
+        metal: bool,
+
+        /// Install the CPU build (skip Metal even on Apple Silicon).
+        #[arg(long)]
+        cpu: bool,
     },
 }
 
@@ -248,7 +256,16 @@ async fn dispatch(cli: Cli) -> Result<()> {
             let model_path = hub::resolve_model_path(model.as_str()).await?;
             server::serve(model_path, port, backend, workers).await
         }
-        Commands::Update { force } => update::run_update(force),
+        Commands::Update { force, metal, cpu } => {
+            let variant = if metal {
+                Some(update::Variant::Metal)
+            } else if cpu {
+                Some(update::Variant::Cpu)
+            } else {
+                None
+            };
+            update::run_update(force, variant)
+        }
     }
 }
 

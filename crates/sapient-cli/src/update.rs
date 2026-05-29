@@ -1,7 +1,7 @@
 //! Self-update: download the latest release binary from GitHub.
 
 use std::fs;
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -12,6 +12,46 @@ const BINARY: &str = "sapient";
 struct PlatformAsset {
     triple: &'static str,
     archive: ArchiveKind,
+}
+
+/// Which build of SAPIENT to install.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub enum Variant {
+    Cpu,
+    Metal,
+}
+
+impl Variant {
+    /// Filename suffix on the release archive (`-metal` for the GPU build).
+    fn suffix(self) -> &'static str {
+        match self {
+            Variant::Cpu => "",
+            Variant::Metal => "-metal",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Variant::Cpu => "CPU",
+            Variant::Metal => "Metal (GPU)",
+        }
+    }
+}
+
+/// The variant this binary was compiled as. A binary built with the `mlx`
+/// feature is the Apple Silicon Metal build; everything else is CPU.
+const fn current_variant() -> Variant {
+    if cfg!(feature = "mlx") {
+        Variant::Metal
+    } else {
+        Variant::Cpu
+    }
+}
+
+/// Whether this machine can run the Metal build: Apple Silicon (macOS aarch64),
+/// the only platform we publish a `-metal` artifact for.
+fn metal_capable() -> bool {
+    std::env::consts::OS == "macos" && std::env::consts::ARCH == "aarch64"
 }
 
 #[derive(Copy, Clone)]
@@ -134,13 +174,14 @@ fn extract_zip(data: &[u8], dest: &Path) -> Result<PathBuf> {
     bail!("binary '{BINARY}.exe' not found in archive")
 }
 
-fn download_release(asset: &PlatformAsset, tag: &str) -> Result<PathBuf> {
+fn download_release(asset: &PlatformAsset, tag: &str, variant: Variant) -> Result<PathBuf> {
+    let suffix = variant.suffix();
     let filename = match asset.archive {
-        ArchiveKind::TarGz => format!("{BINARY}-{}.tar.gz", asset.triple),
-        ArchiveKind::Zip => format!("{BINARY}-{}.zip", asset.triple),
+        ArchiveKind::TarGz => format!("{BINARY}-{}{suffix}.tar.gz", asset.triple),
+        ArchiveKind::Zip => format!("{BINARY}-{}{suffix}.zip", asset.triple),
     };
     let url = format!("https://github.com/{REPO}/releases/download/{tag}/{filename}");
-    println!("Downloading {tag} ({})...", asset.triple);
+    println!("Downloading {tag} ({}, {})...", asset.triple, variant.label());
 
     let archive_bytes = http_get_bytes(&url)?;
 
@@ -206,24 +247,85 @@ fn replace_current_binary(new_binary: &Path) -> Result<()> {
     }
 }
 
+/// Decide which build variant to install.
+///
+/// Order of precedence: explicit `--metal`/`--cpu` flag → interactive prompt on
+/// Apple Silicon → the variant this binary was built as. On machines without a
+/// Metal artifact, always CPU (and reject an explicit `--metal`).
+fn resolve_variant(explicit: Option<Variant>) -> Result<Variant> {
+    if !metal_capable() {
+        if explicit == Some(Variant::Metal) {
+            bail!("the Metal build is only available on Apple Silicon (macOS arm64)");
+        }
+        return Ok(Variant::Cpu);
+    }
+
+    if let Some(v) = explicit {
+        return Ok(v);
+    }
+
+    // Apple Silicon, no explicit choice: ask if we're attached to a terminal,
+    // otherwise keep whatever this binary already is.
+    if std::io::stdin().is_terminal() {
+        Ok(prompt_variant(current_variant()))
+    } else {
+        Ok(current_variant())
+    }
+}
+
+/// Ask the user which build to install, defaulting to `default` on empty input.
+fn prompt_variant(default: Variant) -> Variant {
+    use std::io::Write;
+    println!("You're on Apple Silicon — choose a build to install:");
+    println!("  1) Metal (GPU) — faster on Apple Silicon");
+    println!("  2) CPU         — maximum compatibility");
+    let default_num = match default {
+        Variant::Metal => 1,
+        Variant::Cpu => 2,
+    };
+    print!("Build [1/2] (default {default_num}, currently {}): ", default.label());
+    let _ = std::io::stdout().flush();
+
+    let mut buf = String::new();
+    if std::io::stdin().read_line(&mut buf).is_err() {
+        return default;
+    }
+    match buf.trim() {
+        "1" => Variant::Metal,
+        "2" => Variant::Cpu,
+        _ => default,
+    }
+}
+
 /// Check for updates and install the latest release if available.
-pub fn run_update(force: bool) -> Result<()> {
+pub fn run_update(force: bool, variant: Option<Variant>) -> Result<()> {
     let current = env!("CARGO_PKG_VERSION");
     let latest_tag = fetch_latest_tag()?;
     let latest = latest_tag.strip_prefix('v').unwrap_or(&latest_tag);
 
-    if !force && !version_lt(current, latest) {
-        println!("sapient {current} is already up to date.");
+    let target_variant = resolve_variant(variant)?;
+    let switching = target_variant != current_variant();
+
+    // If already current AND not switching build variant, nothing to do.
+    if !force && !switching && !version_lt(current, latest) {
+        println!("sapient {current} ({}) is already up to date.", current_variant().label());
         return Ok(());
     }
 
+    if switching {
+        println!(
+            "Switching build: {} → {}",
+            current_variant().label(),
+            target_variant.label()
+        );
+    }
     println!("Updating sapient {current} → {latest}...");
     let asset = platform_asset()?;
-    let staged = download_release(&asset, &latest_tag)?;
+    let staged = download_release(&asset, &latest_tag, target_variant)?;
     replace_current_binary(&staged)?;
     let _ = fs::remove_file(&staged);
 
-    println!("✓ Updated to sapient {latest}");
+    println!("✓ Updated to sapient {latest} ({})", target_variant.label());
     println!("  Run: sapient --version");
     Ok(())
 }

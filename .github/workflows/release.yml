@@ -86,13 +86,27 @@ jobs:
         if: matrix.features == 'mlx'
         run: brew install cmake
 
-      # mlx-rs compiles C++/Metal objects against the runner's SDK (macOS 14.x).
-      # Pin the deployment target so Rust's linker and those objects agree —
-      # otherwise the link fails with a min-version mismatch. Scoped to the
-      # Metal build so the plain CPU macOS binaries keep their macOS 11+ floor.
-      - name: Set macOS deployment target (Metal)
+      # Configure the Metal (MLX) build environment. Scoped to the Metal matrix
+      # entry so the plain CPU macOS binaries keep their macOS 11+ floor.
+      - name: Configure Metal (MLX) build env
         if: matrix.features == 'mlx'
-        run: echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
+        run: |
+          set -euo pipefail
+          # 1) Pin the deployment target so Rust's linker and mlx-sys' cmake-built
+          #    C++ objects agree on the min-OS version (avoids a version-min mismatch).
+          echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
+
+          # 2) mlx-sys' C++ uses __builtin_available, which emits the compiler-rt
+          #    builtin ___isPlatformVersionAtLeast. cmake-built objects don't link
+          #    clang's runtime, and rustc doesn't either, so the symbol is undefined.
+          #    Link libclang_rt.osx.a explicitly from the active Xcode toolchain.
+          RT_LIB=$(find "$(dirname "$(xcrun --find clang)")/../lib/clang" -name 'libclang_rt.osx.a' 2>/dev/null | head -n1)
+          if [ -z "$RT_LIB" ]; then
+            echo "::error::could not locate libclang_rt.osx.a in the Xcode toolchain"
+            exit 1
+          fi
+          echo "Linking clang runtime: $RT_LIB"
+          echo "RUSTFLAGS=-L native=$(dirname "$RT_LIB") -l static=clang_rt.osx" >> "$GITHUB_ENV"
 
       # ── Build ──────────────────────────────────────────────────────────────
       # Windows must use pwsh so MSVC link.exe is on PATH (Git Bash does not inherit it).
