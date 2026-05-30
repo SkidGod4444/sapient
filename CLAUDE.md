@@ -51,7 +51,7 @@ sapient-cli              ← the `sapient` binary (chat, pull, run, models, upda
   sapient-core           ← Tensor, DType, Shape, Buffer — used by everyone
 ```
 
-`sapient-ir`, `sapient-runtime`, `sapient-scheduler`, `sapient-telemetry` power a separate *graph-execution* path used by `sapient serve` (raw-tensor API server). The chat/generate path does **not** go through the IR; it uses the native forward engines directly.
+`sapient-ir`, `sapient-runtime`, `sapient-scheduler`, `sapient-telemetry` power a separate *graph-execution* path used internally. The chat/generate path does **not** go through the IR; it uses the native forward engines directly. `sapient serve` (OpenAI-compatible HTTP server) is implemented in `sapient-cli/src/server.rs` and drives the `Pipeline` API directly — it does not use the IR runtime.
 
 ## Key design decisions to know
 
@@ -75,12 +75,43 @@ Three loading paths in `sapient-io/src/gguf.rs`: `parse_metadata_only` (header K
 When `from_pretrained` downloads a GGUF-only repo (no `config.json`), the hub client sets `config_path` to the GGUF file itself. The pipeline detects this via extension and routes to `from_gguf_opts`, bypassing `ModelInfo::from_config_file`.
 
 ### SIMD hot paths
-`kernels/quant.rs` has three dispatch layers:
-1. `dot_q4_0_block_f32` / `dot_q8_0_block_f32` — dispatch to NEON on `aarch64`, scalar otherwise
-2. `dot_q8_0_row_f32` — additionally dispatches to AVX2+FMA on `x86_64` with runtime `is_x86_feature_detected!`
-3. `matmul_nt_q*` and `scaled_dot_product_attention` — parallelised with `rayon::par_iter_mut` / `par_chunks_mut` over the output dimension
+`kernels/quant.rs` has four dispatch layers:
+1. `dot_q4_0_block_f32` / `dot_q8_0_block_f32` — dispatch to NEON (`vfmaq_f32`) on `aarch64`, scalar otherwise.
+2. `dot_q8_0_row_f32` — additionally dispatches to AVX2+FMA on `x86_64` with runtime `is_x86_feature_detected!`.
+3. `dot_q4_k_block_f32` — NEON nibble-unpacking (`vshrq_n_u8` + `vandq_u8`) + `vfmaq_f32` FMA for Q4_K blocks.
+4. Native F16 GEMV: F16 weights decoded in NEON registers via `vcvt_f32_f16`, no intermediate F32 allocation.
+
+**Adaptive rayon chunking:** `gemv_chunk()` targets 4 tasks per core (not one task per output row). For a 151 936-row `lm_head` this avoids spawning 151 936 micro-tasks. `matmul_nt_q*` and `scaled_dot_product_attention` are parallelised with `rayon::par_iter_mut` / `par_chunks_mut` over the output dimension; `LlamaForward::forward_layer` uses `rayon::join` for parallel Q/K/V and gate/up projections.
+
+**Known compute bottleneck (Q8_0 NEON):** the i8→i16→i32→f32 widening chain requires ~10 NEON ops per 8 weights. Next improvement: SDOT integer arithmetic (ARMv8.4A, available on all M-series) for ~4× compute improvement.
 
 **Do not** add `-C target-cpu=native` to `.cargo/config.toml` for the `aarch64-apple-darwin` target — it causes `ring`'s compile-time const assertions to fail on CI runners.
+
+### Q8_0 KV cache (in-place, zero allocation)
+The KV cache is allocated as `DType::Q8_0` blocks (4× RAM reduction vs F32 for long contexts). Each decode step writes new K/V slices directly into the cache via `Tensor::as_bytes_mut()` — no per-step heap allocation. `as_bytes_mut()` is only valid on non-mmap tensors; the cache is always heap-allocated, so this invariant holds.
+
+### Flash-Edge attention
+`kernels/attention.rs` implements an online-softmax tiled attention algorithm that never materialises the full seq_q × seq_k score matrix. Working memory is O(head_dim). Uses NEON `vfmaq_f32` on `aarch64`. This replaces the previous naive `scaled_dot_product_attention` for the live-chat path.
+
+### Tensor API additions (v0.2.9)
+- `Tensor::from_f32_vec(Vec<f32>, shape)` — wraps a `Vec<f32>` as a tensor with zero copy (takes ownership).
+- `Tensor::as_bytes_mut()` — mutable byte slice into the underlying buffer for in-place quantized writes.
+- `CpuBuffer::from_f32_vec(Vec<f32>)` — low-level counterpart; wraps without copying.
+
+### Online quantization at load time
+F16/BF16 safetensors weights are auto-quantized to Q8_0 during loading (near-lossless, ~1.06 bytes/weight). This eliminates the F16→F32 expansion that previously dominated memory bandwidth for safetensors models.
+
+### Speculative decoding
+`SpeculativePipeline` wraps a draft and a target `Pipeline`. The draft model generates candidate tokens; `forward_all_logits` runs them through the target in a single batched forward pass for verification. Auto draft selection picks a smaller model from the registry automatically. Exposed via `sapient chat --speculative [--draft-model <alias>]` and `sapient serve --speculative`.
+
+### OpenAI-compatible HTTP server (`sapient serve`)
+`server.rs` in `sapient-cli` exposes a chat-completion server with the following endpoints:
+- `GET /v1/models` — list loaded model(s)
+- `POST /v1/chat/completions` — OpenAI-compatible chat
+- `POST /v1/completions` — raw completion
+- `GET /v1/health` — liveness check
+
+No model is loaded at startup; the first API request triggers download + load (Ollama-style lazy loading).
 
 ### Stop-sequence handling
 The streaming generator (`generate_stream`) buffers decoded text and withholds up to `max(stop_len)` bytes from the tail before emitting, preventing stop markers from leaking. Both EOS-by-token-id (multi-EOS, all candidates collected from the tokenizer vocab) and EOS-by-string are checked every step.

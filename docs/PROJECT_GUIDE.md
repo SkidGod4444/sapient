@@ -31,6 +31,40 @@ SAPIENT is written in a programming language called **Rust** 🦀, which is love
 
 ---
 
+## 1b. What's new in v0.2.9 (current release)
+
+A lot changed between the first public release and today! Here is a quick summary before we
+dive into the internals.
+
+**Performance leap (Sprint 1–3 engine overhaul):**
+- Flash-Edge attention: online-softmax tiled algorithm — O(head_dim) working memory, NEON `vfmaq_f32`.
+- Q8_0 KV cache: in-place mutable updates via `Tensor::as_bytes_mut()` — 4× RAM reduction vs F32 for long contexts.
+- Online quantization: F16/BF16 safetensors weights auto-quantized to Q8_0 at load time (no more F16→F32 expansion).
+- Native F16 GEMV: decoded in NEON registers (`vcvt_f32_f16`), no intermediate F32 allocation.
+- NEON Q4_K GEMV: nibble-unpacking + `vfmaq_f32` FMA.
+- Zero-copy matmul outputs: `Tensor::from_f32_vec()` takes `Vec` ownership without copying.
+- Adaptive rayon chunking: `gemv_chunk()` targets 4 tasks/core — avoids 151 936 micro-tasks for `lm_head`.
+- Parallel Q/K/V and gate/up projections via `rayon::join` in `LlamaForward::forward_layer`.
+
+**Measured results on Apple M-series (CPU, Q8_0 GGUF):**
+| Model | Before | After | Gain |
+|---|---|---|---|
+| Qwen2.5-0.5B Q8_0 | 10 tok/s | 18.9 tok/s | +89% |
+| Qwen2.5-1.5B Q8_0 | 4.2 tok/s | 10.0 tok/s | +138% |
+
+**New features:**
+- `sapient serve` — OpenAI-compatible HTTP server (`GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/completions`, `GET /v1/health`). Lazy model loading on first request (Ollama-style).
+- `sapient chat --speculative [--draft-model <alias>]` — speculative decoding with auto-selected draft model.
+- `sapient reset` / `sapient rm` — alias resolution fixed; now correctly resolves `openhorizon/*` aliases.
+- ENOSPC auto-cleanup during `sapient pull` (disk-full guard).
+- GitHub API rate-limit fallback in `sapient update`.
+
+**Benchmark infrastructure:**
+- `scripts/benchmark-compare.sh` — portable multi-engine benchmark (SAPIENT vs llama.cpp vs Ollama vs llamafile).
+- `scripts/gen-benchmark-report.py` — generates `docs/BENCHMARKS.md` from JSON results.
+
+---
+
 ## 2. How does the parrot actually "think"? (still pretty simple)
 
 The parrot doesn't know words. It only knows **numbers**. So we play a translation game:
@@ -207,9 +241,14 @@ tokens, streams text, and stops at the right time.
 - `lib.rs` — front door; exposes `GenerationConfig` and `SamplingStrategy`.
 - `pipeline.rs` — the `Pipeline`: load a model, `generate`, `chat`, `generate_stream`,
   `embed`. Handles chat templates, stop sequences, and **multi-EOS** stopping.
+- `speculative.rs` — `SpeculativePipeline`: wraps a draft + target `Pipeline`; draft generates
+  candidates, target verifies via `forward_all_logits` in a single batched forward pass.
+  Auto-selects a smaller registry model as the draft when `--draft-model` is omitted.
 - `sampler.rs` — **how to pick the next token**: greedy (highest score), temperature,
   top-k, top-p, and repetition penalty.
-- `kv_cache.rs` — the memory notebook (KV cache) helpers.
+- `kv_cache.rs` — the memory notebook (KV cache) helpers. As of v0.2.9 the cache is allocated
+  as Q8_0 blocks (4× RAM reduction vs F32) and updated in-place via `Tensor::as_bytes_mut()`
+  with zero per-step allocation.
 
 ### 🗓️ `sapient-scheduler` — running many requests (server mode)
 Batches and schedules inference requests so a server can handle several at once.
@@ -258,13 +297,18 @@ The hook for running on a Mac's GPU via Apple's **MLX**. Enabled when built with
 The `sapient` command-line program: parses commands, shows the modern UI, and calls the
 libraries above.
 - `main.rs` — defines all commands (`chat`, `pull`, `run`, `list`, `models`, `info`,
-  `serve`, `login`, `update`, …) and wires them up.
+  `serve`, `login`, `update`, `reset`, `rm`, …) and wires them up.
 - `ui.rs` — the **modern terminal UI**: banner, colored role "chip" badges, spinners,
   tables, success/error messages, and the tokens/sec stat line.
 - `hub.rs` — CLI-side model management (list cached, remove, login, resolve paths).
-- `progress.rs` — the live download progress bar.
-- `server.rs` — the raw-tensor HTTP server (`/v1/infer`, `/v1/health`, …) for graph files.
-- `update.rs` — `sapient update`: self-updates the binary from GitHub releases.
+  `reset` and `rm` now correctly resolve `openhorizon/*` aliases before deleting.
+- `progress.rs` — the live download progress bar; includes ENOSPC auto-cleanup on disk-full.
+- `server.rs` — the **OpenAI-compatible HTTP server** (`GET /v1/models`,
+  `POST /v1/chat/completions`, `POST /v1/completions`, `GET /v1/health`). No model is loaded
+  at startup; the first API request triggers download + load (Ollama-style lazy loading).
+  Supports `--speculative` flag for chat completions.
+- `update.rs` — `sapient update`: self-updates the binary from GitHub releases, with
+  GitHub API rate-limit fallback.
 
 ---
 
@@ -432,16 +476,17 @@ muscles, and everyone shares the basic toolbox at the bottom.
 For **CPU inference** on any platform (Linux, Raspberry Pi, etc.), always use a GGUF
 quantized model rather than F16 safetensors:
 
-| Model | Format | RAM needed | Typical tok/s (Apple M4, CPU) |
+| Model | Format | RAM needed | Typical tok/s (Apple M-series, CPU) |
 |---|---|---|---|
-| `openhorizon/qwen2.5-0.5b-q4` | GGUF Q8_0 | ~640 MB | ~17 tok/s |
+| `openhorizon/qwen2.5-0.5b-q4` | GGUF Q8_0 | ~640 MB | ~18–19 tok/s |
+| `openhorizon/qwen2.5-1.5b-q4` | GGUF Q8_0 | ~1.6 GB | ~10 tok/s |
 | `openhorizon/phi-2-q4` | GGUF Q8_0 | ~2.8 GB | ~5 tok/s |
-| `openhorizon/phi-2` | F16 safetensors | ~5.2 GB | ~0.8 tok/s |
+| `openhorizon/phi-2` | F16 safetensors | ~2.7 GB | ~2–3 tok/s |
 
-The F16 safetensors path is slow on CPU because every token requires converting
-large weight matrices from F16 → F32 (phi-2 MLP weights are 52 MB each × 64 per layer).
-GGUF Q4/Q8 keeps weights quantized in memory and dequantizes one 32-element block at
-a time inside the dot product, so memory bandwidth is 4–8× lower.
+As of v0.2.9, F16 safetensors weights are **auto-quantized to Q8_0 at load time** (online
+quantization), eliminating the F16→F32 conversion overhead on every token. GGUF Q4/Q8 still
+wins on RAM because the quantized blocks stay compressed in memory and dequantize one
+32-element block at a time inside the dot product (4–8× lower memory bandwidth vs F32).
 
 ### Apple Silicon: Metal GPU
 
@@ -449,12 +494,15 @@ Build with `--features mlx` to enable the Metal GPU backend. MLX uses Apple Sili
 unified memory — there's no CPU↔GPU copy overhead. The engine picks Metal automatically
 when the model fits in memory (`sapient backend-info` shows the capacity).
 
-Key changes shipped in Phase 2/3/4:
+Key changes shipped across phases:
 - **Phase 2**: rayon parallel dot products across output rows + NEON SIMD (Q4_0, Q8_0).
 - **Phase 3**: MLX persistent weight cache (upload each weight to GPU once, reuse per token),
   GQA fallback to CPU attention, auto backend selection by available unified memory.
 - **Phase 4** (v0.2.3): memory-mapped GGUF loading — run models larger than your RAM.
-- **v0.2.6**: Native K-quant inference (Q4_K, Q5_K, Q6_K dequant on-the-fly, no F32 expansion), OpenAI-compatible `sapient serve`.
+- **v0.2.6**: Native K-quant inference (Q4_K, Q5_K, Q6_K dequant on-the-fly, no F32 expansion).
+- **v0.2.9**: Flash-Edge attention (online-softmax, O(head_dim) memory), Q8_0 KV cache (in-place,
+  4× RAM reduction), online F16→Q8_0 quantization at load time, native F16/Q4_K NEON GEMV,
+  adaptive rayon chunking, speculative decoding, OpenAI-compatible `sapient serve`.
 
 ### Phase 4: Memory-mapped GGUF (bigger-than-RAM models, Raspberry Pi)
 

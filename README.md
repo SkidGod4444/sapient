@@ -67,6 +67,10 @@ sapient models
 sapient chat openhorizon/phi-2
 sapient chat openhorizon/qwen2.5-0.5b --backend auto   # auto | cpu | metal
 
+# Speculative decoding (faster generation with a draft model)
+sapient chat openhorizon/qwen2.5-1.5b --speculative
+sapient chat openhorizon/qwen2.5-1.5b --speculative --draft-model openhorizon/qwen2.5-0.5b
+
 # One-shot completion (Hub models need --prompt)
 sapient run openhorizon/phi-2 --prompt "Explain transformers in simple terms"
 
@@ -77,6 +81,10 @@ sapient pull openhorizon/phi-2
 sapient list
 sapient rm openhorizon/phi-2   # remove one model
 sapient reset                  # clear entire cache
+
+# OpenAI-compatible HTTP server (lazy model load on first request)
+sapient serve --port 8080
+sapient serve --port 8080 --speculative
 
 # Update sapient to the latest release
 sapient update
@@ -122,7 +130,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-sapient-generate = "0.1"
+sapient-generate = "0.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -207,26 +215,59 @@ and validating its architecture in `sapient-models`.
 
 ---
 
-## HTTP Server (advanced)
+## Performance (v0.2.9, CPU, Apple M-series)
 
-`sapient serve` exposes a low-level **raw-tensor** inference server for compiled
-ONNX/GGUF graph files — not the chat pipeline. It is intended for embedding SAPIENT's
-graph runtime into other services.
+SAPIENT v0.2.9 ships a fully overhauled CPU engine (Flash-Edge attention, Q8_0 KV cache,
+NEON GEMV kernels, adaptive rayon chunking). Measured on Apple M-series, GGUF Q8_0 models:
+
+| Model | v0.2.8 | v0.2.9 | Change |
+|---|---|---|---|
+| Qwen2.5-0.5B Q8_0 | ~10 tok/s | ~18.9 tok/s | **+89%** |
+| Qwen2.5-1.5B Q8_0 | ~4.2 tok/s | ~10.0 tok/s | **+138%** |
+
+Key improvements behind these numbers:
+- **Flash-Edge attention** — online-softmax, O(head_dim) working memory, NEON `vfmaq_f32`.
+- **Q8_0 KV cache** — 4× RAM reduction vs F32; zero per-step heap allocation.
+- **Online quantization** — F16/BF16 safetensors weights auto-quantized to Q8_0 at load (no more F16→F32 per token).
+- **NEON GEMV kernels** — native F16 (`vcvt_f32_f16`) and Q4_K nibble-unpacking + FMA.
+- **Adaptive rayon** — `gemv_chunk()` targets 4 tasks/core; avoids micro-task overhead on large vocab projections.
+
+---
+
+## HTTP Server — OpenAI-compatible
+
+`sapient serve` starts an **OpenAI-compatible HTTP server** backed by the native chat
+pipeline. No model is loaded at startup — the first API request triggers model download
+and load automatically (Ollama-style lazy loading).
 
 ```bash
-sapient serve ./model.onnx --port 8080
+# Start the server (lazy model load on first request)
+sapient serve --port 8080
+
+# With speculative decoding enabled
+sapient serve --port 8080 --speculative
 ```
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /v1/infer` | Run a single inference (tensors in → tensors out) |
-| `POST /v1/batch_infer` | Run an explicit batch |
-| `GET /v1/health` | Health check |
-| `GET /v1/metrics` | Prometheus-style text metrics |
+| `GET /v1/models` | List loaded model(s) |
+| `POST /v1/chat/completions` | OpenAI-compatible chat completion |
+| `POST /v1/completions` | Raw text completion |
+| `GET /v1/health` | Liveness check |
 
-> A high-level OpenAI-compatible chat endpoint (`/v1/chat/completions`) is on the
-> roadmap but **not implemented yet** — use `sapient chat` / the Rust `Pipeline` API
-> for text generation today.
+Example with `curl`:
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openhorizon/qwen2.5-0.5b-q4",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+The server is compatible with any OpenAI-client SDK or tool (LangChain, LlamaIndex, etc.)
+by pointing the base URL at `http://localhost:8080/v1`.
 
 ---
 
@@ -250,6 +291,7 @@ Built in Rust for maximum performance, with zero dependencies on Python, ONNX Ru
 
 ```
 sapient-generate          ← Pipeline API — from_pretrained, generate, chat, embed, stream
+                             SpeculativePipeline — draft+target speculative decoding
 ├── sapient-hub           ← HuggingFace Hub client — parallel downloads, auth, cache, registry
 ├── sapient-tokenizers    ← All HF tokenizer types + Jinja2 chat templates
 ├── sapient-models        ← Forward engines: Phi (Phi-1/1.5/2) and Llama (Llama/Qwen2.5/SmolLM2/TinyLlama/Mistral)
@@ -258,12 +300,14 @@ sapient-generate          ← Pipeline API — from_pretrained, generate, chat, 
 │   ├── sapient-ir        ← Computation graph IR + optimization passes
 │   └── sapient-io        ← Safetensors, GGUF (Q4/Q8/Q5 dequant), ONNX loaders
 │
-├── sapient-backends-cpu    ← CPU kernels: GQA attention, RoPE, RMSNorm/LayerNorm, MatMul…
+├── sapient-backends-cpu    ← CPU kernels: Flash-Edge attention, RoPE, RMSNorm/LayerNorm,
+│                             MatMul, NEON Q4_0/Q8_0/Q4_K/F16 GEMV, AVX2 Q8_0
 └── sapient-backends-metal  ← Apple Silicon Metal/MLX backend (built with `--features mlx`)
 ```
 
 > Generation runs through two validated forward engines — **Phi** and **Llama** (the
-> latter also serves Qwen2.5, SmolLM2, TinyLlama and Mistral). Additional architecture
+> latter also serves Qwen2.5, SmolLM2, TinyLlama and Mistral). `sapient serve` drives
+> these engines directly via the `Pipeline` API (OpenAI-compatible). Additional architecture
 > builders (Gemma, GPT-2, BERT, Mixtral) exist in the IR layer but are not yet wired into
 > the chat/generation path.
 

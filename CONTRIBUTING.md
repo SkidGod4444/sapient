@@ -123,6 +123,61 @@ sapient-generate → sapient-runtime → sapient-backends-cpu, sapient-io, sapie
 
 When adding a dependency, keep layers acyclic — lower crates must not depend on higher ones.
 
+### Key subsystems to know before contributing
+
+**Two forward engines, not one per architecture.** Only `LlamaForward` and `PhiForward` are wired
+to the live chat `Pipeline`. Architecture builders in `sapient-models/src/architectures/` target
+the IR graph path and are **not** used during inference. Adding a new model means adding a forward
+engine, not an architecture builder (unless it is for the graph path).
+
+**Quantized storage.** `DType::Q4_0` and `DType::Q8_0` store raw ggml block bytes. The key
+invariant is that `as_bytes()` on a quantized tensor returns exactly `byte_count(numel)` bytes.
+Use `as_quant_blocks()` to iterate raw blocks and `to_f32_vec()` to dequantize. Never call
+`as_bytes_mut()` on a mmap-backed tensor (undefined behavior); it is only valid on heap-allocated
+buffers such as the KV cache.
+
+**Flash-Edge attention.** `kernels/attention.rs` uses an online-softmax tiled algorithm that
+never materialises the full seq_q × seq_k score matrix (O(head_dim) working memory). If you
+modify attention code, do not revert to the naive materialised path.
+
+**Q8_0 KV cache.** The KV cache is allocated as Q8_0 blocks and updated in-place via
+`Tensor::as_bytes_mut()`. Each decode step writes directly into the existing allocation — there
+must be no `Vec` alloc inside the decode loop. Preserve this invariant when touching `kv_cache.rs`.
+
+**`sapient serve` vs the graph runtime.** The OpenAI-compatible server in `sapient-cli/src/server.rs`
+drives the `Pipeline` API directly. The `sapient-ir`/`sapient-runtime` graph execution path is
+separate and is not involved in chat completions.
+
+---
+
+### SIMD kernel dispatch pattern
+
+All SIMD kernels in `sapient-backends-cpu/src/kernels/quant.rs` follow a three-layer pattern:
+
+1. **Scalar fallback** — always correct, no platform assumptions, used on x86 without AVX2 and on
+   non-NEON ARM.
+2. **`#[cfg(target_arch = "aarch64")]` static dispatch** — compiled unconditionally on aarch64
+   (all Apple M-series, Raspberry Pi 64-bit). Uses `std::arch::aarch64::*` intrinsics. No runtime
+   check needed because all aarch64 targets have NEON.
+3. **`#[cfg(target_arch = "x86_64")]` + `is_x86_feature_detected!` runtime dispatch** — AVX2+FMA
+   checked at runtime. The scalar fallback handles older x86_64 CPUs automatically.
+
+When adding a new SIMD kernel:
+- Put the scalar implementation first; it is the specification.
+- Gate aarch64 blocks with `#[cfg(target_arch = "aarch64")]` (not `target_feature`).
+- Use `is_x86_feature_detected!("avx2")` inside an `if` at runtime for x86_64.
+- **Do not** add `-C target-cpu=native` or `target_feature = "+neon"` to `.cargo/config.toml`
+  for the `aarch64-apple-darwin` target — it breaks `ring`'s compile-time const assertions on CI.
+
+### Adaptive rayon chunking pattern
+
+CPU kernels that parallelize over a large output dimension (e.g. `matmul_nt`, `gemv`) must use
+`gemv_chunk()` rather than `par_iter_mut()` directly over individual output rows. The chunk size
+targets **4 tasks per logical core** so that a 151 936-row `lm_head` produces ~(4 × cores) tasks
+instead of 151 936 micro-tasks. This avoids rayon scheduler overhead dominating on large vocab
+projections. When writing a new parallelised kernel, follow the `gemv_chunk()` pattern rather
+than raw `par_chunks_mut` with a chunk size of 1.
+
 ---
 
 ## Development workflow
@@ -290,14 +345,18 @@ These are especially welcome:
 
 | Area | Location | Notes |
 |---|---|---|
-| **Model architectures** | `crates/sapient-models/src/` | Llama, Phi, Gemma, Qwen, … |
-| **CPU kernels** | `crates/sapient-backends/cpu/src/kernels/` | Attention, RoPE, matmul, … |
-| **Metal / GPU backend** | `crates/sapient-backends/metal/` | Apple Silicon — WIP |
-| **Hub client** | `crates/sapient-hub/` | Downloads, caching, auth |
+| **Model architectures** | `crates/sapient-models/src/forward/` | Llama, Phi — forward engines for live chat |
+| **CPU kernels** | `crates/sapient-backends-cpu/src/kernels/` | Attention (Flash-Edge), RoPE, matmul, quant dot-products |
+| **SIMD dispatch** | `kernels/quant.rs` | NEON (aarch64) + AVX2 (x86_64) + scalar fallback |
+| **Speculative decoding** | `crates/sapient-generate/src/speculative.rs` | Draft/target pipeline, `forward_all_logits` |
+| **HTTP server** | `crates/sapient-cli/src/server.rs` | OpenAI-compatible `/v1/chat/completions` |
+| **Metal / GPU backend** | `crates/sapient-backends-metal/` | Apple Silicon — WIP |
+| **Hub client** | `crates/sapient-hub/` | Downloads, caching, auth, registry |
 | **CLI UX** | `crates/sapient-cli/` | Commands, terminal UI |
 | **Tokenizers / chat templates** | `crates/sapient-tokenizers/` | HF tokenizer edge cases |
 | **Docs & examples** | `README.md`, crate doc comments | |
 | **Install scripts** | `install.sh`, `install.ps1` | Must work on fresh machines |
+| **Benchmarks** | `scripts/benchmark-compare.sh`, `scripts/gen-benchmark-report.py` | Multi-engine comparison suite |
 
 ---
 
