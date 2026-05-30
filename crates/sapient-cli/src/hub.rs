@@ -142,7 +142,14 @@ pub fn clear_stale_downloads() -> Result<u64> {
 /// Delete one model from the local HuggingFace Hub cache.
 pub fn clear_cached_model(model_id: &str) -> Result<u64> {
     let hub_cache = hub_cache_root().context("HuggingFace Hub cache directory not found")?;
-    let dir = hub_cache.join(model_cache_dir_name(model_id));
+
+    // Resolve the registry alias to the actual HuggingFace repo_id.
+    // "openhorizon/deepseek-r1-8b" → "unsloth/DeepSeek-R1-Distill-Llama-8B-GGUF"
+    // The cache directory is keyed on the real repo_id, not the alias.
+    let actual_id = sapient_hub::registry::resolve_model_alias(model_id)
+        .unwrap_or_else(|_| model_id.to_string());
+
+    let dir = hub_cache.join(model_cache_dir_name(&actual_id));
     if !dir.is_dir() {
         anyhow::bail!("Model '{model_id}' is not in the local cache");
     }

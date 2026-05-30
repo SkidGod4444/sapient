@@ -543,6 +543,32 @@ async fn pull_command(model: &str, verbose: bool) -> Result<()> {
         }
         Err(e) => {
             handle.finish_error();
+            // Detect ENOSPC (os error 28) and auto-clean partial downloads,
+            // then re-surface with a clear "what to do" message.
+            let msg = e.to_string();
+            if msg.contains("os error 28")
+                || msg.contains("No space left on device")
+                || msg.contains("ENOSPC")
+            {
+                // Auto-clean the orphaned .sync.part files left by the failed download.
+                let freed = hub::clear_stale_downloads().unwrap_or(0);
+                let freed_str = if freed > 0 {
+                    format!(
+                        "\n  {} of incomplete download files were automatically removed.",
+                        hub::format_bytes(freed)
+                    )
+                } else {
+                    String::new()
+                };
+                anyhow::bail!(
+                    "Disk full while downloading '{model}'.{freed_str}\n\n\
+                     To free more space:\n\
+                     \n  sapient reset --stale          # remove all partial downloads\
+                     \n  sapient reset {model}           # remove this model entirely\
+                     \n  sapient reset                  # clear all cached models\
+                     \n\nOr retry with a smaller quant (Q4_K_M uses ~half the disk of Q8_0)."
+                );
+            }
             Err(e)
         }
     }
