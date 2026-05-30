@@ -767,6 +767,8 @@ impl Pipeline {
             match &*engine {
                 ForwardEngine::Llama(f) => return f.backend_label(),
                 ForwardEngine::Phi(_) => {}
+                #[cfg(all(target_os = "macos", feature = "mlx"))]
+                ForwardEngine::MlxLlama(_) => return "metal (MLX native graph)".to_string(),
             }
         }
         self.backend.to_string()

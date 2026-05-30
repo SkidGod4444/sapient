@@ -3,6 +3,8 @@
 pub mod backend;
 pub mod common;
 mod llama;
+#[cfg(all(target_os = "macos", feature = "mlx"))]
+mod mlx_engine;
 mod phi;
 
 use std::path::{Path, PathBuf};
@@ -15,12 +17,19 @@ use crate::gguf_weights::{load_gguf_hf_weights, load_gguf_hf_weights_mmap};
 
 pub use backend::{mac_gpu_support, total_system_ram_bytes, LlmBackendKind, MacGpuSupport};
 pub use llama::LlamaForward;
+#[cfg(all(target_os = "macos", feature = "mlx"))]
+pub use mlx_engine::MlxForwardEngine;
 pub use phi::PhiForward;
 
 /// Architecture-specific inference engine with KV-cache support.
 pub enum ForwardEngine {
     Llama(LlamaForward),
     Phi(PhiForward),
+    /// Fully MLX-native Llama-family engine: all activations stay as GPU arrays
+    /// throughout the forward pass, one eval() per decode step.
+    /// Enabled when `--backend metal` (or `auto` on Apple Silicon) for Llama/Qwen/Mistral.
+    #[cfg(all(target_os = "macos", feature = "mlx"))]
+    MlxLlama(MlxForwardEngine),
 }
 
 fn weight_format_from_paths(weight_paths: &[PathBuf]) -> WeightFormat {
@@ -33,6 +42,21 @@ fn weight_format_from_paths(weight_paths: &[PathBuf]) -> WeightFormat {
         Some("safetensors") => WeightFormat::Safetensors,
         Some("bin") => WeightFormat::PyTorchBin,
         _ => WeightFormat::Unknown,
+    }
+}
+
+/// Returns true when the Metal backend is requested/auto-selected on Apple Silicon.
+fn use_mlx_engine(backend: LlmBackendKind) -> bool {
+    #[cfg(all(target_os = "macos", feature = "mlx"))]
+    {
+        use backend::MetalLlmBackend;
+        matches!(backend, LlmBackendKind::Metal | LlmBackendKind::Auto)
+            && MetalLlmBackend::is_available()
+    }
+    #[cfg(not(all(target_os = "macos", feature = "mlx")))]
+    {
+        let _ = backend;
+        false
     }
 }
 
@@ -93,7 +117,6 @@ impl ForwardEngine {
     }
 
     /// Load via memory-mapping — Q4_0/Q8_0 tensors are zero-copy from disk.
-    /// The OS pages in weight blocks on demand; only active layers are resident.
     pub fn from_gguf_mmap_with_backend(
         info: ModelInfo,
         path: &Path,
@@ -110,6 +133,18 @@ impl ForwardEngine {
     ) -> Result<Self> {
         match info.arch {
             ArchType::Llama | ArchType::Qwen | ArchType::Gemma | ArchType::Mixtral => {
+                // Use the fully-native MLX engine when Metal is available and selected.
+                if use_mlx_engine(backend) {
+                    #[cfg(all(target_os = "macos", feature = "mlx"))]
+                    {
+                        tracing::info!(
+                            "using MlxForwardEngine (lazy-graph, no CPU↔GPU round-trips)"
+                        );
+                        return Ok(Self::MlxLlama(MlxForwardEngine::from_weights(
+                            info, weights,
+                        )?));
+                    }
+                }
                 Ok(Self::Llama(LlamaForward::from_weights_with_backend(
                     info, weights, backend,
                 )?))
@@ -128,6 +163,8 @@ impl ForwardEngine {
         match self {
             Self::Llama(f) => f.reset_cache(),
             Self::Phi(f) => f.reset_cache(),
+            #[cfg(all(target_os = "macos", feature = "mlx"))]
+            Self::MlxLlama(f) => f.reset_cache(),
         }
     }
 
@@ -135,16 +172,17 @@ impl ForwardEngine {
         match self {
             Self::Llama(f) => f.forward_logits(input_ids, use_cache),
             Self::Phi(f) => f.forward_logits(input_ids, use_cache),
+            #[cfg(all(target_os = "macos", feature = "mlx"))]
+            Self::MlxLlama(f) => f.forward_logits(input_ids, use_cache),
         }
     }
 
-    /// Run the model on `input_ids` WITHOUT updating the KV cache and return
-    /// logits for ALL positions. Used by speculative decoding to verify K draft
-    /// tokens in a single target-model forward pass.
     pub fn forward_all_logits(&mut self, input_ids: &[u32]) -> Result<Vec<Vec<f32>>> {
         match self {
             Self::Llama(f) => f.forward_all_logits(input_ids),
             Self::Phi(f) => f.forward_all_logits(input_ids),
+            #[cfg(all(target_os = "macos", feature = "mlx"))]
+            Self::MlxLlama(f) => f.forward_all_logits(input_ids),
         }
     }
 
@@ -152,6 +190,12 @@ impl ForwardEngine {
         match self {
             Self::Llama(f) => f.embed(input_ids),
             Self::Phi(f) => f.embed(input_ids),
+            #[cfg(all(target_os = "macos", feature = "mlx"))]
+            Self::MlxLlama(f) => {
+                // No embed method yet — delegate to a one-shot forward pass
+                let _ = input_ids;
+                bail!("embed() not yet implemented for MlxForwardEngine")
+            }
         }
     }
 
@@ -160,14 +204,18 @@ impl ForwardEngine {
         match self {
             Self::Llama(f) => f.is_hybrid(),
             Self::Phi(f) => f.is_hybrid(),
+            #[cfg(all(target_os = "macos", feature = "mlx"))]
+            Self::MlxLlama(_) => false,
         }
     }
 
-    /// Human-readable backend label, e.g. "metal+cpu hybrid (24/32 layers on GPU)".
+    /// Human-readable backend label.
     pub fn backend_label(&self) -> String {
         match self {
             Self::Llama(f) => f.backend_label(),
             Self::Phi(f) => f.backend_label(),
+            #[cfg(all(target_os = "macos", feature = "mlx"))]
+            Self::MlxLlama(_) => "metal (MLX native graph)".to_string(),
         }
     }
 }
