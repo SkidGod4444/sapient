@@ -8,8 +8,8 @@ use sapient_hub::model_info::ModelInfo;
 
 use super::backend::{LlmBackend, LlmBackendDispatch, LlmBackendKind};
 use super::common::{
-    embed_tokens, mean_pool_hidden, merge_heads, quantize_tensor_to_q8_0,
-    should_quantize_online, split_heads,
+    embed_tokens, mean_pool_hidden, merge_heads, quantize_tensor_to_q8_0, should_quantize_online,
+    split_heads,
 };
 use crate::weights::{
     detect_weight_prefix, load_hf_weights, resolve_bias, resolve_lm_head, resolve_weight,
@@ -65,8 +65,8 @@ fn compute_backend_split(
                 return (LlmBackendKind::Metal, 0, None);
             }
             // How many layers fit in the Metal budget (including KV headroom)?
-            let gpu_layers = ((budget as f64 / (bytes_per_layer as f64 * 1.5)) as usize)
-                .min(num_layers - 1); // keep at least one CPU layer
+            let gpu_layers =
+                ((budget as f64 / (bytes_per_layer as f64 * 1.5)) as usize).min(num_layers - 1); // keep at least one CPU layer
 
             if gpu_layers >= num_layers / 4 {
                 // Worthwhile split: at least 25% of layers on GPU.
@@ -183,7 +183,10 @@ impl LlamaForward {
                 "hybrid Metal+CPU mode: first {gpu_layers} layers on Metal"
             );
         } else {
-            tracing::debug!(backend = backend.name(), "initialized Llama forward backend");
+            tracing::debug!(
+                backend = backend.name(),
+                "initialized Llama forward backend"
+            );
         }
 
         let max_seq = info.max_position_embeddings;
@@ -250,8 +253,7 @@ impl LlamaForward {
         if self.is_hybrid() {
             format!(
                 "metal+cpu hybrid ({}/{} layers on GPU)",
-                self.gpu_layers,
-                self.info.num_hidden_layers
+                self.gpu_layers, self.info.num_hidden_layers
             )
         } else {
             self.backend.name().to_string()
@@ -323,9 +325,8 @@ impl LlamaForward {
         //
         // Implementation note: we extract the references BEFORE any &mut borrows
         // of self.cache (Rust allows partial field borrows but not through methods).
-        let on_gpu = !(self.gpu_layers > 0
-            && layer_idx >= self.gpu_layers
-            && self.cpu_fallback.is_some());
+        let on_gpu =
+            !(self.gpu_layers > 0 && layer_idx >= self.gpu_layers && self.cpu_fallback.is_some());
 
         let pfx = format!("layers.{layer_idx}");
         let eps = self.info.rms_norm_eps as f32;
@@ -357,10 +358,12 @@ impl LlamaForward {
             let v_name = format!("{pfx}.self_attn.v_proj");
             let (q, k, v) = if bk.is_cpu() {
                 let ((qr, kr), vr) = rayon::join(
-                    || rayon::join(
-                        || self.linear_with(&h, &q_name, bk),
-                        || self.linear_with(&h, &k_name, bk),
-                    ),
+                    || {
+                        rayon::join(
+                            || self.linear_with(&h, &q_name, bk),
+                            || self.linear_with(&h, &k_name, bk),
+                        )
+                    },
                     || self.linear_with(&h, &v_name, bk),
                 );
                 (qr?, kr?, vr?)
@@ -418,10 +421,7 @@ impl LlamaForward {
         let gate_w = resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.mlp.gate_proj"))?;
         let up_w = resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.mlp.up_proj"))?;
         let (gate, up) = if bk.is_cpu() {
-            let (gr, ur) = rayon::join(
-                || bk.linear_3d(&h, gate_w),
-                || bk.linear_3d(&h, up_w),
-            );
+            let (gr, ur) = rayon::join(|| bk.linear_3d(&h, gate_w), || bk.linear_3d(&h, up_w));
             (gr?, ur?)
         } else {
             (bk.linear_3d(&h, gate_w)?, bk.linear_3d(&h, up_w)?)

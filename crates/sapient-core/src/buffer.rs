@@ -145,16 +145,21 @@ impl CpuBuffer {
             return Self::with_capacity(0, 4);
         }
         let len = data.len() * 4;
-        let layout = Layout::array::<f32>(data.len())
-            .map_err(|_| SapientError::AllocationFailed { bytes: len, align: 4 })?;
+        let layout =
+            Layout::array::<f32>(data.len()).map_err(|_| SapientError::AllocationFailed {
+                bytes: len,
+                align: 4,
+            })?;
         let ptr = data.as_ptr() as *mut u8;
         // SAFETY: We transfer ownership from the Vec — `forget` prevents the Vec's
         // drop from freeing the allocation; we free it ourselves in CpuBuffer::drop
         // using the same layout that the Vec's allocator used.
         std::mem::forget(data);
         Ok(Self {
-            ptr: NonNull::new(ptr)
-                .ok_or(SapientError::AllocationFailed { bytes: len, align: 4 })?,
+            ptr: NonNull::new(ptr).ok_or(SapientError::AllocationFailed {
+                bytes: len,
+                align: 4,
+            })?,
             len,
             align: std::mem::align_of::<f32>(),
             layout,

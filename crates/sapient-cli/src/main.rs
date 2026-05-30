@@ -492,7 +492,10 @@ async fn chat_command(
             .find(|m| {
                 (m.alias.contains("-q4") || m.alias.contains("-q8"))
                     && (m.alias.contains(
-                        model.rsplit('/').next().unwrap_or(model)
+                        model
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(model)
                             .trim_end_matches("-instruct")
                             .trim_end_matches("-chat"),
                     ))
@@ -1008,8 +1011,14 @@ fn devices_command() -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         use sapient_generate::device::ComputeApi;
-        let has_cuda = profile.gpus.iter().any(|g| g.apis.contains(&ComputeApi::Cuda));
-        let has_dx12 = profile.gpus.iter().any(|g| g.apis.contains(&ComputeApi::DirectX12));
+        let has_cuda = profile
+            .gpus
+            .iter()
+            .any(|g| g.apis.contains(&ComputeApi::Cuda));
+        let has_dx12 = profile
+            .gpus
+            .iter()
+            .any(|g| g.apis.contains(&ComputeApi::DirectX12));
         if has_cuda {
             println!(
                 "\n  {}  NVIDIA GPU detected with CUDA — DirectML/Vulkan compute backend planned.",
@@ -1033,10 +1042,7 @@ fn devices_command() -> Result<()> {
         for m in &cached {
             // Look up model size from registry to compute recommendation
             let plan = recommend_backend(&profile, 0, 32); // 0 = unknown size
-            println!(
-                "    {m:<36} → {}",
-                console::style(plan.label()).dim()
-            );
+            println!("    {m:<36} → {}", console::style(plan.label()).dim());
         }
         println!();
     }
@@ -1046,10 +1052,7 @@ fn devices_command() -> Result<()> {
         use sapient_generate::device::ComputeApi;
         g.apis.contains(&ComputeApi::Metal)
     }) {
-        println!(
-            "  {}",
-            console::style("Tips:").bold()
-        );
+        println!("  {}", console::style("Tips:").bold());
         println!("    sapient chat --backend metal <model>   # force Metal GPU");
         println!("    sapient chat --backend cpu   <model>   # force CPU");
         println!("    sapient chat --backend auto  <model>   # auto-select (default)");

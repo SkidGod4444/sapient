@@ -93,9 +93,9 @@ fn saxpby_neon(o: &mut [f32], v: &[f32], alpha: f32, beta: f32) {
 /// `offset = seq_k - seq_q` is the KV-cache prefix length.
 #[inline(always)]
 fn flash_attn_row(
-    q_row: &[f32],   // [head_dim]
-    k_head: &[f32],  // [seq_k * head_dim] contiguous
-    v_head: &[f32],  // [seq_k * head_dim] contiguous
+    q_row: &[f32],     // [head_dim]
+    k_head: &[f32],    // [seq_k * head_dim] contiguous
+    v_head: &[f32],    // [seq_k * head_dim] contiguous
     o_row: &mut [f32], // [head_dim] — written in place
     scale: f32,
     _seq_k: usize,
@@ -104,7 +104,7 @@ fn flash_attn_row(
     mask_row: Option<&[f32]>, // optional additive mask for this query row, length seq_k
 ) {
     let mut m = f32::NEG_INFINITY; // running max
-    let mut l = 0.0f32;            // running sum of exp weights
+    let mut l = 0.0f32; // running sum of exp weights
 
     // Zero the output accumulator.
     for x in o_row.iter_mut() {
@@ -141,7 +141,11 @@ fn flash_attn_row(
     }
 
     // Normalize.
-    let inv_l = if l == 0.0 { 1.0 / f32::EPSILON } else { 1.0 / l };
+    let inv_l = if l == 0.0 {
+        1.0 / f32::EPSILON
+    } else {
+        1.0 / l
+    };
     for x in o_row.iter_mut() {
         *x *= inv_l;
     }
@@ -229,8 +233,7 @@ pub fn scaled_dot_product_attention(
                 // Build a contiguous q_row slice.
                 // Q strides: [batch_s, head_s, seq_s, dim_s].
                 // If q is contiguous the slice is zero-copy; otherwise we copy.
-                let q_base_elem =
-                    b * q_strides[0] + h * q_strides[1] + qi * q_strides[2];
+                let q_base_elem = b * q_strides[0] + h * q_strides[1] + qi * q_strides[2];
 
                 // Fast path: q strides[3] == 1 (contiguous along head_dim).
                 let q_row_owned: Vec<f32>;
@@ -259,15 +262,7 @@ pub fn scaled_dot_product_attention(
                 let o_row = &mut out_chunk[qi * head_dim..(qi + 1) * head_dim];
 
                 flash_attn_row(
-                    q_row,
-                    k_head,
-                    v_head,
-                    o_row,
-                    scale,
-                    seq_k,
-                    head_dim,
-                    attend_len,
-                    mask_row,
+                    q_row, k_head, v_head, o_row, scale, seq_k, head_dim, attend_len, mask_row,
                 );
             }
         });
@@ -376,9 +371,7 @@ mod tests {
 
         // Random-ish but deterministic data.
         let gen = |i: usize| (i as f32 * 1.3 + 0.7).sin() * 0.5 + 0.5;
-        let q_data: Vec<f32> = (0..batch * n_heads * seq_q * head_dim)
-            .map(gen)
-            .collect();
+        let q_data: Vec<f32> = (0..batch * n_heads * seq_q * head_dim).map(gen).collect();
         let k_data: Vec<f32> = (0..batch * n_heads * seq_k * head_dim)
             .map(|i| gen(i + 100))
             .collect();
@@ -457,9 +450,21 @@ mod tests {
         let seq_k = 16; // KV cache has 16 tokens
         let head_dim = 8;
 
-        let q = Tensor::from_f32(&vec![0.1f32; batch * n_heads * seq_q * head_dim], vec![batch, n_heads, seq_q, head_dim]).unwrap();
-        let k = Tensor::from_f32(&vec![0.1f32; batch * n_heads * seq_k * head_dim], vec![batch, n_heads, seq_k, head_dim]).unwrap();
-        let v = Tensor::from_f32(&vec![0.2f32; batch * n_heads * seq_k * head_dim], vec![batch, n_heads, seq_k, head_dim]).unwrap();
+        let q = Tensor::from_f32(
+            &vec![0.1f32; batch * n_heads * seq_q * head_dim],
+            vec![batch, n_heads, seq_q, head_dim],
+        )
+        .unwrap();
+        let k = Tensor::from_f32(
+            &vec![0.1f32; batch * n_heads * seq_k * head_dim],
+            vec![batch, n_heads, seq_k, head_dim],
+        )
+        .unwrap();
+        let v = Tensor::from_f32(
+            &vec![0.2f32; batch * n_heads * seq_k * head_dim],
+            vec![batch, n_heads, seq_k, head_dim],
+        )
+        .unwrap();
 
         let out = scaled_dot_product_attention(&q, &k, &v, None, None, n_heads).unwrap();
         assert_eq!(out.shape().dims(), &[batch, n_heads, seq_q, head_dim]);

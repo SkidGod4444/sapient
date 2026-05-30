@@ -46,7 +46,9 @@ pub mod pipeline;
 pub mod sampler;
 pub mod speculative;
 
-pub use device::{detect as detect_devices, recommend as recommend_backend, BackendPlan, DeviceProfile};
+pub use device::{
+    detect as detect_devices, recommend as recommend_backend, BackendPlan, DeviceProfile,
+};
 pub use kv_cache::KVCache;
 pub use pipeline::{GenerationConfig, LoadOptions, Pipeline};
 pub use sampler::{Sampler, SamplingStrategy};

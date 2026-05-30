@@ -103,11 +103,9 @@ fn has_part_files(dir: &std::path::Path) -> bool {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
     };
-    entries.flatten().any(|e| {
-        e.file_name()
-            .to_string_lossy()
-            .ends_with(".sync.part")
-    })
+    entries
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().ends_with(".sync.part"))
 }
 
 /// List models fully cached by the HuggingFace Hub client.

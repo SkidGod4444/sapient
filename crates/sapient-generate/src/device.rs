@@ -56,7 +56,10 @@ pub enum BackendPlan {
     Metal,
     /// Run the first `gpu_layers` transformer layers on Metal, the rest on CPU.
     /// Only used when the model doesn't fit entirely in the Metal memory budget.
-    MetalCpuSplit { gpu_layers: usize, total_layers: usize },
+    MetalCpuSplit {
+        gpu_layers: usize,
+        total_layers: usize,
+    },
     /// CUDA backend (future — not yet implemented).
     Cuda,
 }
@@ -67,7 +70,10 @@ impl BackendPlan {
         match self {
             Self::Cpu => "CPU (NEON/AVX2)".into(),
             Self::Metal => "Metal GPU (full model)".into(),
-            Self::MetalCpuSplit { gpu_layers, total_layers } => {
+            Self::MetalCpuSplit {
+                gpu_layers,
+                total_layers,
+            } => {
                 format!("Metal+CPU hybrid  ({gpu_layers}/{total_layers} layers on GPU)")
             }
             Self::Cuda => "CUDA GPU".into(),
@@ -95,17 +101,22 @@ impl BackendPlan {
                     100.0
                 }
             }
-            Self::MetalCpuSplit { gpu_layers, total_layers } => {
+            Self::MetalCpuSplit {
+                gpu_layers,
+                total_layers,
+            } => {
                 let gpu_frac = *gpu_layers as f64 / *total_layers as f64;
                 let metal_bw = 150.0f64.min(profile.ram_bytes as f64 / 1e9 * 8.0);
                 let cpu_bw = profile.cpu.bandwidth_gbps;
                 gpu_frac * metal_bw + (1.0 - gpu_frac) * cpu_bw
             }
             Self::Cuda => {
-                profile.gpus.iter()
+                profile
+                    .gpus
+                    .iter()
                     .find(|g| g.apis.contains(&ComputeApi::Cuda))
                     .and_then(|g| g.vram_bytes)
-                    .map(|v| (v as f64 / 1e9) * 50.0)  // rough: 50 tok/s per GB VRAM
+                    .map(|v| (v as f64 / 1e9) * 50.0) // rough: 50 tok/s per GB VRAM
                     .unwrap_or(50.0)
             }
         };
@@ -125,14 +136,22 @@ pub fn detect() -> DeviceProfile {
     let gpus = detect_gpus();
     let ram_bytes = detect_ram();
     let unified_memory = is_unified_memory();
-    DeviceProfile { cpu, gpus, ram_bytes, unified_memory }
+    DeviceProfile {
+        cpu,
+        gpus,
+        ram_bytes,
+        unified_memory,
+    }
 }
 
 /// Recommend the best backend plan for a model of the given size.
 /// `total_layers` is the transformer depth (used for the hybrid split).
 pub fn recommend(profile: &DeviceProfile, model_bytes: u64, total_layers: usize) -> BackendPlan {
     // ── Metal (Apple Silicon) ─────────────────────────────────────────────────
-    let has_metal = profile.gpus.iter().any(|g| g.apis.contains(&ComputeApi::Metal));
+    let has_metal = profile
+        .gpus
+        .iter()
+        .any(|g| g.apis.contains(&ComputeApi::Metal));
     if has_metal && profile.unified_memory {
         // Reserve 2 GB for OS, require 1.5× KV-cache headroom.
         let budget = profile.ram_bytes.saturating_sub(2 * 1024 * 1024 * 1024);
@@ -148,13 +167,19 @@ pub fn recommend(profile: &DeviceProfile, model_bytes: u64, total_layers: usize)
             let gpu_layers =
                 ((budget as f64 / (bytes_per_layer as f64 * 1.5)) as usize).min(total_layers);
             if gpu_layers > total_layers / 4 {
-                return BackendPlan::MetalCpuSplit { gpu_layers, total_layers };
+                return BackendPlan::MetalCpuSplit {
+                    gpu_layers,
+                    total_layers,
+                };
             }
         }
     }
 
     // ── CUDA (NVIDIA) ─────────────────────────────────────────────────────────
-    let cuda_gpu = profile.gpus.iter().find(|g| g.apis.contains(&ComputeApi::Cuda));
+    let cuda_gpu = profile
+        .gpus
+        .iter()
+        .find(|g| g.apis.contains(&ComputeApi::Cuda));
     if let Some(gpu) = cuda_gpu {
         if let Some(vram) = gpu.vram_bytes {
             if model_bytes < vram * 9 / 10 {
@@ -174,7 +199,13 @@ fn detect_cpu() -> CpuInfo {
     let (perf_cores, eff_cores) = apple_core_split();
     let bandwidth_gbps = estimate_cpu_bandwidth_gbps(logical_cores, &name);
 
-    CpuInfo { name, logical_cores, performance_cores: perf_cores, efficiency_cores: eff_cores, bandwidth_gbps }
+    CpuInfo {
+        name,
+        logical_cores,
+        performance_cores: perf_cores,
+        efficiency_cores: eff_cores,
+        bandwidth_gbps,
+    }
 }
 
 fn cpu_name() -> String {
@@ -249,8 +280,11 @@ fn estimate_cpu_bandwidth_gbps(cores: usize, name: &str) -> f64 {
     let name_lower = name.to_lowercase();
     // Apple Silicon: use RAM size (already fetched separately) as a proxy.
     // Tier: base (M1/M2/M3/M4) ≈ 68-100 GB/s, Pro ≈ 200, Max ≈ 400, Ultra ≈ 800
-    if name_lower.contains("apple") || name_lower.contains("m1") || name_lower.contains("m2")
-        || name_lower.contains("m3") || name_lower.contains("m4")
+    if name_lower.contains("apple")
+        || name_lower.contains("m1")
+        || name_lower.contains("m2")
+        || name_lower.contains("m3")
+        || name_lower.contains("m4")
     {
         return if name_lower.contains("ultra") {
             800.0
@@ -274,7 +308,9 @@ fn detect_gpus() -> Vec<GpuInfo> {
     {
         let metal_available = {
             #[cfg(all(target_os = "macos", feature = "mlx"))]
-            { true }
+            {
+                true
+            }
             #[cfg(not(all(target_os = "macos", feature = "mlx")))]
             {
                 // Check if we're on Apple Silicon (Metal always available there)
@@ -326,7 +362,10 @@ fn macos_gpu_name() -> String {
         let text = String::from_utf8_lossy(&out.stdout);
         for line in text.lines() {
             let trimmed = line.trim();
-            if let Some(val) = trimmed.strip_prefix("Chipset Model:").or_else(|| trimmed.strip_prefix("GPU:")) {
+            if let Some(val) = trimmed
+                .strip_prefix("Chipset Model:")
+                .or_else(|| trimmed.strip_prefix("GPU:"))
+            {
                 return val.trim().to_string();
             }
         }
@@ -346,11 +385,16 @@ fn detect_nvidia_macos() -> Option<GpuInfo> {
     let line = text.lines().next()?;
     let parts: Vec<&str> = line.splitn(2, ',').collect();
     let name = parts.first()?.trim().to_string();
-    let vram = parts.get(1)
+    let vram = parts
+        .get(1)
         .and_then(|v| v.trim().strip_suffix(" MiB"))
         .and_then(|v| v.parse::<u64>().ok())
         .map(|mb| mb * 1024 * 1024);
-    Some(GpuInfo { name, vram_bytes: vram, apis: vec![ComputeApi::Cuda] })
+    Some(GpuInfo {
+        name,
+        vram_bytes: vram,
+        apis: vec![ComputeApi::Cuda],
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -359,19 +403,30 @@ fn detect_windows_gpus() -> Vec<GpuInfo> {
 
     // Query all display adapters via wmic
     let out = Command::new("wmic")
-        .args(["path", "win32_VideoController", "get",
-               "Name,AdapterRAM,DriverVersion", "/format:csv"])
+        .args([
+            "path",
+            "win32_VideoController",
+            "get",
+            "Name,AdapterRAM,DriverVersion",
+            "/format:csv",
+        ])
         .output();
 
     if let Ok(out) = out {
         let text = String::from_utf8_lossy(&out.stdout);
-        for line in text.lines().skip(2) { // skip header + blank line
+        for line in text.lines().skip(2) {
+            // skip header + blank line
             let cols: Vec<&str> = line.split(',').collect();
-            if cols.len() < 3 { continue; }
+            if cols.len() < 3 {
+                continue;
+            }
             let name = cols.get(2).unwrap_or(&"").trim().to_string();
-            if name.is_empty() { continue; }
+            if name.is_empty() {
+                continue;
+            }
 
-            let vram = cols.get(1)
+            let vram = cols
+                .get(1)
                 .and_then(|v| v.trim().parse::<u64>().ok())
                 .filter(|&v| v > 0);
 
@@ -393,7 +448,11 @@ fn detect_windows_gpus() -> Vec<GpuInfo> {
             }
 
             if !apis.is_empty() {
-                gpus.push(GpuInfo { name, vram_bytes: vram, apis });
+                gpus.push(GpuInfo {
+                    name,
+                    vram_bytes: vram,
+                    apis,
+                });
             }
         }
     }
@@ -406,15 +465,24 @@ fn detect_linux_gpus() -> Vec<GpuInfo> {
 
     // NVIDIA via nvidia-smi
     let out = Command::new("nvidia-smi")
-        .args(["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"])
+        .args([
+            "--query-gpu=name,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
         .output();
     if let Ok(out) = out {
         let text = String::from_utf8_lossy(&out.stdout);
         for line in text.lines() {
             let parts: Vec<&str> = line.splitn(2, ',').collect();
-            let name = parts.first().map(|s| s.trim().to_string()).unwrap_or_default();
-            if name.is_empty() { continue; }
-            let vram = parts.get(1)
+            let name = parts
+                .first()
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            let vram = parts
+                .get(1)
                 .and_then(|v| v.trim().parse::<u64>().ok())
                 .map(|mb| mb * 1024 * 1024);
             gpus.push(GpuInfo {
@@ -433,10 +501,21 @@ fn detect_linux_gpus() -> Vec<GpuInfo> {
             for line in text.lines() {
                 let low = line.to_lowercase();
                 if low.contains("vga") || low.contains("3d controller") || low.contains("display") {
-                    let name = line.splitn(2, ':').last().unwrap_or(line).trim().to_string();
+                    let name = line
+                        .splitn(2, ':')
+                        .last()
+                        .unwrap_or(line)
+                        .trim()
+                        .to_string();
                     let mut apis = vec![ComputeApi::Vulkan];
-                    if low.contains("nvidia") { apis.push(ComputeApi::Cuda); }
-                    gpus.push(GpuInfo { name, vram_bytes: None, apis });
+                    if low.contains("nvidia") {
+                        apis.push(ComputeApi::Cuda);
+                    }
+                    gpus.push(GpuInfo {
+                        name,
+                        vram_bytes: None,
+                        apis,
+                    });
                 }
             }
         }
@@ -485,7 +564,11 @@ fn is_unified_memory() -> bool {
 fn sysctl_str(key: &str) -> Option<String> {
     let out = Command::new("sysctl").args(["-n", key]).output().ok()?;
     let s = std::str::from_utf8(&out.stdout).ok()?.trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -513,7 +596,9 @@ fn parse_wmic_value(text: &str, key: &str) -> Option<String> {
     for line in text.lines() {
         if let Some(val) = line.strip_prefix(&format!("{key}=")) {
             let v = val.trim().to_string();
-            if !v.is_empty() { return Some(v); }
+            if !v.is_empty() {
+                return Some(v);
+            }
         }
     }
     None
@@ -528,19 +613,17 @@ impl DeviceProfile {
         let gb = |b: u64| b as f64 / 1e9;
 
         // CPU
-        out.push_str(&format!(
-            "  CPU   {}\n",
-            self.cpu.name
-        ));
+        out.push_str(&format!("  CPU   {}\n", self.cpu.name));
         if self.cpu.performance_cores > 0 {
             out.push_str(&format!(
                 "        {} cores  ({} performance + {} efficiency)\n",
-                self.cpu.logical_cores,
-                self.cpu.performance_cores,
-                self.cpu.efficiency_cores
+                self.cpu.logical_cores, self.cpu.performance_cores, self.cpu.efficiency_cores
             ));
         } else {
-            out.push_str(&format!("        {} logical cores\n", self.cpu.logical_cores));
+            out.push_str(&format!(
+                "        {} logical cores\n",
+                self.cpu.logical_cores
+            ));
         }
         if self.ram_bytes > 0 {
             out.push_str(&format!(
@@ -553,16 +636,20 @@ impl DeviceProfile {
 
         // GPUs
         for gpu in &self.gpus {
-            let apis: Vec<&str> = gpu.apis.iter().map(|a| match a {
-                ComputeApi::Metal    => "Metal",
-                ComputeApi::Cuda     => "CUDA",
-                ComputeApi::Vulkan   => "Vulkan",
-                ComputeApi::DirectX12 => "DX12",
-                ComputeApi::OpenCL   => "OpenCL",
-            }).collect();
+            let apis: Vec<&str> = gpu
+                .apis
+                .iter()
+                .map(|a| match a {
+                    ComputeApi::Metal => "Metal",
+                    ComputeApi::Cuda => "CUDA",
+                    ComputeApi::Vulkan => "Vulkan",
+                    ComputeApi::DirectX12 => "DX12",
+                    ComputeApi::OpenCL => "OpenCL",
+                })
+                .collect();
             let vram_str = match gpu.vram_bytes {
                 Some(b) => format!("  {:.0} GB VRAM", gb(b)),
-                None    => "  shared memory".to_string(),
+                None => "  shared memory".to_string(),
             };
             out.push_str(&format!(
                 "\n  GPU   {}\n        {}  ·  [{}]\n",
@@ -581,12 +668,12 @@ impl DeviceProfile {
         out.push_str("\n  Recommended backends:\n");
 
         let scenarios = [
-            ("0.5B Q8",  0.5e9 * 1.06, 24),
-            ("1.5B Q8",  1.5e9 * 1.06, 28),
-            ("3B Q4",    3.0e9 * 0.5625, 32),
-            ("7B Q4",    7.0e9 * 0.5625, 32),
-            ("14B Q4",  14.0e9 * 0.5625, 40),
-            ("32B Q4",  32.0e9 * 0.5625, 64),
+            ("0.5B Q8", 0.5e9 * 1.06, 24),
+            ("1.5B Q8", 1.5e9 * 1.06, 28),
+            ("3B Q4", 3.0e9 * 0.5625, 32),
+            ("7B Q4", 7.0e9 * 0.5625, 32),
+            ("14B Q4", 14.0e9 * 0.5625, 40),
+            ("32B Q4", 32.0e9 * 0.5625, 64),
         ];
 
         for (label, bytes, layers) in scenarios {

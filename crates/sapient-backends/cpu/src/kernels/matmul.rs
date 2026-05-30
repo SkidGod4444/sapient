@@ -6,12 +6,12 @@
 use super::quant;
 use rayon::prelude::*;
 use sapient_core::error::{Result, SapientError};
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
 use sapient_core::{
     DType, Shape, Tensor, Q4_0_BLOCK_BYTES, Q4_K_BLOCK_BYTES, Q5_K_BLOCK_BYTES, Q6_K_BLOCK_BYTES,
     Q8_0_BLOCK_BYTES, QUANT_BLOCK_SIZE,
 };
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
 
 // ── matmul ───────────────────────────────────────────────────────────────────
 
@@ -205,7 +205,10 @@ unsafe fn dot_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
     let sum2 = _mm_add_ps(sum4, shuf);
     let sum1 = _mm_add_ss(sum2, _mm_movehl_ps(shuf, sum2));
     let mut s = _mm_cvtss_f32(sum1);
-    while i < n { s += a[i] * b[i]; i += 1; }
+    while i < n {
+        s += a[i] * b[i];
+        i += 1;
+    }
     s
 }
 
@@ -251,7 +254,7 @@ unsafe fn dot_f32_x_f16_neon(a_f32: &[f32], b_f16: &[u16]) -> f32 {
     // exponent bias adjustment: F32_bias(127) - F16_bias(15) = 112 -> shift by 13
     let mask_mant = vdupq_n_u32(0x000003FF); // 10-bit mantissa mask
     let mask_sign = vdupq_n_u32(0x00008000); // sign bit in u16 position
-    let exp_bias  = vdupq_n_u32(112 << 23);  // exponent bias shift for F32
+    let exp_bias = vdupq_n_u32(112 << 23); // exponent bias shift for F32
 
     while i + 4 <= n {
         let av = vld1q_f32(a_f32.as_ptr().add(i));
@@ -265,7 +268,7 @@ unsafe fn dot_f32_x_f16_neon(a_f32: &[f32], b_f16: &[u16]) -> f32 {
 
         // Exponent: bits [14:10] -> F32 exponent = (exp16 + 112) at [30:23]
         // Extract exp16 (5 bits at position 10..14) and shift to F32 position
-        let exp16 = vshrq_n_u32::<10>(u32x4);          // bits [14:10] now at [4:0]
+        let exp16 = vshrq_n_u32::<10>(u32x4); // bits [14:10] now at [4:0]
         let exp32 = vaddq_u32(vshlq_n_u32::<23>(exp16), exp_bias); // (exp16 + 112) << 23
 
         // Mantissa: bits [9:0] -> bits [22:13] of F32 (shift left by 13)
@@ -398,15 +401,11 @@ macro_rules! gemv_parallel {
             .for_each(|(chunk_idx, chunk_slice)| {
                 for (local, slot) in chunk_slice.iter_mut().enumerate() {
                     let j = chunk_idx * chunk + local;
-                    *slot = $dot(
-                        &$w_blocks[j * $row_bytes..(j + 1) * $row_bytes],
-                        $x_row,
-                    );
+                    *slot = $dot(&$w_blocks[j * $row_bytes..(j + 1) * $row_bytes], $x_row);
                 }
             });
     }};
 }
-
 
 fn matmul_nt_q4_0(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Result<Tensor> {
     if k % QUANT_BLOCK_SIZE != 0 {

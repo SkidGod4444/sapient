@@ -344,7 +344,11 @@ fn update_kv_cache_q8(
         }
     }
 
-    let insert_pos = if shift > 0 { current_seq_len - shift } else { current_seq_len };
+    let insert_pos = if shift > 0 {
+        current_seq_len - shift
+    } else {
+        current_seq_len
+    };
     let new_k_f32 = new_k.to_f32_vec();
 
     for bi in 0..b_sz {
