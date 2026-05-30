@@ -155,8 +155,31 @@ impl MlxForwardEngine {
             self.reset_cache();
         }
         let logits_arr = self.forward_mlx(input_ids, use_cache).map_err(ae)?;
-        // Force GPU evaluation — one eval() per decode step.
-        mlx_rs::transforms::eval([&logits_arr]).map_err(ae)?;
+
+        // Evaluate logits AND all KV cache arrays in a single MLX eval() call.
+        //
+        // Why evaluate KV cache here rather than inside forward_llama_layer?
+        // Without explicit eval, the KV cache lazy graph grows O(N) deep over N
+        // decode steps (each step chains a new concat on top of the previous),
+        // eventually causing OOM at long sequences.
+        //
+        // Evaluating inside each layer (24 calls/step) forces 24 Metal command
+        // buffer submissions — that was 2× slower than necessary. One combined
+        // eval() at the end keeps the submission count at 1 per decode step while
+        // still materialising the KV cache before the next step's concat reads it.
+        let mut to_eval: Vec<mlx_rs::Array> = Vec::with_capacity(1 + self.layers.len() * 2);
+        to_eval.push(logits_arr.clone());
+        if use_cache {
+            for c in &self.cache {
+                if let Some(k) = &c.k {
+                    to_eval.push(k.clone());
+                }
+                if let Some(v) = &c.v {
+                    to_eval.push(v.clone());
+                }
+            }
+        }
+        mlx_rs::transforms::eval(to_eval.iter()).map_err(ae)?;
         Ok(logits_arr.as_slice::<f32>().to_vec())
     }
 
@@ -337,6 +360,9 @@ fn forward_llama_layer(
 
     // ── 5. KV cache update ───────────────────────────────────────────────────
     // Store/extend cache in [1, seq, n_kv_heads, head_dim] format.
+    // After concatenation we eval() the cache arrays immediately so the lazy
+    // graph doesn't accumulate depth across decode steps (which would cause
+    // TTFT to grow with each benchmark run due to graph re-evaluation cost).
     let (k_full, v_full) = if use_cache {
         let k_ext = match &cache.k {
             Some(ck) => mlx_rs::ops::concatenate_axis(&[ck, &k], 1)?,
@@ -346,6 +372,11 @@ fn forward_llama_layer(
             Some(cv) => mlx_rs::ops::concatenate_axis(&[cv, &v], 1)?,
             None => v,
         };
+        // Note: we intentionally do NOT call eval() here. The KV cache arrays
+        // stay as lazy graph nodes; they are evaluated together with the full
+        // forward pass at the single eval() call in forward_logits(). This
+        // keeps the Metal command buffer submissions to one per decode step,
+        // which is critical for performance (24 per-layer evals was 2× slower).
         cache.seq_len += seq as usize;
         cache.k = Some(k_ext.clone());
         cache.v = Some(v_ext.clone());
@@ -361,8 +392,26 @@ fn forward_llama_layer(
     let k_t = mlx_rs::ops::transpose_axes(&k_full, &[0, 2, 1, 3])?;
     let v_t = mlx_rs::ops::transpose_axes(&v_full, &[0, 2, 1, 3])?;
 
-    // ── 7. Scaled dot-product attention ──────────────────────────────────────
-    // MLX SDPA handles GQA natively (k/v not pre-tiled).
+    // ── 7. Pre-tile KV heads for GQA when MLX's native GQA path is unreliable ──
+    //
+    // MLX's fast SDPA handles GQA natively for head_dim=64 (confirmed working).
+    // For head_dim ≥ 96, the native GQA Metal kernel produces incorrect attention
+    // for certain (n_heads, n_kv_heads) combinations — empirically verified wrong
+    // for Qwen2.5-1.5B (n_heads=12, n_kv_heads=2, head_dim=128).
+    //
+    // Fix: explicitly tile K/V to full n_heads when head_dim ≥ 96.
+    // Leave head_dim=64 models (Qwen2.5-0.5B with n_heads=14) on native GQA path.
+    let needs_kv_tile = n_kv_heads < n_heads && head_dim >= 96;
+    let (k_t, v_t) = if needs_kv_tile {
+        (
+            kv_repeat_interleave(&k_t, n_heads, n_kv_heads)?,
+            kv_repeat_interleave(&v_t, n_heads, n_kv_heads)?,
+        )
+    } else {
+        (k_t, v_t)
+    };
+
+    // ── 8. Scaled dot-product attention ──────────────────────────────────────
     // For prefill (seq>1): apply causal mask. For decode (seq=1): no mask needed.
     let scale = (head_dim as f32).powf(-0.5);
     let mask = if seq > 1 {
@@ -371,6 +420,13 @@ fn forward_llama_layer(
         None
     };
     let attn = mlx_rs::fast::scaled_dot_product_attention(&q_t, &k_t, &v_t, scale, mask)?;
+    // Evaluate the attention output immediately: this releases the tiled K/V arrays
+    // from the lazy graph before the next layer allocates its own tiled arrays.
+    // Without this, all 28 layers' tiled K/V arrays (up to 325 MB for 1.5B) would
+    // live simultaneously in the lazy graph until the final eval(), causing OOM.
+    if needs_kv_tile {
+        mlx_rs::transforms::eval([&attn])?;
+    }
     // attn: [1, n_heads, seq, head_dim]
 
     // ── 8. Merge heads → [1, seq, hidden] ────────────────────────────────────
@@ -473,6 +529,41 @@ fn tensor_to_dense(t: &Tensor) -> Result<mlx_rs::Array> {
 }
 
 // ── Operation helpers ─────────────────────────────────────────────────────────
+
+/// Repeat-interleave KV heads to match the number of query heads (GQA expansion).
+///
+/// Mirrors what mlx-lm does: explicitly tile K/V before SDPA rather than relying
+/// on MLX's built-in GQA support, which produces incorrect results for some
+/// (n_heads, n_kv_heads) pairs (e.g. Qwen2.5-1.5B with n_heads=12, n_kv_heads=2).
+///
+/// Input:  kv — `[1, n_kv_heads, total_seq, head_dim]`
+/// Output: `[1, n_heads, total_seq, head_dim]`
+///
+/// Uses `expand_dims` + `broadcast_to` (zero-copy) + `flatten` (one materialization)
+/// instead of split+clone+concat, which avoids n_rep separate memory copies.
+fn kv_repeat_interleave(
+    kv: &mlx_rs::Array,
+    n_heads: usize,
+    n_kv_heads: usize,
+) -> MR<mlx_rs::Array> {
+    let n_rep = n_heads / n_kv_heads;
+    if n_rep == 1 {
+        return Ok(kv.clone());
+    }
+    // Split along head axis (axis=1) → n_kv_heads arrays of [1, 1, total_seq, head_dim].
+    // Clone each head n_rep times, then concatenate: [h0×n_rep, h1×n_rep, ...]
+    // In the lazy MLX graph, part.clone() is a zero-cost refcount increment —
+    // the actual data copy happens only at eval() time for the concat output.
+    let parts = mlx_rs::ops::split(kv, n_kv_heads as i32, Some(1i32))?;
+    let mut repeated: Vec<mlx_rs::Array> = Vec::with_capacity(n_heads);
+    for part in &parts {
+        for _ in 0..n_rep {
+            repeated.push(part.clone());
+        }
+    }
+    let refs: Vec<&mlx_rs::Array> = repeated.iter().collect();
+    mlx_rs::ops::concatenate_axis(&refs, 1)
+}
 
 /// Linear projection: `x @ W.T` with optional bias.
 /// Uses quantized_matmul for Quant weights, standard matmul for Dense.
