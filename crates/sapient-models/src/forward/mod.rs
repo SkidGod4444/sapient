@@ -191,8 +191,7 @@ impl ForwardEngine {
             Self::Llama(f) => f.embed(input_ids),
             Self::Phi(f) => f.embed(input_ids),
             #[cfg(all(target_os = "macos", feature = "mlx"))]
-            Self::MlxLlama(f) => {
-                // No embed method yet — delegate to a one-shot forward pass
+            Self::MlxLlama(_) => {
                 let _ = input_ids;
                 bail!("embed() not yet implemented for MlxForwardEngine")
             }

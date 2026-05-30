@@ -695,48 +695,53 @@ impl Pipeline {
         input_ids: Vec<u32>,
         config: &GenerationConfig,
     ) -> Result<Vec<u32>> {
-        let mut engine = self.engine.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-        let mut sampler = Sampler::new(config.strategy.clone());
-        let mut generated: Vec<u32> = Vec::new();
-        let mut all_tokens = input_ids;
-        let eos_ids = self.eos_token_ids();
+        // block_in_place tells Tokio "this thread will block" and keeps execution on
+        // the current OS thread — important for Metal/MLX which has thread-local stream
+        // state. Calling eval() from a different thread than where the engine was created
+        // causes garbage output because the GPU stream is not properly initialised there.
+        tokio::task::block_in_place(|| {
+            let mut engine = self.engine.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+            let mut sampler = Sampler::new(config.strategy.clone());
+            let mut generated: Vec<u32> = Vec::new();
+            let mut all_tokens = input_ids;
+            let eos_ids = self.eos_token_ids();
 
-        engine.reset_cache();
+            engine.reset_cache();
 
-        // Prefill must use the KV cache so decode steps see correct positions and context.
-        let logits = engine.forward_logits(&all_tokens, true)?;
-        let mut next = sampler.sample(&logits, &all_tokens)?;
-        generated.push(next);
-        all_tokens.push(next);
-
-        if eos_ids.contains(&next) {
-            return Ok(generated);
-        }
-
-        for step in 1..config.max_new_tokens {
-            let logits = engine.forward_logits(&[next], true)?;
-            next = sampler.sample(&logits, &all_tokens)?;
+            let logits = engine.forward_logits(&all_tokens, true)?;
+            let mut next = sampler.sample(&logits, &all_tokens)?;
             generated.push(next);
             all_tokens.push(next);
 
             if eos_ids.contains(&next) {
-                debug!("EOS token generated at step {step}");
-                break;
+                return Ok(generated);
             }
 
-            if !config.stop_sequences.is_empty() {
-                let decoded = self.tokenizer.decode(&generated, true).unwrap_or_default();
-                if config
-                    .stop_sequences
-                    .iter()
-                    .any(|s| decoded.contains(s.as_str()))
-                {
+            for step in 1..config.max_new_tokens {
+                let logits = engine.forward_logits(&[next], true)?;
+                next = sampler.sample(&logits, &all_tokens)?;
+                generated.push(next);
+                all_tokens.push(next);
+
+                if eos_ids.contains(&next) {
+                    debug!("EOS token generated at step {step}");
                     break;
                 }
-            }
-        }
 
-        Ok(generated)
+                if !config.stop_sequences.is_empty() {
+                    let decoded = self.tokenizer.decode(&generated, true).unwrap_or_default();
+                    if config
+                        .stop_sequences
+                        .iter()
+                        .any(|s| decoded.contains(s.as_str()))
+                    {
+                        break;
+                    }
+                }
+            }
+
+            Ok(generated)
+        })
     }
 
     pub fn tokenizer(&self) -> &SapientTokenizer {

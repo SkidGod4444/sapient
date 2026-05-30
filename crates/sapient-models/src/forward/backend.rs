@@ -739,7 +739,7 @@ impl MlxLlmOps {
         {
             let qs = q.shape().dims().to_vec();
             let ks = k.shape().dims().to_vec();
-            let (batch, n_heads, seq_q, head_dim) = (qs[0], qs[1], qs[2], qs[3]);
+            let (_batch, n_heads, seq_q, head_dim) = (qs[0], qs[1], qs[2], qs[3]);
             let seq_k = ks[2];
             let scale = 1.0 / (head_dim as f32).sqrt();
 

@@ -156,20 +156,10 @@ impl MlxForwardEngine {
         }
         let logits_arr = self.forward_mlx(input_ids, use_cache).map_err(ae)?;
 
-        // Evaluate logits AND all KV cache arrays in a single MLX eval() call.
-        //
-        // Why evaluate KV cache here rather than inside forward_llama_layer?
-        // Without explicit eval, the KV cache lazy graph grows O(N) deep over N
-        // decode steps (each step chains a new concat on top of the previous),
-        // eventually causing OOM at long sequences.
-        //
-        // Evaluating inside each layer (24 calls/step) forces 24 Metal command
-        // buffer submissions — that was 2× slower than necessary. One combined
-        // eval() at the end keeps the submission count at 1 per decode step while
-        // still materialising the KV cache before the next step's concat reads it.
-        // Evaluate logits + all KV caches in one eval() call to:
-        // (a) prevent the KV cache lazy concat chain from growing O(N²) deep, and
-        // (b) keep the number of Metal command buffer submissions at 1 per step.
+        // Evaluate logits + all KV cache arrays in one MLX eval() call. Including the
+        // KV cache keeps the lazy concat chain from growing O(N) deep across decode
+        // steps (which would OOM on long sequences), while keeping Metal command
+        // buffer submissions to one per decode step.
         let kv: Vec<mlx_rs::Array> = self
             .cache
             .iter()
@@ -331,18 +321,27 @@ fn forward_llama_layer(
     let k = mlx_linear(&h, &layer.k_proj, layer.k_bias.as_ref())?; // [1, seq, n_kv*hd]
     let v = mlx_linear(&h, &layer.v_proj, layer.v_bias.as_ref())?; // [1, seq, n_kv*hd]
 
-    // ── 3. Reshape to [1, seq, n_heads, head_dim] ────────────────────────────
+    // ── 3. Reshape to [1, seq, heads, hd], then transpose to [1, heads, seq, hd] ──
+    //
+    // The transpose BEFORE RoPE is CRITICAL. `mlx_rs::fast::rope` uses dimension
+    // -2 as the sequence-position axis. With layout [1, seq, heads, hd] the -2 dim
+    // is `heads`, so RoPE would assign a different position to each head instead of
+    // the same sequence position to all heads — scrambling positional encoding and
+    // producing garbage logits. mlx-lm transposes to [batch, heads, seq, hd] before
+    // applying RoPE; we must match that exactly.
     let q = mlx_rs::ops::reshape(&q, &[1, seq, n_heads as i32, head_dim as i32])?;
     let k = mlx_rs::ops::reshape(&k, &[1, seq, n_kv_heads as i32, head_dim as i32])?;
     let v = mlx_rs::ops::reshape(&v, &[1, seq, n_kv_heads as i32, head_dim as i32])?;
+    let q = mlx_rs::ops::transpose_axes(&q, &[0, 2, 1, 3])?; // [1, n_heads, seq, hd]
+    let k = mlx_rs::ops::transpose_axes(&k, &[0, 2, 1, 3])?; // [1, n_kv_heads, seq, hd]
+    let v = mlx_rs::ops::transpose_axes(&v, &[0, 2, 1, 3])?; // [1, n_kv_heads, seq, hd]
 
-    // ── 4. RoPE ─────────────────────────────────────────────────────────────
-    // mlx fast::rope expects [batch, seq, n_heads, head_dim]
-    // offset = number of already-cached tokens (current sequence position start)
+    // ── 4. RoPE — dim -2 is now `seq`, so positions are assigned correctly ──
+    // offset = number of already-cached tokens (current sequence position start).
     let q = mlx_rs::fast::rope(
         &q,
         head_dim as i32,
-        false,            // Llama-style (not traditional)
+        false,            // Llama/Qwen style (GPT-NeoX), not traditional
         Some(rope_theta), // base frequency
         1.0,              // scale
         offset as i32,    // starting position offset
@@ -359,24 +358,18 @@ fn forward_llama_layer(
     )?;
 
     // ── 5. KV cache update ───────────────────────────────────────────────────
-    // Store/extend cache in [1, seq, n_kv_heads, head_dim] format.
-    // After concatenation we eval() the cache arrays immediately so the lazy
-    // graph doesn't accumulate depth across decode steps (which would cause
-    // TTFT to grow with each benchmark run due to graph re-evaluation cost).
-    let (k_full, v_full) = if use_cache {
+    // Cache is stored in [1, n_kv_heads, seq, head_dim] layout; new tokens are
+    // concatenated on the seq axis (axis 2). The arrays stay as lazy graph nodes
+    // and are evaluated together at the single eval() in forward_logits().
+    let (k_t, v_t) = if use_cache {
         let k_ext = match &cache.k {
-            Some(ck) => mlx_rs::ops::concatenate_axis(&[ck, &k], 1)?,
+            Some(ck) => mlx_rs::ops::concatenate_axis(&[ck, &k], 2)?,
             None => k,
         };
         let v_ext = match &cache.v {
-            Some(cv) => mlx_rs::ops::concatenate_axis(&[cv, &v], 1)?,
+            Some(cv) => mlx_rs::ops::concatenate_axis(&[cv, &v], 2)?,
             None => v,
         };
-        // Note: we intentionally do NOT call eval() here. The KV cache arrays
-        // stay as lazy graph nodes; they are evaluated together with the full
-        // forward pass at the single eval() call in forward_logits(). This
-        // keeps the Metal command buffer submissions to one per decode step,
-        // which is critical for performance (24 per-layer evals was 2× slower).
         cache.seq_len += seq as usize;
         cache.k = Some(k_ext.clone());
         cache.v = Some(v_ext.clone());
@@ -384,24 +377,33 @@ fn forward_llama_layer(
     } else {
         (k, v)
     };
+    // q_t/k_t/v_t are already in [1, heads, seq, head_dim] layout for attention.
+    let q_t = q;
 
-    // ── 6. Transpose to [1, n_heads, seq, head_dim] for SDPA ─────────────────
-    // q: [1, seq, n_heads, hd] → [1, n_heads, seq, hd]
-    // k/v: [1, total_seq, n_kv_heads, hd] → [1, n_kv_heads, total_seq, hd]
-    let q_t = mlx_rs::ops::transpose_axes(&q, &[0, 2, 1, 3])?;
-    let k_t = mlx_rs::ops::transpose_axes(&k_full, &[0, 2, 1, 3])?;
-    let v_t = mlx_rs::ops::transpose_axes(&v_full, &[0, 2, 1, 3])?;
-
-    // ── 7. Scaled dot-product attention ──────────────────────────────────────────
-    // MLX fast SDPA handles GQA natively (K/V not pre-tiled).
-    // Causal mask for prefill; no mask for single-step decode.
+    // ── 7. Attention ─────────────────────────────────────────────────────────────
+    // mlx_rs 0.25.3's fast SDPA does not correctly handle grouped-query attention
+    // (n_kv_heads < n_heads), so we use a per-group 4D matmul attention for GQA and
+    // reserve native SDPA for standard MHA (n_heads == n_kv_heads).
     let scale = (head_dim as f32).powf(-0.5);
-    let mask = if seq > 1 {
-        Some(ScaledDotProductAttentionMask::Causal)
+    let attn = if n_kv_heads < n_heads {
+        gqa_attention(
+            &q_t,
+            &k_t,
+            &v_t,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            scale,
+            seq > 1,
+        )?
     } else {
-        None
+        let mask = if seq > 1 {
+            Some(ScaledDotProductAttentionMask::Causal)
+        } else {
+            None
+        };
+        mlx_rs::fast::scaled_dot_product_attention(&q_t, &k_t, &v_t, scale, mask)?
     };
-    let attn = mlx_rs::fast::scaled_dot_product_attention(&q_t, &k_t, &v_t, scale, mask)?;
     // attn: [1, n_heads, seq, head_dim]
 
     // ── 8. Merge heads → [1, seq, hidden] ────────────────────────────────────
@@ -415,11 +417,11 @@ fn forward_llama_layer(
     // ── 10. Post-attention RMS norm ───────────────────────────────────────────
     let h2 = mlx_rs::fast::rms_norm(&x, &layer.post_attn_norm_w, eps)?;
 
-    // ── 11. FFN (SwiGLU: gate+up → silu(gate)*up → down) ────────────────────
+    // ── 11. FFN (SwiGLU: silu(gate) * up → down) ─────────────────────────────
     let gate = mlx_linear(&h2, &layer.gate_proj, None)?;
     let up = mlx_linear(&h2, &layer.up_proj, None)?;
-    let ff = mlx_rs::ops::multiply(&mlx_rs::nn::silu(&gate)?, &up)?;
-    let ff = mlx_linear(&ff, &layer.down_proj, None)?;
+    let ff_intermediate = mlx_rs::ops::multiply(&mlx_rs::nn::silu(&gate)?, &up)?;
+    let ff = mlx_linear(&ff_intermediate, &layer.down_proj, None)?;
 
     // ── 12. Final residual ────────────────────────────────────────────────────
     mlx_rs::ops::add(&x, &ff)
@@ -473,8 +475,9 @@ fn load_llama_layer(
     })
 }
 
-/// Convert a Tensor to an MLX weight: quantized if dimensions allow, dense otherwise.
-/// Quantization requires a 2D matrix where in_dim % 64 == 0 and out_dim % 32 == 0.
+/// Convert a Tensor to an MLX weight: MLX-quantized Q4 when dimensions allow,
+/// dense F32 otherwise. Quantization requires a 2D matrix with in_dim % 64 == 0
+/// and out_dim % 32 == 0 (MLX `quantize` constraints).
 fn tensor_to_mlx_weight(t: &Tensor) -> Result<MlxW> {
     let dims = t.shape().dims();
     if dims.len() == 2 {
@@ -484,8 +487,8 @@ fn tensor_to_mlx_weight(t: &Tensor) -> Result<MlxW> {
             let cow = t.to_f32_cow();
             let arr = mlx_rs::Array::from_slice(&cow[..t.numel().min(cow.len())], shape);
             let (wq, sc, bi) = mlx_rs::ops::quantize(&arr, 64i32, 4i32).map_err(ae)?;
-            // Force GPU materialisation so future quantized_matmul calls
-            // reuse resident GPU memory rather than re-executing the graph.
+            // Force GPU materialisation so future quantized_matmul calls reuse
+            // resident GPU memory rather than re-executing the quantize graph node.
             mlx_rs::transforms::eval([&wq, &sc, &bi]).map_err(ae)?;
             return Ok(MlxW::Quant((wq, sc, bi)));
         }
@@ -505,6 +508,88 @@ fn tensor_to_dense(t: &Tensor) -> Result<mlx_rs::Array> {
 
 // ── Operation helpers ─────────────────────────────────────────────────────────
 
+/// Manual GQA attention using per-group 4D matmul.
+///
+/// mlx_rs 0.25.3's fast SDPA does not correctly handle grouped-query attention
+/// (n_kv_heads < n_heads). This computes attention per KV-head group with standard
+/// 4D matmul, which broadcasts the single KV head over its n_rep query heads.
+///
+/// For each KV head group g (0..n_kv_heads):
+///   q_g = Q[:,  g*n_rep:(g+1)*n_rep, :, :]  →  [1, n_rep, seq_q, hd]
+///   k_g = K[:, g:g+1, :, :]                  →  [1, 1, total, hd]
+///   scores = q_g @ k_g.T  →  [1, n_rep, seq_q, total]  (broadcasts k_g over n_rep)
+///   weights = softmax(scores * scale)
+///   out_g = weights @ v_g  →  [1, n_rep, seq_q, hd]
+/// Concatenate all groups → [1, n_heads, seq_q, hd].
+fn gqa_attention(
+    q: &mlx_rs::Array,
+    k: &mlx_rs::Array,
+    v: &mlx_rs::Array,
+    n_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    scale: f32,
+    causal: bool,
+) -> MR<mlx_rs::Array> {
+    let seq_q = q.shape()[2] as i32;
+    let total_kv = k.shape()[2] as i32;
+    let hd = head_dim as i32;
+    let scale_a = mlx_rs::Array::from_slice(&[scale], &[1i32]);
+
+    // Split Q into n_kv_heads groups of n_rep heads.
+    // split(q, n_kv_heads, axis=1) → n_kv_heads arrays of [1, n_rep, seq_q, hd]
+    let q_groups = mlx_rs::ops::split(q, n_kv_heads as i32, Some(1i32))?;
+    // Split K and V into individual KV heads.
+    let k_groups = mlx_rs::ops::split(k, n_kv_heads as i32, Some(1i32))?;
+    let v_groups = mlx_rs::ops::split(v, n_kv_heads as i32, Some(1i32))?;
+
+    // Causal mask (only for prefill seq_q > 1).
+    let log_mask: Option<mlx_rs::Array> = if causal && seq_q > 1 {
+        let ones = mlx_rs::Array::from_slice(
+            &vec![1.0f32; seq_q as usize * total_kv as usize],
+            &[seq_q, total_kv],
+        );
+        let lower = mlx_rs::ops::tril(&ones, None)?;
+        let lm = mlx_rs::ops::log(&lower)?;
+        // Expand to [1, 1, seq_q, total_kv] for broadcasting over [1, n_rep, seq_q, total]
+        let lm = mlx_rs::ops::expand_dims(&lm, 0)?;
+        Some(mlx_rs::ops::expand_dims(&lm, 0)?)
+    } else {
+        None
+    };
+
+    let mut out_groups: Vec<mlx_rs::Array> = Vec::with_capacity(n_kv_heads);
+
+    for g in 0..n_kv_heads {
+        // q_g: [1, n_rep, seq_q, hd]
+        // k_g: [1, 1, total, hd] → transpose → [1, 1, hd, total]
+        let k_gt = mlx_rs::ops::transpose_axes(&k_groups[g], &[0, 1, 3, 2])?;
+
+        // scores: [1, n_rep, seq_q, hd] @ [1, 1, hd, total] = [1, n_rep, seq_q, total]
+        // (broadcasts k_gt over the n_rep dimension)
+        let scores = mlx_rs::ops::matmul(&q_groups[g], &k_gt)?;
+        let scores = mlx_rs::ops::multiply(&scores, &scale_a)?;
+
+        let scores = match &log_mask {
+            Some(m) => mlx_rs::ops::add(&scores, m)?,
+            None => scores,
+        };
+
+        // softmax over last axis (total_kv), axis=3 for 4D tensor
+        let weights = mlx_rs::ops::softmax_axis(&scores, 3i32, None)?;
+
+        // out_g: [1, n_rep, seq_q, total] @ [1, 1, total, hd] = [1, n_rep, seq_q, hd]
+        let out_g = mlx_rs::ops::matmul(&weights, &v_groups[g])?;
+        out_groups.push(out_g);
+    }
+
+    // Concatenate over head dim: [1, n_heads, seq_q, hd]
+    let refs: Vec<&mlx_rs::Array> = out_groups.iter().collect();
+    let combined = mlx_rs::ops::concatenate_axis(&refs, 1)?;
+    // Ensure exact output shape
+    mlx_rs::ops::reshape(&combined, &[1i32, n_heads as i32, seq_q, hd])
+}
+
 /// Linear projection: `x @ W.T` with optional bias.
 /// Uses quantized_matmul for Quant weights, standard matmul for Dense.
 fn mlx_linear(x: &mlx_rs::Array, w: &MlxW, bias: Option<&mlx_rs::Array>) -> MR<mlx_rs::Array> {
@@ -513,7 +598,6 @@ fn mlx_linear(x: &mlx_rs::Array, w: &MlxW, bias: Option<&mlx_rs::Array>) -> MR<m
             mlx_rs::ops::quantized_matmul(x, wq, sc, bi, true, 64i32, 4i32)?
         }
         MlxW::Dense(arr) => {
-            // Transpose [out, in] → [in, out] then matmul
             let wt = mlx_rs::ops::transpose_axes(arr, &[1, 0])?;
             mlx_rs::ops::matmul(x, &wt)?
         }
