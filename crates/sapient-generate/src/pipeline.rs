@@ -760,6 +760,28 @@ impl Pipeline {
         self.mmap
     }
 
+    /// Backend label suitable for display — e.g. "metal", "cpu",
+    /// or "metal+cpu hybrid (24/32 layers on GPU)" in hybrid mode.
+    pub fn backend_display_label(&self) -> String {
+        if let Ok(engine) = self.engine.lock() {
+            match &*engine {
+                ForwardEngine::Llama(f) => return f.backend_label(),
+                ForwardEngine::Phi(_) => {}
+            }
+        }
+        self.backend.to_string()
+    }
+
+    /// True when the engine is using hybrid Metal+CPU layer splitting.
+    pub fn is_hybrid(&self) -> bool {
+        if let Ok(engine) = self.engine.lock() {
+            if let ForwardEngine::Llama(f) = &*engine {
+                return f.is_hybrid();
+            }
+        }
+        false
+    }
+
     /// Reset the KV cache so the next generation starts from a clean state.
     /// Call this between benchmark runs to avoid cache pollution.
     pub fn reset_cache(&self) {

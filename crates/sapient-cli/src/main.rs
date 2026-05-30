@@ -473,10 +473,13 @@ async fn chat_command(
     }
 
     let arch = format!("{:?}", pipeline.arch());
+    // Use the pipeline's own label — shows "metal+cpu hybrid (24/32 layers on GPU)"
+    // in hybrid mode, or the plain backend name otherwise.
+    let display_label = pipeline.backend_display_label();
     let effective_backend = if pipeline.is_mmap() {
-        format!("{backend_label} · mmap")
+        format!("{display_label} · mmap")
     } else {
-        backend_label.clone()
+        display_label
     };
     ui::print_chat_banner(model, &arch, &effective_backend);
 
