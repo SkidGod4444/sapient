@@ -289,12 +289,23 @@ impl LlmBackend for MetalLlmBackend {
 type MlxWeightCache =
     std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<usize, mlx_rs::Array>>>;
 
+#[cfg(feature = "mlx")]
+type MlxQuantCache = std::sync::Arc<
+    parking_lot::Mutex<
+        std::collections::HashMap<usize, (mlx_rs::Array, mlx_rs::Array, mlx_rs::Array)>,
+    >,
+>;
+
 #[derive(Clone)]
 struct MlxLlmOps {
     /// Shared weight cache: `buffer_ptr → GPU Array`. Clones share the same cache so
     /// the MetalLlmBackend (which clones MlxLlmOps per call site) reuses uploads.
     #[cfg(feature = "mlx")]
     cache: MlxWeightCache,
+    /// Quantized weight cache: buffer_ptr → (Wq, scales, biases) in MLX Q4 format.
+    /// Populated lazily on first use; shared across MlxLlmOps clones.
+    #[cfg(feature = "mlx")]
+    quant_cache: MlxQuantCache,
 }
 
 impl std::fmt::Debug for MlxLlmOps {
@@ -303,7 +314,7 @@ impl std::fmt::Debug for MlxLlmOps {
     }
 }
 
-// Can't use #[derive(Default)] because the `cache` field is cfg-gated on
+// Can't use #[derive(Default)] because the `cache` and `quant_cache` fields are cfg-gated on
 // the `mlx` feature and derive doesn't understand that.
 #[allow(clippy::derivable_impls)]
 impl Default for MlxLlmOps {
@@ -311,6 +322,10 @@ impl Default for MlxLlmOps {
         Self {
             #[cfg(feature = "mlx")]
             cache: std::sync::Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            #[cfg(feature = "mlx")]
+            quant_cache: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         }
     }
 }
@@ -422,6 +437,54 @@ impl MlxLlmOps {
         Ok(mlx_rs::Array::from_slice(data, &shape))
     }
 
+    /// Convert a weight tensor to MLX's native Q4 quantized format, caching the result.
+    ///
+    /// Uses `mlx_rs::ops::quantize()` (group_size=64, bits=4) — the same format
+    /// mlx-lm uses.  The resulting (Wq, scales, biases) tuple is stored in
+    /// `quant_cache` keyed by buffer pointer so quantization runs only once per weight.
+    ///
+    /// Only applicable for tensors with `in_dim % 64 == 0` (required by MLX quantize).
+    /// Returns `None` when the weight is too small or the shape is incompatible.
+    #[cfg(feature = "mlx")]
+    fn to_quantized_array(
+        &self,
+        tensor: &Tensor,
+    ) -> Result<Option<(mlx_rs::Array, mlx_rs::Array, mlx_rs::Array)>> {
+        let dims = tensor.shape().dims();
+        if dims.len() != 2 {
+            return Ok(None);
+        }
+        let (out_dim, in_dim) = (dims[0], dims[1]);
+        // MLX quantize requires columns (in_dim) divisible by group_size (64)
+        // and both dimensions divisible by 32.
+        if in_dim % 64 != 0 || out_dim % 32 != 0 || tensor.numel() < 512 {
+            return Ok(None);
+        }
+
+        let ptr_key = tensor.as_bytes().as_ptr() as usize;
+        {
+            let guard = self.quant_cache.lock();
+            if let Some(qma) = guard.get(&ptr_key) {
+                return Ok(Some(qma.clone()));
+            }
+        }
+
+        // Dequantize / convert to F32, then apply MLX quantization.
+        let shape = Self::to_shape(&[out_dim, in_dim])?;
+        let numel = tensor.numel();
+        let cow = tensor.to_f32_cow();
+        let data = &cow[..numel.min(cow.len())];
+        let w_f32 = mlx_rs::Array::from_slice(data, &shape);
+
+        let (wq, scales, biases) = mlx_rs::ops::quantize(&w_f32, 64i32, 4i32)?;
+        // Force GPU materialization so subsequent quantized_matmul calls reuse
+        // resident GPU memory rather than re-executing the quantize graph node.
+        mlx_rs::transforms::eval([&wq, &scales, &biases])?;
+        let result = (wq, scales, biases);
+        self.quant_cache.lock().insert(ptr_key, result.clone());
+        Ok(Some(result))
+    }
+
     #[cfg(feature = "mlx")]
     fn to_tensor(array: mlx_rs::Array) -> Result<Tensor> {
         let shape: Vec<usize> = array
@@ -461,6 +524,17 @@ impl MlxLlmOps {
             // x is a fresh activation (ephemeral); weight is a stable weight (cache it).
             let x_arr =
                 Self::to_array_uncached(x)?.reshape(&Self::to_shape(&[batch * seq, in_dim])?)?;
+
+            // Prefer quantized matmul: avoids dequantization, same throughput as mlx-lm.
+            if let Some((wq, scales, biases)) = self.to_quantized_array(weight)? {
+                let y = mlx_rs::ops::quantized_matmul(
+                    &x_arr, &wq, &scales, &biases,
+                    true, // transpose=true: weight is [out, in], we want x @ W.T
+                    64i32, 4i32,
+                )?;
+                return Self::to_tensor(y.reshape(&Self::to_shape(&[batch, seq, out_dim])?)?);
+            }
+            // Fallback: standard F32 matmul (small tensors, embedding, lm_head, etc.)
             let w_arr = self.to_array(weight)?.transpose()?;
             let y = x_arr.matmul(&w_arr)?;
             Self::to_tensor(y.reshape(&Self::to_shape(&[batch, seq, out_dim])?)?)
@@ -624,6 +698,17 @@ impl MlxLlmOps {
             let h = hidden.to_f32_cow();
             let last = &h[(seq - 1) * hidden_size..seq * hidden_size];
             let h_last = mlx_rs::Array::from_slice(last, &[1, hidden_size as i32]);
+
+            // Prefer quantized matmul for lm_head when eligible.
+            if let Some((wq, scales, biases)) = self.to_quantized_array(lm_head)? {
+                let logits = mlx_rs::ops::quantized_matmul(
+                    &h_last, &wq, &scales, &biases,
+                    true, // transpose=true: lm_head is [vocab, hidden], we want h @ W.T
+                    64i32, 4i32,
+                )?;
+                return Ok(logits.as_slice::<f32>().to_vec());
+            }
+            // Fallback: standard F32 matmul (small vocab or non-aligned dimensions).
             let head = self.to_array(lm_head)?.transpose()?;
             let logits = h_last.matmul(&head)?;
             Ok(logits.as_slice::<f32>().to_vec())
