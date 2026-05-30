@@ -15,7 +15,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use sapient_generate::{
-    mac_gpu_support, GenerationBackend, LoadOptions, Pipeline, SpeculativePipeline,
+    detect_devices, mac_gpu_support, recommend_backend, GenerationBackend, LoadOptions, Pipeline,
+    SpeculativePipeline,
 };
 use sapient_hub::LoadOptions as HubLoadOptions;
 use sapient_runtime::{InferenceSession, Model, ModelConfig, SessionOptions};
@@ -117,6 +118,12 @@ enum Commands {
 
     /// Show available local inference backends.
     BackendInfo,
+
+    /// Detect all CPUs and GPUs, show memory/bandwidth, and recommend backends.
+    ///
+    /// Reports which models fit in GPU memory, whether hybrid CPU+GPU execution
+    /// is possible, and expected tok/s for common model sizes.
+    Devices,
 
     /// Save a HuggingFace access token for gated models.
     Login {
@@ -297,6 +304,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Commands::Reset { model, yes, stale } => reset_command(model.as_deref(), yes, stale),
         Commands::Info { model } => info_command(model.as_str()).await,
         Commands::BackendInfo => backend_info_command(),
+        Commands::Devices => devices_command(),
         Commands::Login { token } => login_command(token.as_deref()),
         Commands::Run {
             model,
@@ -963,6 +971,85 @@ fn backend_info_command() -> Result<()> {
     } else {
         println!("    metal  unavailable ({})", gpu.reason);
         println!("    auto   → cpu");
+    }
+    println!();
+
+    Ok(())
+}
+
+// ── devices ───────────────────────────────────────────────────────────────────
+
+fn devices_command() -> Result<()> {
+    let profile = detect_devices();
+
+    println!();
+    println!(
+        "  {}",
+        console::style("⚡ SAPIENT Device Report").cyan().bold()
+    );
+    println!();
+
+    // CPU + memory block
+    print!("{}", profile.report());
+
+    // Hybrid note
+    if profile.unified_memory {
+        println!(
+            "\n  {}  Apple Unified Memory — zero-copy between CPU and Metal GPU",
+            console::style("Hybrid:").green().bold()
+        );
+        println!("          All layers run on Metal when model fits; otherwise CPU+Metal split.");
+    }
+
+    // Windows GPU hint
+    #[cfg(target_os = "windows")]
+    {
+        use sapient_generate::device::ComputeApi;
+        let has_cuda = profile.gpus.iter().any(|g| g.apis.contains(&ComputeApi::Cuda));
+        let has_dx12 = profile.gpus.iter().any(|g| g.apis.contains(&ComputeApi::DirectX12));
+        if has_cuda {
+            println!(
+                "\n  {}  NVIDIA GPU detected with CUDA — DirectML/Vulkan compute backend planned.",
+                console::style("Note:").yellow().bold()
+            );
+        } else if has_dx12 {
+            println!(
+                "\n  {}  GPU with DirectX 12 detected — Vulkan/DX12 compute backend planned.",
+                console::style("Note:").yellow().bold()
+            );
+        }
+    }
+
+    // Recommendations
+    println!("{}", profile.recommendations());
+
+    // Current auto-backend decision
+    let cached = hub::list_cached_models().unwrap_or_default();
+    if !cached.is_empty() {
+        println!("  Your downloaded models:");
+        for m in &cached {
+            // Look up model size from registry to compute recommendation
+            let plan = recommend_backend(&profile, 0, 32); // 0 = unknown size
+            println!(
+                "    {m:<36} → {}",
+                console::style(plan.label()).dim()
+            );
+        }
+        println!();
+    }
+
+    // Usage tips
+    if profile.gpus.iter().any(|g| {
+        use sapient_generate::device::ComputeApi;
+        g.apis.contains(&ComputeApi::Metal)
+    }) {
+        println!(
+            "  {}",
+            console::style("Tips:").bold()
+        );
+        println!("    sapient chat --backend metal <model>   # force Metal GPU");
+        println!("    sapient chat --backend cpu   <model>   # force CPU");
+        println!("    sapient chat --backend auto  <model>   # auto-select (default)");
     }
     println!();
 
