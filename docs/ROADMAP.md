@@ -8,7 +8,9 @@
 > portability, curated registry, modern CLI, and edge-specific automation
 > (auto-pick quantization for available RAM, auto CPU/GPU offload, single static binary).
 
-## Where we are (v0.3.2)
+## Where we are (v0.3.4)
+- ✅ **`MlxForwardEngine`** — native lazy-graph Metal forward pass for Llama/Qwen GGUF models. All activations stay on the GPU; one `eval()` per token. **~168 tok/s on Qwen2.5-0.5B Q4 (8.6× the CPU path), beats Ollama on 0.5B, within 1.3–1.5× of mlx-lm.** See [BENCHMARKS.md](BENCHMARKS.md).
+- ✅ RoPE-axis correctness fix (transpose to `[1, n_heads, seq, head_dim]` before `fast::rope`) + per-KV-head 4D GQA attention for the MLX path.
 - ✅ Correct CPU + Metal inference for Phi & Llama/Qwen families (F16/BF16 safetensors + GGUF Q4/Q8).
 - ✅ Curated registry, modern CLI (`chat`, `pull`, `run`, `models`, `serve`, `reset`, `rm`, `update`, `devices`), self-update, published to crates.io.
 - ✅ GGUF Q4_0/Q8_0/K-quant loading with mmap support (models larger than RAM).
@@ -65,11 +67,13 @@ SDOT integer arithmetic (ARMv8.4A — all M-series, Raspberry Pi 5):
 - Expected: ~4× compute improvement for Q8_0 dot products.
 - Target: ~35–40 tok/s on 0.5B, ~18–20 tok/s on 1.5B.
 
-## Phase 3 — Apple Silicon / Metal  → **`v0.3.0`**
-Builds on the MLX work already landed.
-- Quantized matmul on MLX (or Metal kernels); exploit unified memory.
-- Native MLX attention + RoPE (remove the current CPU fallback for those ops).
-- Auto CPU/GPU offload by model size & available memory.
+## Phase 3 — Apple Silicon / Metal  → **`v0.3.0`–`v0.3.4`**
+- ✅ Quantized matmul on MLX (`quantized_matmul`, group_size=64, 4-bit); unified memory.
+- ✅ Native MLX attention + RoPE in `MlxForwardEngine` (no CPU fallback on the decode path).
+- ✅ Auto CPU/GPU offload by model size & available memory (`use_mlx_engine` + hybrid split).
+- ✅ **Decode throughput in the mlx-lm performance class** (168 tok/s @ 0.5B, beats Ollama).
+- [ ] **Prefill / TTFT optimisation** — currently 515 ms @ 0.5B / ~3 s @ 1.5B vs ~30–260 ms for mlx-lm/Ollama. Fuse the GQA prefill and skip the GGUF→F32→MLX-Q4 round-trip.
+- [ ] **Lower peak RAM** — store the token-embedding / `lm_head` table as MLX-Q4 and quantize weights without the transient F32 copy (currently ~2 GB vs mlx-lm's 0.3–1.0 GB).
 - **Success metric:** a 7B–13B Q4 model interactive (> ~15 tok/s) on an M-series laptop.
 
 ## Phase 4 — Raspberry Pi / small ARM SBC  → **`v0.3.x`** (partially done)

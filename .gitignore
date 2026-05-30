@@ -1,6 +1,6 @@
 .llm
 target/
-.firecrawl.claude/worktrees/
 .claude/worktrees/
 __pycache__/
 *.pyc
+.firecrawl

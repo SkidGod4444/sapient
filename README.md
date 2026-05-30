@@ -215,22 +215,30 @@ and validating its architecture in `sapient-models`.
 
 ---
 
-## Performance (v0.3.x, CPU, Apple M-series)
+## Performance (v0.3.4, Apple M4, 16 GB)
 
-SAPIENT v0.3.x ships a fully overhauled inference engine. Measured on Apple M-series, GGUF Q8_0 models:
+v0.3.4 lands the **`MlxForwardEngine`** — a native lazy-graph Metal forward pass that
+keeps every activation on the GPU and evaluates once per token (the same strategy
+mlx-lm uses). Decode throughput, measured decode-only on GGUF Q4 models:
 
-| Model | v0.2.8 | v0.3.x | Change |
-|---|---|---|---|
-| Qwen2.5-0.5B Q8_0 | ~10 tok/s | ~18.9 tok/s | **+89%** |
-| Qwen2.5-1.5B Q8_0 | ~4.2 tok/s | ~10.0 tok/s | **+138%** |
+| Model | CPU (NEON) | **Metal (MLX)** | Speedup | vs Ollama | vs mlx-lm |
+|---|---|---|---|---|---|
+| Qwen2.5-0.5B Q4 | 19.6 tok/s | **167.9 tok/s** | **8.6×** | beats (154) | 0.68× (249) |
+| Qwen2.5-1.5B Q4 | 10.8 tok/s | **70.3 tok/s** | **6.5×** | 0.90× (78) | 0.75× (94) |
+
+SAPIENT Metal **beats Ollama on the 0.5B model** and lands within **1.3–1.5× of
+mlx-lm** — from a single daemon-free Rust binary. Full methodology, charts, and the
+honest gaps (prefill/TTFT, peak RAM) are in **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)**.
+
+![Decode throughput](docs/assets/decode_throughput.png)
 
 Key improvements:
-- **Flash-Edge attention** — online-softmax, O(head_dim) working memory, NEON `vfmaq_f32`.
+- **`MlxForwardEngine`** — all activations stay as `mlx_rs::Array`; one `eval()` per
+  decode step. Auto-selected for Llama/Qwen GGUF models on `--backend metal`.
+- **Flash-Edge attention** (CPU) — online-softmax, O(head_dim) memory, NEON `vfmaq_f32`.
 - **Q8_0 KV cache** — 4× RAM reduction vs F32; zero per-step heap allocation.
 - **Online quantization** — F16/BF16 safetensors weights auto-quantized to Q8_0 at load.
 - **NEON GEMV kernels** — native F16 (`vcvt_f32_f16`), Q4_K nibble-unpacking + FMA, SDOT Q8_0.
-- **Adaptive rayon** — `gemv_chunk()` targets 4 tasks/core; avoids micro-task overhead.
-- **Hybrid Metal+CPU** — large models that don't fully fit GPU are layer-split automatically (Llama + Phi).
 - **`sapient devices`** — detect CPU/GPU, estimate tok/s, recommend backend before loading a model.
 
 ---

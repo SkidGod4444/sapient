@@ -1,0 +1,35 @@
+{
+  "backend": "cpu",
+  "load_time_ms": 549,
+  "mmap": false,
+  "model": "openhorizon/qwen2.5-0.5b-q4",
+  "prompt": "Write a detailed 200-word explanation of how neural networks learn through backpropagation, including the role of gradients and the chain rule.",
+  "runs": [
+    {
+      "elapsed_ms": 26363,
+      "run": 1,
+      "total_tokens": 513,
+      "tps": 19.5,
+      "ttft_ms": 302
+    },
+    {
+      "elapsed_ms": 26406,
+      "run": 2,
+      "total_tokens": 513,
+      "tps": 19.4,
+      "ttft_ms": 295
+    },
+    {
+      "elapsed_ms": 26528,
+      "run": 3,
+      "total_tokens": 513,
+      "tps": 19.3,
+      "ttft_ms": 292
+    }
+  ],
+  "summary": {
+    "mean_tps": 19.4,
+    "mean_ttft_ms": 296,
+    "peak_rss_mb": 1390
+  }
+}

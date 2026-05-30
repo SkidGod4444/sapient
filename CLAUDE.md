@@ -55,12 +55,18 @@ sapient-cli              ← the `sapient` binary (chat, pull, run, models, upda
 
 ## Key design decisions to know
 
-### Two forward engines, not one per architecture
-Only two engines are wired to `Pipeline`:
-- **`LlamaForward`** — Llama, Mistral, Qwen2.5 (adds q/k/v biases), SmolLM2, TinyLlama
+### Three forward engines wired to `Pipeline`
+- **`LlamaForward`** — Llama, Mistral, Qwen2.5 (adds q/k/v biases), SmolLM2, TinyLlama (CPU + hybrid Metal)
 - **`PhiForward`** — Phi-1/1.5/2 (LayerNorm+bias, parallel block, `partial_rotary_factor`) and Phi-3 (SwiGLU sequential path)
+- **`MlxForwardEngine`** (`forward/mlx_engine.rs`, `cfg(macos + feature="mlx")`) — native lazy-graph Metal path for Llama/Qwen GGUF models. Auto-selected in `ForwardEngine::from_gguf_weights` when `use_mlx_engine(backend)` is true (Metal/Auto on Apple Silicon). All activations stay as `mlx_rs::Array`; one `mlx_rs::transforms::eval()` per decode step materialises logits + the whole KV cache. v0.3.4: ~168 tok/s on Qwen2.5-0.5B Q4 (8.6× the CPU path).
 
 Architecture builder files in `sapient-models/src/architectures/` (gemma, gpt2, bert, mixtral …) build IR graphs for the graph-execution path; they are **not** used for live inference.
+
+### MlxForwardEngine — critical invariants
+- **RoPE axis:** `mlx_rs::fast::rope` uses dimension **−2** as the sequence-position axis. q/k/v MUST be transposed to `[1, n_heads, seq, head_dim]` (seq at −2) **before** RoPE — exactly like mlx-lm. Applying RoPE to `[1, seq, n_heads, head_dim]` scrambles positions across heads and produces garbage (every model collapses to one repeated token). This was the v0.3.4 fix.
+- **KV cache** is stored in `[1, n_kv_heads, seq, head_dim]` layout and grown via `concatenate_axis` on axis 2.
+- **GQA:** mlx_rs 0.25.3's fused SDPA mishandles grouped-query attention, so `gqa_attention()` does a per-KV-head 4D matmul loop (`split` → per-group `matmul`/`softmax` → `concatenate_axis`). Native `scaled_dot_product_attention` is used only for true MHA (`n_heads == n_kv_heads`).
+- **Threading:** MLX has thread-local stream state — `eval()` must run on the OS thread the engine was created on. `generate_from_tokens_with_config` wraps the decode loop in `tokio::task::block_in_place` for this reason (matching `generate_stream`'s `spawn_blocking`).
 
 ### Quantized storage (Phase 1)
 `DType::Q4_0` and `DType::Q8_0` store raw ggml block bytes — no F32 expansion at load time. Key invariant: `as_bytes()` on non-quantized tensors returns the full buffer from `offset`; on quantized tensors it returns exactly `byte_count(numel)` bytes. Use `as_quant_blocks()` to access raw blocks, and `to_f32_vec()` to dequantize. `matmul_nt` dispatches on weight dtype: float weights use SGEMM, quant weights use per-block dot products.

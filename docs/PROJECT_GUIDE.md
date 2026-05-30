@@ -231,6 +231,11 @@ The real generation math: how to run a Phi or Llama-style model layer by layer.
     Mistral): RMSNorm, RoPE, SwiGLU MLP, optional Q/K/V biases for Qwen.
   - `forward/phi.rs` — the **Phi engine**: LayerNorm with biases, partial RoPE, parallel
     attention+MLP block, and the `<final_layernorm>` + `lm_head` bias.
+  - `forward/mlx_engine.rs` — the **native Metal engine** (`MlxForwardEngine`, Apple
+    Silicon + `--features mlx`). Runs the whole Llama/Qwen forward pass as one MLX
+    lazy graph — every activation stays on the GPU, `eval()` runs once per token.
+    Auto-selected for GGUF Llama/Qwen models when the Metal backend is active.
+    ~168 tok/s on Qwen2.5-0.5B Q4 (8.6× the CPU path). See `docs/BENCHMARKS.md`.
 - `architectures/` — graph **builders** for many model types (used by the IR/graph path).
   Note: only Phi and Llama are wired into live chat today; the rest are scaffolding.
   - `llama.rs`, `phi.rs`, `qwen.rs`, `gemma.rs`, `gpt2.rs`, `bert.rs`, `mixtral.rs`, `mod.rs`.
