@@ -137,17 +137,53 @@ fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
 }
 
 fn fetch_latest_tag() -> Result<String> {
-    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
-    let body = ureq::get(&url)
+    let api_url = format!("https://api.github.com/repos/{REPO}/releases/latest");
+    match ureq::get(&api_url)
         .set("User-Agent", "sapient-cli")
         .call()
-        .with_context(|| format!("failed to fetch {url}"))?
-        .into_string()?;
-    let json: serde_json::Value = serde_json::from_str(&body)?;
-    json["tag_name"]
-        .as_str()
-        .map(String::from)
-        .context("releases/latest response missing tag_name")
+    {
+        Ok(resp) => {
+            let body = resp.into_string()?;
+            let json: serde_json::Value = serde_json::from_str(&body)?;
+            json["tag_name"]
+                .as_str()
+                .map(String::from)
+                .context("releases/latest response missing tag_name")
+        }
+        // GitHub API rate limit (403) or secondary limit (429) — fall back to
+        // reading the redirect Location header from the releases page, which is
+        // not subject to the same IP-based rate limits as the REST API.
+        Err(ureq::Error::Status(403 | 429, _)) => fetch_latest_tag_via_redirect(),
+        Err(e) => Err(anyhow::anyhow!(
+            "failed to check for updates: {e}\n\
+             Tip: if you are behind a corporate proxy, set GITHUB_TOKEN \
+             in your environment to avoid API rate limits."
+        )),
+    }
+}
+
+/// Fallback version check that reads the redirect from the GitHub releases page.
+/// `https://github.com/{REPO}/releases/latest` issues a 302 to
+/// `.../releases/tag/vX.Y.Z` — the tag is in the Location header.
+/// This path does not consume the unauthenticated API rate limit.
+fn fetch_latest_tag_via_redirect() -> Result<String> {
+    let url = format!("https://github.com/{REPO}/releases/latest");
+    // Build a one-shot agent that does NOT follow redirects.
+    let agent = ureq::builder().redirects(0).build();
+    let location = match agent.get(&url).set("User-Agent", "sapient-cli").call() {
+        Ok(r) => r.header("location").map(str::to_owned),
+        Err(ureq::Error::Status(_, r)) => r.header("location").map(str::to_owned),
+        Err(e) => anyhow::bail!("update check failed: {e}"),
+    };
+    location
+        .as_deref()
+        .and_then(|loc| loc.rsplit('/').next())
+        .map(str::to_owned)
+        .context(
+            "GitHub is rate-limiting anonymous requests from your IP.\n\
+             Set GITHUB_TOKEN in your environment for a higher limit, \
+             or try again later.",
+        )
 }
 
 fn verify_sha256(data: &[u8], expected_hex: &str) -> Result<()> {
