@@ -204,11 +204,15 @@ enum Commands {
 
     /// Start an OpenAI-compatible HTTP server for LLM inference.
     ///
+    /// Models are loaded on-demand from API requests — no model is required at startup.
+    /// Optionally pre-load a model for zero-latency on the first request.
+    ///
     /// Exposes: GET /v1/models, POST /v1/chat/completions (streaming + non-streaming),
     /// POST /v1/completions. Compatible with any OpenAI client library.
     Serve {
-        /// HuggingFace model alias (e.g. `openhorizon/qwen2.5-1.5b-q4`).
-        model: String,
+        /// Optional model to pre-load at startup (e.g. `openhorizon/qwen2.5-1.5b-q4`).
+        /// If omitted, models are loaded on-demand when first requested via the API.
+        model: Option<String>,
 
         /// Port to listen on.
         #[arg(short, long, default_value = "11435")]
@@ -322,7 +326,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             port,
             backend,
             mmap,
-        } => server::serve_llm(model.as_str(), port, &backend, mmap).await,
+        } => server::serve_llm(model.as_deref(), port, &backend, mmap).await,
         Commands::Update { force, metal, cpu } => {
             let variant = if metal {
                 Some(update::Variant::Metal)
