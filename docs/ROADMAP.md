@@ -77,6 +77,21 @@ SDOT integer arithmetic (ARMv8.4A — all M-series, Raspberry Pi 5):
 - [ ] **Lower peak RAM** — store the token-embedding / `lm_head` table as MLX-Q4 and quantize weights without the transient F32 copy (currently ~1–1.5 GB vs mlx-lm's 0.3–1.0 GB).
 - **Success metric:** a 7B–13B Q4 model interactive (> ~15 tok/s) on an M-series laptop.
 
+## Phase 3b — Cross-platform GPU (Intel / AMD / Nvidia on Linux & Windows)  → **`v0.3.x`**
+Bring GPU acceleration to the machines Metal can't reach, via a portable compute API
+(`wgpu` → Vulkan / DX12 / Metal). The **same WGSL kernels** run on Intel Arc, AMD
+Radeon, Nvidia, and Apple — and are dev-tested on Apple Silicon (Metal under wgpu).
+- ✅ **Foundation** (`crates/sapient-backends/wgpu`): `WgpuContext` device acquisition +
+  `matmul_nt_f32` / `matmul_nt_q8_0` kernels, validated on GPU against a host reference.
+- [ ] Remaining kernels: RMSNorm, RoPE, SwiGLU, softmax/SDPA attention, embedding gather.
+- [ ] Q4_K / Q4_0 dequant kernels (parity with the CPU K-quant paths).
+- [ ] `WgpuForwardEngine` in `sapient-models` — cached pipelines, persistent buffers,
+  GPU-resident KV cache, one submission per token (mirrors `MlxForwardEngine`).
+- [ ] Wire into `ForwardEngine` + `sapient devices` (auto-select on non-Apple GPUs).
+- [ ] Tiled kernels + perf tuning toward native Vulkan throughput.
+- **Success metric:** a Q4 model on an Intel Arc / AMD Radeon card decoding several×
+  faster than that machine's CPU path, from the same single binary.
+
 ## Phase 4 — Raspberry Pi / small ARM SBC  → **`v0.3.x`** (partially done)
 The hardest, most differentiating CPU target (2–8 GB RAM).
 - ✅ Bigger-than-RAM support via mmap paging.

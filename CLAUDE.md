@@ -48,8 +48,11 @@ sapient-cli              ← the `sapient` binary (chat, pull, run, models, upda
     sapient-io           ← file format loaders (safetensors mmap, GGUF quant, ONNX)
     sapient-backends-cpu ← CPU kernels (matmul, attention, RoPE, quant dot-products)
     sapient-backends-metal ← MLX/Metal GPU backend (optional, `--features mlx`)
+    sapient-backends-wgpu ← cross-platform GPU backend via wgpu (Vulkan/DX12/Metal) — Intel/AMD/Nvidia/Apple
   sapient-core           ← Tensor, DType, Shape, Buffer — used by everyone
 ```
+
+`sapient-backends-wgpu` is the portable GPU path for non-Apple hardware (Intel/AMD/Nvidia on Linux/Windows). It is currently a **foundation**: `WgpuContext` device acquisition + validated `matmul_nt_f32` / `matmul_nt_q8_0` WGSL kernels. It is NOT yet wired into `ForwardEngine` — that's the integration phase (`WgpuForwardEngine`, see `docs/ROADMAP.md` Phase 3b). Develop/test the WGSL on any GPU including Apple Silicon (wgpu uses Metal there); the same shaders run on Intel/AMD via Vulkan.
 
 `sapient-ir`, `sapient-runtime`, `sapient-scheduler`, `sapient-telemetry` power a separate *graph-execution* path used internally. The chat/generate path does **not** go through the IR; it uses the native forward engines directly. `sapient serve` (OpenAI-compatible HTTP server) is implemented in `sapient-cli/src/server.rs` and drives the `Pipeline` API directly — it does not use the IR runtime.
 

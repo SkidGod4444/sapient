@@ -21,6 +21,7 @@ CRATES=(
   sapient-tokenizers
   sapient-backends-cpu
   sapient-backends-metal
+  sapient-backends-wgpu
   sapient-io
   sapient-hub
   sapient-scheduler
@@ -70,4 +71,4 @@ for c in "${CRATES[@]}"; do
   done
 done
 
-echo "=== ALL 13 CRATES PUBLISHED @ $VERSION ==="
+echo "=== ALL 14 CRATES PUBLISHED @ $VERSION ==="

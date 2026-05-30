@@ -245,6 +245,16 @@ Key improvements:
 - **NEON GEMV kernels** — native F16 (`vcvt_f32_f16`), Q4_K nibble-unpacking + FMA, SDOT Q8_0.
 - **`sapient devices`** — detect CPU/GPU, estimate tok/s, recommend backend before loading a model.
 
+### Cross-platform GPU (Intel / AMD / Nvidia) — in progress
+
+Metal acceleration is Apple-only. To reach Intel Arc, AMD Radeon, and Nvidia GPUs on
+Linux and Windows, SAPIENT is growing a portable GPU backend
+(`crates/sapient-backends/wgpu`) built on [`wgpu`](https://wgpu.rs) — the same WGSL
+compute shaders run on Vulkan, DX12, and Metal. The **foundation** has landed: GPU
+device acquisition plus validated F32 and Q8_0 quantized matmul kernels. The full
+forward-pass integration (`WgpuForwardEngine`) is tracked in
+[ROADMAP Phase 3b](docs/ROADMAP.md).
+
 ---
 
 ## HTTP Server — OpenAI-compatible
