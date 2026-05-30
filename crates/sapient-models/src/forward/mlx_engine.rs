@@ -169,7 +169,7 @@ impl MlxForwardEngine {
         let mut all: Vec<&mlx_rs::Array> = Vec::with_capacity(1 + kv.len());
         all.push(&logits_arr);
         all.extend(kv.iter());
-        mlx_rs::transforms::eval(all.into_iter()).map_err(ae)?;
+        mlx_rs::transforms::eval(all).map_err(ae)?;
         Ok(logits_arr.as_slice::<f32>().to_vec())
     }
 
@@ -267,18 +267,9 @@ impl MlxForwardEngine {
             })
             .collect();
 
-        for i in 0..self.layers.len() {
+        for (layer, cache) in self.layers.iter().zip(temp_cache.iter_mut()) {
             x = forward_llama_layer(
-                x,
-                &self.layers[i],
-                &mut temp_cache[i],
-                n_heads,
-                n_kv_heads,
-                head_dim,
-                rope_theta,
-                eps,
-                0,
-                false,
+                x, layer, cache, n_heads, n_kv_heads, head_dim, rope_theta, eps, 0, false,
             )?;
         }
         x = mlx_rs::fast::rms_norm(&x, &self.final_norm, eps)?;
@@ -310,8 +301,8 @@ fn forward_llama_layer(
     offset: usize,
     use_cache: bool,
 ) -> MR<mlx_rs::Array> {
-    let seq = x.shape()[1] as i32;
-    let hidden = x.shape()[2] as i32;
+    let seq = x.shape()[1];
+    let hidden = x.shape()[2];
 
     // ── 1. Input RMS norm ────────────────────────────────────────────────────
     let h = mlx_rs::fast::rms_norm(&x, &layer.input_norm_w, eps)?;
@@ -381,29 +372,17 @@ fn forward_llama_layer(
     let q_t = q;
 
     // ── 7. Attention ─────────────────────────────────────────────────────────────
-    // mlx_rs 0.25.3's fast SDPA does not correctly handle grouped-query attention
-    // (n_kv_heads < n_heads), so we use a per-group 4D matmul attention for GQA and
-    // reserve native SDPA for standard MHA (n_heads == n_kv_heads).
+    // MLX's fused SDPA handles grouped-query attention natively (K/V are NOT
+    // pre-tiled). This is correct now that RoPE is applied on the right axis —
+    // the earlier "SDPA mishandles GQA" symptom was the RoPE axis bug, not SDPA.
+    // The fused Metal kernel is both correct and faster than a manual matmul loop.
     let scale = (head_dim as f32).powf(-0.5);
-    let attn = if n_kv_heads < n_heads {
-        gqa_attention(
-            &q_t,
-            &k_t,
-            &v_t,
-            n_heads,
-            n_kv_heads,
-            head_dim,
-            scale,
-            seq > 1,
-        )?
+    let mask = if seq > 1 {
+        Some(ScaledDotProductAttentionMask::Causal)
     } else {
-        let mask = if seq > 1 {
-            Some(ScaledDotProductAttentionMask::Causal)
-        } else {
-            None
-        };
-        mlx_rs::fast::scaled_dot_product_attention(&q_t, &k_t, &v_t, scale, mask)?
+        None
     };
+    let attn = mlx_rs::fast::scaled_dot_product_attention(&q_t, &k_t, &v_t, scale, mask)?;
     // attn: [1, n_heads, seq, head_dim]
 
     // ── 8. Merge heads → [1, seq, hidden] ────────────────────────────────────
@@ -507,88 +486,6 @@ fn tensor_to_dense(t: &Tensor) -> Result<mlx_rs::Array> {
 }
 
 // ── Operation helpers ─────────────────────────────────────────────────────────
-
-/// Manual GQA attention using per-group 4D matmul.
-///
-/// mlx_rs 0.25.3's fast SDPA does not correctly handle grouped-query attention
-/// (n_kv_heads < n_heads). This computes attention per KV-head group with standard
-/// 4D matmul, which broadcasts the single KV head over its n_rep query heads.
-///
-/// For each KV head group g (0..n_kv_heads):
-///   q_g = Q[:,  g*n_rep:(g+1)*n_rep, :, :]  →  [1, n_rep, seq_q, hd]
-///   k_g = K[:, g:g+1, :, :]                  →  [1, 1, total, hd]
-///   scores = q_g @ k_g.T  →  [1, n_rep, seq_q, total]  (broadcasts k_g over n_rep)
-///   weights = softmax(scores * scale)
-///   out_g = weights @ v_g  →  [1, n_rep, seq_q, hd]
-/// Concatenate all groups → [1, n_heads, seq_q, hd].
-fn gqa_attention(
-    q: &mlx_rs::Array,
-    k: &mlx_rs::Array,
-    v: &mlx_rs::Array,
-    n_heads: usize,
-    n_kv_heads: usize,
-    head_dim: usize,
-    scale: f32,
-    causal: bool,
-) -> MR<mlx_rs::Array> {
-    let seq_q = q.shape()[2] as i32;
-    let total_kv = k.shape()[2] as i32;
-    let hd = head_dim as i32;
-    let scale_a = mlx_rs::Array::from_slice(&[scale], &[1i32]);
-
-    // Split Q into n_kv_heads groups of n_rep heads.
-    // split(q, n_kv_heads, axis=1) → n_kv_heads arrays of [1, n_rep, seq_q, hd]
-    let q_groups = mlx_rs::ops::split(q, n_kv_heads as i32, Some(1i32))?;
-    // Split K and V into individual KV heads.
-    let k_groups = mlx_rs::ops::split(k, n_kv_heads as i32, Some(1i32))?;
-    let v_groups = mlx_rs::ops::split(v, n_kv_heads as i32, Some(1i32))?;
-
-    // Causal mask (only for prefill seq_q > 1).
-    let log_mask: Option<mlx_rs::Array> = if causal && seq_q > 1 {
-        let ones = mlx_rs::Array::from_slice(
-            &vec![1.0f32; seq_q as usize * total_kv as usize],
-            &[seq_q, total_kv],
-        );
-        let lower = mlx_rs::ops::tril(&ones, None)?;
-        let lm = mlx_rs::ops::log(&lower)?;
-        // Expand to [1, 1, seq_q, total_kv] for broadcasting over [1, n_rep, seq_q, total]
-        let lm = mlx_rs::ops::expand_dims(&lm, 0)?;
-        Some(mlx_rs::ops::expand_dims(&lm, 0)?)
-    } else {
-        None
-    };
-
-    let mut out_groups: Vec<mlx_rs::Array> = Vec::with_capacity(n_kv_heads);
-
-    for g in 0..n_kv_heads {
-        // q_g: [1, n_rep, seq_q, hd]
-        // k_g: [1, 1, total, hd] → transpose → [1, 1, hd, total]
-        let k_gt = mlx_rs::ops::transpose_axes(&k_groups[g], &[0, 1, 3, 2])?;
-
-        // scores: [1, n_rep, seq_q, hd] @ [1, 1, hd, total] = [1, n_rep, seq_q, total]
-        // (broadcasts k_gt over the n_rep dimension)
-        let scores = mlx_rs::ops::matmul(&q_groups[g], &k_gt)?;
-        let scores = mlx_rs::ops::multiply(&scores, &scale_a)?;
-
-        let scores = match &log_mask {
-            Some(m) => mlx_rs::ops::add(&scores, m)?,
-            None => scores,
-        };
-
-        // softmax over last axis (total_kv), axis=3 for 4D tensor
-        let weights = mlx_rs::ops::softmax_axis(&scores, 3i32, None)?;
-
-        // out_g: [1, n_rep, seq_q, total] @ [1, 1, total, hd] = [1, n_rep, seq_q, hd]
-        let out_g = mlx_rs::ops::matmul(&weights, &v_groups[g])?;
-        out_groups.push(out_g);
-    }
-
-    // Concatenate over head dim: [1, n_heads, seq_q, hd]
-    let refs: Vec<&mlx_rs::Array> = out_groups.iter().collect();
-    let combined = mlx_rs::ops::concatenate_axis(&refs, 1)?;
-    // Ensure exact output shape
-    mlx_rs::ops::reshape(&combined, &[1i32, n_heads as i32, seq_q, hd])
-}
 
 /// Linear projection: `x @ W.T` with optional bias.
 /// Uses quantized_matmul for Quant weights, standard matmul for Dense.

@@ -121,7 +121,7 @@ pub struct Pipeline {
     chat_template: Option<ChatTemplate>,
     model_info: ModelInfo,
     weight_paths: Vec<PathBuf>,
-    engine: Mutex<ForwardEngine>,
+    engine: Arc<Mutex<ForwardEngine>>,
     config: GenerationConfig,
     backend: LlmBackendKind,
     /// Whether weights are mmap'd from disk (true) or fully heap-resident (false).
@@ -249,7 +249,7 @@ impl Pipeline {
             chat_template,
             model_info,
             weight_paths: model_files.weight_paths.clone(),
-            engine: Mutex::new(engine),
+            engine: Arc::new(Mutex::new(engine)),
             config,
             backend,
             mmap: false,
@@ -360,7 +360,7 @@ impl Pipeline {
             chat_template: Some(chat_template),
             model_info,
             weight_paths: vec![path],
-            engine: Mutex::new(engine),
+            engine: Arc::new(Mutex::new(engine)),
             config,
             backend,
             mmap: use_mmap,
@@ -482,19 +482,15 @@ impl Pipeline {
             }
         }
         let tok = Arc::clone(&self.tokenizer);
-        let model_info = self.model_info.clone();
-        let weight_paths = self.weight_paths.clone();
-        let backend = self.configured_backend();
+        let engine = Arc::clone(&self.engine);
 
         tokio::task::spawn_blocking(move || {
-            let mut engine = match ForwardEngine::from_weight_paths_with_backend(
-                model_info,
-                &weight_paths,
-                backend,
-            ) {
+            // Reuse the already-loaded engine instead of rebuilding it — re-loading
+            // and re-quantizing the model here previously dominated TTFT (3 s on 1.5B).
+            let mut engine = match engine.lock() {
                 Ok(e) => e,
                 Err(e) => {
-                    let _ = tx.blocking_send(format!("Error: {e}"));
+                    let _ = tx.blocking_send(format!("Error: engine lock poisoned: {e}"));
                     return;
                 }
             };
@@ -582,19 +578,15 @@ impl Pipeline {
         let strategy = self.config.strategy.clone();
         let stop = self.config.stop_sequences.clone();
         let tok = Arc::clone(&self.tokenizer);
-        let model_info = self.model_info.clone();
-        let weight_paths = self.weight_paths.clone();
-        let backend = self.configured_backend();
+        let engine = Arc::clone(&self.engine);
 
         tokio::task::spawn_blocking(move || {
-            let mut engine = match ForwardEngine::from_weight_paths_with_backend(
-                model_info,
-                &weight_paths,
-                backend,
-            ) {
+            // Reuse the already-loaded engine instead of rebuilding it — re-loading
+            // and re-quantizing the model here previously dominated TTFT (3 s on 1.5B).
+            let mut engine = match engine.lock() {
                 Ok(e) => e,
                 Err(e) => {
-                    let _ = tx.blocking_send(format!("Error: {e}"));
+                    let _ = tx.blocking_send(format!("Error: engine lock poisoned: {e}"));
                     return;
                 }
             };
@@ -820,10 +812,6 @@ impl Pipeline {
     /// A reference to the active generation config.
     pub fn config(&self) -> &GenerationConfig {
         &self.config
-    }
-
-    fn configured_backend(&self) -> LlmBackendKind {
-        self.backend
     }
 }
 

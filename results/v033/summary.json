@@ -1,24 +1,25 @@
 {
   "meta": {
-    "date": "2026-05-30",
+    "date": "2026-05-31",
     "hardware": "Apple M4",
     "ram_gb": 16,
     "cores": 10,
     "os": "macOS 26.5 aarch64",
-    "sapient_version": "0.3.4",
+    "sapient_version": "0.3.5",
     "mlx_lm_version": "0.31.2",
     "ollama_version": "0.12.x",
     "prompt": "Write a detailed 200-word explanation of how neural networks learn through backpropagation, including the role of gradients and the chain rule.",
-    "max_tokens": 200
+    "max_tokens": 200,
+    "note": "decode_tps is decode-only (generated_tokens / (elapsed - ttft)); ttft_ms is steady-state (warm engine, run 1 discarded)"
   },
   "results": [
-    {"model": "0.5b", "engine": "SAPIENT CPU",   "decode_tps": 19.6,  "ttft_ms": 296,  "load_ms": 549,  "peak_mb": 1390},
-    {"model": "0.5b", "engine": "SAPIENT Metal", "decode_tps": 167.9, "ttft_ms": 515,  "load_ms": 944,  "peak_mb": 2280},
-    {"model": "0.5b", "engine": "Ollama Metal",  "decode_tps": 153.7, "ttft_ms": 28,   "load_ms": 41,   "peak_mb": null},
-    {"model": "0.5b", "engine": "mlx-lm Metal",  "decode_tps": 248.6, "ttft_ms": 39,   "load_ms": null, "peak_mb": 325},
-    {"model": "1.5b", "engine": "SAPIENT CPU",   "decode_tps": 10.8,  "ttft_ms": 1233, "load_ms": 895,  "peak_mb": 850},
-    {"model": "1.5b", "engine": "SAPIENT Metal", "decode_tps": 70.3,  "ttft_ms": 2997, "load_ms": 2990, "peak_mb": 2130},
-    {"model": "1.5b", "engine": "Ollama Metal",  "decode_tps": 77.9,  "ttft_ms": 64,   "load_ms": 41,   "peak_mb": null},
-    {"model": "1.5b", "engine": "mlx-lm Metal",  "decode_tps": 94.2,  "ttft_ms": 264,  "load_ms": null, "peak_mb": 951}
+    {"model": "0.5b", "engine": "SAPIENT CPU",   "decode_tps": 20,    "ttft_ms": 184, "peak_mb": 1486},
+    {"model": "0.5b", "engine": "SAPIENT Metal", "decode_tps": 187,   "ttft_ms": 21,  "peak_mb": 1231},
+    {"model": "0.5b", "engine": "Ollama Metal",  "decode_tps": 153.7, "ttft_ms": 28,  "peak_mb": null},
+    {"model": "0.5b", "engine": "mlx-lm Metal",  "decode_tps": 248.6, "ttft_ms": 39,  "peak_mb": 325},
+    {"model": "1.5b", "engine": "SAPIENT CPU",   "decode_tps": 11,    "ttft_ms": 535, "peak_mb": 3289},
+    {"model": "1.5b", "engine": "SAPIENT Metal", "decode_tps": 74,    "ttft_ms": 70,  "peak_mb": 450},
+    {"model": "1.5b", "engine": "Ollama Metal",  "decode_tps": 77.9,  "ttft_ms": 64,  "peak_mb": null},
+    {"model": "1.5b", "engine": "mlx-lm Metal",  "decode_tps": 94.2,  "ttft_ms": 264, "peak_mb": 951}
   ]
 }

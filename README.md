@@ -215,26 +215,30 @@ and validating its architecture in `sapient-models`.
 
 ---
 
-## Performance (v0.3.4, Apple M4, 16 GB)
+## Performance (v0.3.5, Apple M4, 16 GB)
 
-v0.3.4 lands the **`MlxForwardEngine`** — a native lazy-graph Metal forward pass that
-keeps every activation on the GPU and evaluates once per token (the same strategy
-mlx-lm uses). Decode throughput, measured decode-only on GGUF Q4 models:
+The **`MlxForwardEngine`** runs the whole Llama/Qwen forward pass as one MLX lazy
+graph — every activation stays on the GPU, `eval()` runs once per token. Measured on
+GGUF Q4 models (decode-only tok/s; steady-state TTFT):
 
-| Model | CPU (NEON) | **Metal (MLX)** | Speedup | vs Ollama | vs mlx-lm |
+| Model | CPU | **Metal** | Speedup | Decode vs Ollama / mlx-lm | TTFT vs Ollama / mlx-lm |
 |---|---|---|---|---|---|
-| Qwen2.5-0.5B Q4 | 19.6 tok/s | **167.9 tok/s** | **8.6×** | beats (154) | 0.68× (249) |
-| Qwen2.5-1.5B Q4 | 10.8 tok/s | **70.3 tok/s** | **6.5×** | 0.90× (78) | 0.75× (94) |
+| Qwen2.5-0.5B Q4 | 20 | **187 tok/s** | **9.4×** | beats 154 / 0.75× 249 | **21 ms** — best of all |
+| Qwen2.5-1.5B Q4 | 11 | **74 tok/s** | **6.7×** | 0.95× 78 / 0.79× 94 | 70 ms vs 64 / 264 |
 
-SAPIENT Metal **beats Ollama on the 0.5B model** and lands within **1.3–1.5× of
-mlx-lm** — from a single daemon-free Rust binary. Full methodology, charts, and the
-honest gaps (prefill/TTFT, peak RAM) are in **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)**.
+SAPIENT Metal **beats Ollama on 0.5B decode and has the lowest time-to-first-token of
+any engine on 0.5B**, within **1.3–1.5× of mlx-lm** — from a single daemon-free 22 MB
+binary. Full methodology, charts, and the remaining peak-RAM gap are in
+**[docs/BENCHMARKS.md](docs/BENCHMARKS.md)**.
 
 ![Decode throughput](docs/assets/decode_throughput.png)
+![Time to first token](docs/assets/ttft.png)
 
 Key improvements:
 - **`MlxForwardEngine`** — all activations stay as `mlx_rs::Array`; one `eval()` per
-  decode step. Auto-selected for Llama/Qwen GGUF models on `--backend metal`.
+  decode step; MLX fused SDPA for attention. Auto-selected for Llama/Qwen GGUF models on `--backend metal`.
+- **Engine reuse** — the pipeline holds the loaded engine in an `Arc<Mutex<…>>`; the
+  streaming path no longer rebuilds it per call (TTFT dropped 30–44×, 1.5B: 3 s → 70 ms).
 - **Flash-Edge attention** (CPU) — online-softmax, O(head_dim) memory, NEON `vfmaq_f32`.
 - **Q8_0 KV cache** — 4× RAM reduction vs F32; zero per-step heap allocation.
 - **Online quantization** — F16/BF16 safetensors weights auto-quantized to Q8_0 at load.

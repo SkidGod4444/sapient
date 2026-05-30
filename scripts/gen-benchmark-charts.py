@@ -111,3 +111,38 @@ ax2.set_ylim(0, max(metal_vals) * 1.25)
 fig2.tight_layout()
 fig2.savefig(os.path.join(ASSETS, "sapient_speedup.png"), dpi=140)
 print("wrote docs/assets/sapient_speedup.png")
+
+# ── Chart 3: TTFT (lower is better) ───────────────────────────────────────────
+fig3, ax3 = plt.subplots(figsize=(10, 5.5))
+ttft_engines = ["SAPIENT Metal", "Ollama Metal", "mlx-lm Metal"]
+for i, eng in enumerate(ttft_engines):
+    vals = []
+    for m in models:
+        v = next(
+            (r["ttft_ms"] for r in results if r["model"] == m and r["engine"] == eng),
+            0,
+        )
+        vals.append(v)
+    bw = 0.25
+    offsets = [xi + (i - (len(ttft_engines) - 1) / 2) * bw for xi in x]
+    bars = ax3.bar(offsets, vals, bw, label=eng, color=COLORS[eng], edgecolor="white", linewidth=0.5)
+    for b, v in zip(bars, vals):
+        ax3.text(b.get_x() + b.get_width() / 2, v + 4, f"{v:.0f}", ha="center", va="bottom", fontsize=9, fontweight="bold")
+
+ax3.set_xticks(list(x))
+ax3.set_xticklabels([f"Qwen2.5-{m.upper()}" for m in models], fontsize=12)
+ax3.set_ylabel("Time to first token (ms)", fontsize=12)
+ax3.set_title(
+    f"Time to First Token — {meta['hardware']}, warm engine\n"
+    f"SAPIENT v{meta['sapient_version']} · lower is better",
+    fontsize=13,
+    fontweight="bold",
+)
+ax3.legend(loc="upper left", fontsize=10, framealpha=0.9)
+ax3.grid(axis="y", alpha=0.25, linestyle="--")
+ax3.set_axisbelow(True)
+ax3.spines["top"].set_visible(False)
+ax3.spines["right"].set_visible(False)
+fig3.tight_layout()
+fig3.savefig(os.path.join(ASSETS, "ttft.png"), dpi=140)
+print("wrote docs/assets/ttft.png")
