@@ -1,12 +1,58 @@
 //! Shared tensor ops for transformer forward passes.
 
 use anyhow::Result;
-use sapient_backends_cpu::kernels::{self, attention, layernorm, matmul, rope};
+use sapient_backends_cpu::kernels::{self, attention, layernorm, matmul, quant, rope};
 use sapient_core::error::SapientError;
 use sapient_core::{DType, Shape, Tensor};
 
 fn map_err<T>(result: std::result::Result<T, SapientError>) -> Result<T> {
     result.map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+// ── Online F16 → Q8_0 quantization at load time ──────────────────────────────
+
+/// Returns true if a weight tensor should be quantized online to Q8_0.
+///
+/// Criteria:
+/// - Must be a 2-D matrix with at least 32 elements (one Q8_0 block).
+/// - Must have dtype F16 or BF16 (safetensors weight matrices).
+/// - Must not be a norm weight, bias, embedding table, or lm_head
+///   (these have different access patterns or are tiny).
+pub fn should_quantize_online(name: &str, t: &Tensor) -> bool {
+    let dims = t.shape().dims();
+    if dims.len() != 2 {
+        return false;
+    }
+    let numel = dims[0] * dims[1];
+    if numel < 32 || numel % 32 != 0 {
+        return false;
+    }
+    // Skip small helper tensors and anything already quantized.
+    let skip = ["norm", "bias", "embed", "lm_head"];
+    if skip.iter().any(|s| name.contains(s)) {
+        return false;
+    }
+    matches!(t.dtype(), DType::F16 | DType::BF16)
+}
+
+/// Quantize a 2-D F16/BF16 weight tensor to Q8_0 in one pass.
+///
+/// The F16→F32 dequantization happens once here at load time; all subsequent
+/// decode steps use the already-NEON-optimized Q8_0 kernel (~1 byte/weight vs
+/// 2 bytes/weight for F16, and avoids the per-step F16→F32 conversion cost).
+pub fn quantize_tensor_to_q8_0(t: Tensor) -> Tensor {
+    let shape = t.shape().dims().to_vec();
+    let numel = shape[0] * shape[1];
+    debug_assert_eq!(numel % 32, 0);
+
+    let f32_data = t.to_f32_vec(); // one-time dequantization
+    let n_blocks = numel / 32;
+    let mut q8_bytes = Vec::with_capacity(n_blocks * 34);
+    for block in f32_data.chunks_exact(32) {
+        q8_bytes.extend_from_slice(&quant::quantize_q8_0_block(block));
+    }
+
+    Tensor::from_quant_bytes(&q8_bytes, shape, DType::Q8_0).unwrap_or(t)
 }
 
 /// Gather token embeddings: weight `[vocab, hidden]`, ids `[seq]` → `[1, seq, hidden]`.
@@ -261,8 +307,8 @@ pub fn update_kv_cache(
 /// `blocks_per_head * 34` bytes (one Q8_0 block per 32 head_dim elements).
 fn update_kv_cache_q8(
     cache: &mut Tensor,
-    cd: &[usize], // cache shape dims: [b, h, max_seq, hd]
-    nd: &[usize], // new_k shape dims: [b, h, new_seq, hd]
+    cd: &[usize],
+    nd: &[usize],
     current_seq_len: usize,
     new_k: &Tensor,
 ) -> Result<Tensor> {
@@ -273,26 +319,18 @@ fn update_kv_cache_q8(
         anyhow::bail!("new tokens {} exceeds max cache size {}", new_seq, max_seq);
     }
 
-    // Number of Q8_0 blocks covering one head_dim slice (hd is a multiple of 32).
     let blocks_per_head = hd / 32;
     let bytes_per_pos = blocks_per_head * 34;
-
     let mut total_seq = current_seq_len + new_seq;
     let shift = total_seq.saturating_sub(max_seq);
 
-    // Copy the cache bytes out so we can mutate them.
-    // `cache.as_bytes()` returns exactly `byte_count(numel)` bytes for quantized tensors.
-    let mut cache_bytes: Vec<u8> = cache.as_bytes().to_vec();
-
-    // `new_k` is always F32 (output of RoPE / split_heads).
-    let new_k_f32 = new_k.to_f32_vec();
-
-    // Helper: byte offset for position (bi, hi, si) in the flat byte buffer.
     let pos_off = |bi: usize, hi: usize, si: usize| -> usize {
         (bi * h * max_seq + hi * max_seq + si) * bytes_per_pos
     };
 
-    // Shift existing entries left when the cache is full.
+    // In-place mutation via as_bytes_mut — zero allocation, zero copy.
+    let cache_bytes = cache.as_bytes_mut()?;
+
     if shift > 0 {
         let keep_seq = current_seq_len - shift;
         for bi in 0..b_sz {
@@ -306,26 +344,19 @@ fn update_kv_cache_q8(
         }
     }
 
-    // Append new tokens: quantize each F32 head slice → Q8_0 blocks.
-    let insert_pos = if shift > 0 {
-        current_seq_len - shift
-    } else {
-        current_seq_len
-    };
+    let insert_pos = if shift > 0 { current_seq_len - shift } else { current_seq_len };
+    let new_k_f32 = new_k.to_f32_vec();
 
     for bi in 0..b_sz {
         for hi in 0..h {
             for si in 0..new_seq {
                 let dst_start = pos_off(bi, hi, insert_pos + si);
-                // new_k shape [b, h, new_seq, hd] — contiguous from split_heads.
                 let src_f32_start = (bi * h * new_seq + hi * new_seq + si) * hd;
                 let src_f32 = &new_k_f32[src_f32_start..src_f32_start + hd];
-
                 for blk in 0..blocks_per_head {
-                    let f_blk = &src_f32[blk * 32..(blk + 1) * 32];
-                    let encoded = quantize_f32_to_q8_0_block(f_blk);
-                    let byte_off = dst_start + blk * 34;
-                    cache_bytes[byte_off..byte_off + 34].copy_from_slice(&encoded);
+                    let encoded = quantize_f32_to_q8_0_block(&src_f32[blk * 32..(blk + 1) * 32]);
+                    cache_bytes[dst_start + blk * 34..dst_start + blk * 34 + 34]
+                        .copy_from_slice(&encoded);
                 }
             }
         }
@@ -335,11 +366,9 @@ fn update_kv_cache_q8(
         total_seq = max_seq;
     }
 
-    // Swap the mutated bytes back into the cache tensor.
-    *cache = Tensor::from_quant_bytes(&cache_bytes, vec![b_sz, h, max_seq, hd], DType::Q8_0)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    // Dequantize the live prefix [0..total_seq] to a contiguous F32 tensor.
+    // Dequantize the live prefix to F32 for the attention kernel.
+    // Read directly from the (now-updated) in-place cache.
+    let cache_ro = cache.as_bytes();
     let out_numel = b_sz * h * total_seq * hd;
     let mut out_f32 = vec![0.0f32; out_numel];
 
@@ -348,20 +377,18 @@ fn update_kv_cache_q8(
             for si in 0..total_seq {
                 let src_start = pos_off(bi, hi, si);
                 let dst_f32_start = (bi * h * total_seq + hi * total_seq + si) * hd;
-                let src_slice = &cache_bytes[src_start..src_start + bytes_per_pos];
-
                 for blk in 0..blocks_per_head {
-                    let blk_bytes = &src_slice[blk * 34..(blk + 1) * 34];
-                    let d = half::f16::from_le_bytes([blk_bytes[0], blk_bytes[1]]).to_f32();
+                    let bb = &cache_ro[src_start + blk * 34..src_start + blk * 34 + 34];
+                    let d = half::f16::from_le_bytes([bb[0], bb[1]]).to_f32();
                     for j in 0..32 {
-                        out_f32[dst_f32_start + blk * 32 + j] = blk_bytes[2 + j] as i8 as f32 * d;
+                        out_f32[dst_f32_start + blk * 32 + j] = bb[2 + j] as i8 as f32 * d;
                     }
                 }
             }
         }
     }
 
-    Tensor::from_f32(&out_f32, Shape::new(vec![b_sz, h, total_seq, hd]))
+    Tensor::from_f32_vec(out_f32, Shape::new(vec![b_sz, h, total_seq, hd]))
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 

@@ -130,9 +130,9 @@ pub fn matmul_nt(x: &Tensor, w: &Tensor) -> Result<Tensor> {
     match w.dtype() {
         DType::Q4_0 => matmul_nt_q4_0(x, w, m, k, n),
         DType::Q8_0 => matmul_nt_q8_0(x, w, m, k, n),
-        DType::Q4_K => matmul_nt_kquant(x, w, m, k, n, Q4_K_BLOCK_BYTES, quant::dot_q4_k_row_f32),
-        DType::Q5_K => matmul_nt_kquant(x, w, m, k, n, Q5_K_BLOCK_BYTES, quant::dot_q5_k_row_f32),
-        DType::Q6_K => matmul_nt_kquant(x, w, m, k, n, Q6_K_BLOCK_BYTES, quant::dot_q6_k_row_f32),
+        DType::Q4_K => matmul_nt_q4_k(x, w, m, k, n),
+        DType::Q5_K => matmul_nt_q5_k(x, w, m, k, n),
+        DType::Q6_K => matmul_nt_q6_k(x, w, m, k, n),
         _ => matmul_nt_float(x, w, m, k, n),
     }
 }
@@ -231,7 +231,106 @@ fn dot_f32_fast(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(ai, bi)| ai * bi).sum()
 }
 
+/// NEON F16 dot product: convert F16 weights to F32 using NEON integer bit
+/// manipulation (IEEE 754 F16→F32 expansion), then FMA with F32 activations.
+///
+/// Does NOT use `float16x4_t` / `vcvt_f32_f16` (only stable since Rust 1.94).
+/// Instead, expands the 10-bit mantissa and 5-bit exponent inline.
+/// Normal F16 values: sign | ((exp16 + 112) << 23) | (mantissa << 13).
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn dot_f32_x_f16_neon(a_f32: &[f32], b_f16: &[u16]) -> f32 {
+    use std::arch::aarch64::*;
+    let n = a_f32.len();
+    let mut acc = vdupq_n_f32(0.0);
+    let mut i = 0;
+
+    // Constants for IEEE 754 F16 -> F32 bit manipulation (normal values only):
+    // F16: s[15] e[14:10] m[9:0]
+    // F32: s[31] e[30:23] m[22:0]
+    // exponent bias adjustment: F32_bias(127) - F16_bias(15) = 112 -> shift by 13
+    let mask_mant = vdupq_n_u32(0x000003FF); // 10-bit mantissa mask
+    let mask_sign = vdupq_n_u32(0x00008000); // sign bit in u16 position
+    let exp_bias  = vdupq_n_u32(112 << 23);  // exponent bias shift for F32
+
+    while i + 4 <= n {
+        let av = vld1q_f32(a_f32.as_ptr().add(i));
+
+        // Load 4 F16 values as u16, widen to u32
+        let u16x4 = vld1_u16(b_f16.as_ptr().add(i));
+        let u32x4 = vmovl_u16(u16x4); // zero-extend u16x4 -> u32x4
+
+        // Sign: bit 15 of F16 -> bit 31 of F32
+        let sign = vshlq_n_u32::<16>(vandq_u32(u32x4, mask_sign));
+
+        // Exponent: bits [14:10] -> F32 exponent = (exp16 + 112) at [30:23]
+        // Extract exp16 (5 bits at position 10..14) and shift to F32 position
+        let exp16 = vshrq_n_u32::<10>(u32x4);          // bits [14:10] now at [4:0]
+        let exp32 = vaddq_u32(vshlq_n_u32::<23>(exp16), exp_bias); // (exp16 + 112) << 23
+
+        // Mantissa: bits [9:0] -> bits [22:13] of F32 (shift left by 13)
+        let mant = vshlq_n_u32::<13>(vandq_u32(u32x4, mask_mant));
+
+        // Assemble F32 bits (for normal F16 values; subnormals/inf/nan ignored)
+        let f32_bits = vorrq_u32(sign, vorrq_u32(exp32, mant));
+        let bv: float32x4_t = vreinterpretq_f32_u32(f32_bits);
+
+        acc = vfmaq_f32(acc, av, bv);
+        i += 4;
+    }
+
+    let mut s = vaddvq_f32(acc);
+    while i < n {
+        s += a_f32[i] * half::f16::from_bits(b_f16[i]).to_f32();
+        i += 1;
+    }
+    s
+}
+
+/// Dispatch to NEON F16 dot product on aarch64.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn dot_f32_x_f16(a: &[f32], b: &[u16]) -> f32 {
+    unsafe { dot_f32_x_f16_neon(a, b) }
+}
+
+/// Scalar F16 dot product for non-aarch64 targets.
+#[cfg(not(target_arch = "aarch64"))]
+#[inline(always)]
+fn dot_f32_x_f16(a: &[f32], b: &[u16]) -> f32 {
+    a.iter()
+        .zip(b)
+        .map(|(ai, bi)| ai * half::f16::from_bits(*bi).to_f32())
+        .sum()
+}
+
 fn matmul_nt_float(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Result<Tensor> {
+    // F16 GEMV decode: convert F16 weights to F32 per-row inside NEON registers —
+    // never allocates an intermediate F32 copy of the weight matrix.
+    // Reads 2 bytes/weight vs 4 bytes/weight (F32 copy): 2× bandwidth improvement.
+    // Uses GEMV_CHUNK to bound rayon task count (e.g. lm_head n=151936 → 1187 tasks
+    // not 151936 micro-tasks which would cause ~450ms of scheduler overhead alone).
+    if m == 1 && k >= 64 && w.dtype() == DType::F16 {
+        let x_cow = x.to_f32_cow();
+        let x_data = x_cow.as_ref();
+        let w_bytes = w.as_bytes();
+        // SAFETY: F16 tensors store packed contiguous u16 values (little-endian).
+        let w_f16: &[u16] = unsafe {
+            std::slice::from_raw_parts(w_bytes.as_ptr() as *const u16, w_bytes.len() / 2)
+        };
+        let mut out = vec![0.0f32; n];
+        let chunk = gemv_chunk(n);
+        out.par_chunks_mut(chunk)
+            .enumerate()
+            .for_each(|(chunk_idx, cs)| {
+                for (local, slot) in cs.iter_mut().enumerate() {
+                    let j = chunk_idx * chunk + local;
+                    *slot = dot_f32_x_f16(x_data, &w_f16[j * k..(j + 1) * k]);
+                }
+            });
+        return Tensor::from_f32_vec(out, Shape::new([m, n]));
+    }
+
     let x_cow = x.to_f32_cow();
     let w_cow = w.to_f32_cow();
     let x_data = x_cow.as_ref();
@@ -239,13 +338,16 @@ fn matmul_nt_float(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resu
     let mut out = vec![0.0f32; m * n];
 
     if m == 1 && k >= 512 {
-        // GEMV decode path: one query vector dotted with N weight rows.
-        // NEON/AVX2 vectorised — this is the innermost hot loop for all
-        // F32-weight models (phi-2, qwen2.5-0.5b safetensors, etc.).
-        out.par_iter_mut().enumerate().for_each(|(j, slot)| {
-            let w_row = &w_data[j * k..(j + 1) * k];
-            *slot = dot_f32_fast(x_data, w_row);
-        });
+        // F32 GEMV decode — NEON/AVX2 vectorised dot products.
+        let chunk = gemv_chunk(n);
+        out.par_chunks_mut(chunk)
+            .enumerate()
+            .for_each(|(chunk_idx, cs)| {
+                for (local, slot) in cs.iter_mut().enumerate() {
+                    let j = chunk_idx * chunk + local;
+                    *slot = dot_f32_fast(x_data, &w_data[j * k..(j + 1) * k]);
+                }
+            });
     } else {
         // Batched SGEMM for prefill. W is [N, K] contiguous; row-stride=1, col-stride=K.
         unsafe {
@@ -268,7 +370,7 @@ fn matmul_nt_float(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resu
         }
     }
 
-    Tensor::from_f32(&out, Shape::new([m, n]))
+    Tensor::from_f32_vec(out, Shape::new([m, n]))
 }
 
 /// Q4_0 quantized weight path — parallel over output columns (the n dimension).
@@ -276,6 +378,36 @@ fn matmul_nt_float(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resu
 /// During decode m = 1, so all n = hidden_size dot products are independent and
 /// trivially parallel. Each thread computes one dot product over k/32 blocks
 /// without touching any shared state.
+// Adaptive GEMV chunk size: target ~4 rayon tasks per thread so the scheduler
+// can balance load without excess overhead.  Clamped to [16, 512] so tiny
+// matrices still get at least 16 rows per task and huge matrices (lm_head
+// n=151936) don't create thousands of micro-tasks.
+fn gemv_chunk(n: usize) -> usize {
+    let ncpus = rayon::current_num_threads().max(1);
+    let target_tasks = ncpus * 4;
+    (n / target_tasks).clamp(16, 512)
+}
+
+/// Compute n output rows of a quantized GEMV, batching rows per Rayon task.
+/// `dot` receives one weight row's bytes plus the x vector.
+macro_rules! gemv_parallel {
+    ($out:expr, $n:expr, $row_bytes:expr, $w_blocks:expr, $x_row:expr, $dot:expr) => {{
+        let chunk = gemv_chunk($n);
+        $out.par_chunks_mut(chunk)
+            .enumerate()
+            .for_each(|(chunk_idx, chunk_slice)| {
+                for (local, slot) in chunk_slice.iter_mut().enumerate() {
+                    let j = chunk_idx * chunk + local;
+                    *slot = $dot(
+                        &$w_blocks[j * $row_bytes..(j + 1) * $row_bytes],
+                        $x_row,
+                    );
+                }
+            });
+    }};
+}
+
+
 fn matmul_nt_q4_0(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Result<Tensor> {
     if k % QUANT_BLOCK_SIZE != 0 {
         return Err(SapientError::internal(
@@ -286,24 +418,21 @@ fn matmul_nt_q4_0(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
     let x_data: &[f32] = x_cow.as_ref();
     let w_blocks: &[u8] = w.as_quant_blocks();
     let row_bytes = k / QUANT_BLOCK_SIZE * Q4_0_BLOCK_BYTES;
-
     let mut out = vec![0.0f32; m * n];
-
     for i in 0..m {
         let x_row = &x_data[i * k..(i + 1) * k];
-        // Each slot out[i*n + j] is written by exactly one j — fully parallel.
-        out[i * n..(i + 1) * n]
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(j, slot)| {
-                *slot =
-                    quant::dot_q4_0_row_f32(&w_blocks[j * row_bytes..(j + 1) * row_bytes], x_row);
-            });
+        gemv_parallel!(
+            out[i * n..(i + 1) * n],
+            n,
+            row_bytes,
+            w_blocks,
+            x_row,
+            quant::dot_q4_0_row_f32
+        );
     }
-    Tensor::from_f32(&out, Shape::new([m, n]))
+    Tensor::from_f32_vec(out, Shape::new([m, n]))
 }
 
-/// Q8_0 quantized weight path — parallel over output columns (the n dimension).
 fn matmul_nt_q8_0(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Result<Tensor> {
     if k % QUANT_BLOCK_SIZE != 0 {
         return Err(SapientError::internal(
@@ -314,58 +443,91 @@ fn matmul_nt_q8_0(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
     let x_data: &[f32] = x_cow.as_ref();
     let w_blocks: &[u8] = w.as_quant_blocks();
     let row_bytes = k / QUANT_BLOCK_SIZE * Q8_0_BLOCK_BYTES;
-
     let mut out = vec![0.0f32; m * n];
-
     for i in 0..m {
         let x_row = &x_data[i * k..(i + 1) * k];
-        out[i * n..(i + 1) * n]
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(j, slot)| {
-                *slot =
-                    quant::dot_q8_0_row_f32(&w_blocks[j * row_bytes..(j + 1) * row_bytes], x_row);
-            });
+        gemv_parallel!(
+            out[i * n..(i + 1) * n],
+            n,
+            row_bytes,
+            w_blocks,
+            x_row,
+            quant::dot_q8_0_row_f32
+        );
     }
-    Tensor::from_f32(&out, Shape::new([m, n]))
+    Tensor::from_f32_vec(out, Shape::new([m, n]))
 }
 
-/// Generic K-quant weight path — shared by Q4_K, Q5_K, Q6_K.
-///
-/// Each K-quant block covers 256 elements (vs 32 for Q4_0/Q8_0). The
-/// `block_bytes` and `dot_fn` parameters specialize this for each variant.
-/// Parallel over output rows (the n dimension) — same strategy as Q4_0/Q8_0.
-fn matmul_nt_kquant(
-    x: &Tensor,
-    w: &Tensor,
-    m: usize,
-    k: usize,
-    n: usize,
-    block_bytes: usize,
-    dot_fn: fn(&[u8], &[f32]) -> f32,
-) -> Result<Tensor> {
-    const K_BLOCK: usize = 256;
-    if k % K_BLOCK != 0 {
-        return Err(SapientError::internal(
-            "K-quant matmul_nt: k must be a multiple of 256",
-        ));
+// Specialized K-quant paths — no function pointer so the NEON dot kernel
+// can be inlined into the hot Rayon closure by the compiler.
+
+fn matmul_nt_q4_k(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Result<Tensor> {
+    if k % 256 != 0 {
+        return Err(SapientError::internal("Q4_K: k must be a multiple of 256"));
     }
     let x_cow = x.to_f32_cow();
-    let x_data: &[f32] = x_cow.as_ref();
-    let w_blocks: &[u8] = w.as_quant_blocks();
-    let row_bytes = k / K_BLOCK * block_bytes;
-
+    let x_data = x_cow.as_ref();
+    let w_blocks = w.as_quant_blocks();
+    let row_bytes = k / 256 * Q4_K_BLOCK_BYTES;
     let mut out = vec![0.0f32; m * n];
     for i in 0..m {
         let x_row = &x_data[i * k..(i + 1) * k];
-        out[i * n..(i + 1) * n]
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(j, slot)| {
-                *slot = dot_fn(&w_blocks[j * row_bytes..(j + 1) * row_bytes], x_row);
-            });
+        gemv_parallel!(
+            out[i * n..(i + 1) * n],
+            n,
+            row_bytes,
+            w_blocks,
+            x_row,
+            quant::dot_q4_k_row_f32
+        );
     }
-    Tensor::from_f32(&out, Shape::new([m, n]))
+    Tensor::from_f32_vec(out, Shape::new([m, n]))
+}
+
+fn matmul_nt_q5_k(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Result<Tensor> {
+    if k % 256 != 0 {
+        return Err(SapientError::internal("Q5_K: k must be a multiple of 256"));
+    }
+    let x_cow = x.to_f32_cow();
+    let x_data = x_cow.as_ref();
+    let w_blocks = w.as_quant_blocks();
+    let row_bytes = k / 256 * Q5_K_BLOCK_BYTES;
+    let mut out = vec![0.0f32; m * n];
+    for i in 0..m {
+        let x_row = &x_data[i * k..(i + 1) * k];
+        gemv_parallel!(
+            out[i * n..(i + 1) * n],
+            n,
+            row_bytes,
+            w_blocks,
+            x_row,
+            quant::dot_q5_k_row_f32
+        );
+    }
+    Tensor::from_f32_vec(out, Shape::new([m, n]))
+}
+
+fn matmul_nt_q6_k(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Result<Tensor> {
+    if k % 256 != 0 {
+        return Err(SapientError::internal("Q6_K: k must be a multiple of 256"));
+    }
+    let x_cow = x.to_f32_cow();
+    let x_data = x_cow.as_ref();
+    let w_blocks = w.as_quant_blocks();
+    let row_bytes = k / 256 * Q6_K_BLOCK_BYTES;
+    let mut out = vec![0.0f32; m * n];
+    for i in 0..m {
+        let x_row = &x_data[i * k..(i + 1) * k];
+        gemv_parallel!(
+            out[i * n..(i + 1) * n],
+            n,
+            row_bytes,
+            w_blocks,
+            x_row,
+            quant::dot_q6_k_row_f32
+        );
+    }
+    Tensor::from_f32_vec(out, Shape::new([m, n]))
 }
 
 // ── gemm ─────────────────────────────────────────────────────────────────────
@@ -450,7 +612,7 @@ pub fn gemm(
         }
     }
 
-    Tensor::from_f32(&out, Shape::new([m, n]))
+    Tensor::from_f32_vec(out, Shape::new([m, n]))
 }
 
 #[cfg(test)]

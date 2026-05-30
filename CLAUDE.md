@@ -102,3 +102,7 @@ The streaming generator (`generate_stream`) buffers decoded text and withholds u
 ## Must follow
 
 - always update the docs/PROJECT_GUIDE.md file when making changes to the codebase and keep it updated with the latest changes.
+- always update the CLAUDE.md file when making changes to the codebase and keep it updated with the latest changes.
+- always update the CONTRIBUTING.md file when making changes to the codebase and keep it updated with the latest changes.
+- always update the README.md file when making changes to the codebase and keep it updated with the latest changes.
+- always update the ROADMAP.md file when making changes to the codebase and keep it updated with the latest changes.

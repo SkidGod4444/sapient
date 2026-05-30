@@ -45,6 +45,28 @@ impl Tensor {
     }
 
     /// Create a tensor from a flat `f32` slice (CPU, row-major).
+    /// Take ownership of a `Vec<f32>` without copying.
+    /// Use instead of `from_f32` in hot paths to avoid the allocation + memcpy.
+    pub fn from_f32_vec(data: Vec<f32>, shape: impl Into<Shape>) -> Result<Self> {
+        let shape = shape.into();
+        shape.validate()?;
+        if data.len() != shape.numel() {
+            return Err(SapientError::ShapeMismatch {
+                expected: shape.dims().to_vec(),
+                got: vec![data.len()],
+            });
+        }
+        let strides = shape.strides();
+        let buffer = BufferHandle::new(CpuBuffer::from_f32_vec(data)?);
+        Ok(Self {
+            shape,
+            dtype: DType::F32,
+            strides,
+            buffer,
+            offset: 0,
+        })
+    }
+
     pub fn from_f32(data: &[f32], shape: impl Into<Shape>) -> Result<Self> {
         let shape = shape.into();
         shape.validate()?;
@@ -498,6 +520,17 @@ impl Tensor {
     }
 
     /// Mutable typed `f32` view — fails if buffer is shared or not F32.
+    /// Mutable byte access for quantized tensors — **in-place** update with zero copy.
+    /// Returns an error if the buffer is shared (Arc strong_count > 1).
+    pub fn as_bytes_mut(&mut self) -> Result<&mut [u8]> {
+        let offset = self.offset;
+        let end = offset + self.dtype.byte_count(self.numel());
+        let buf = Arc::get_mut(&mut self.buffer.0)
+            .ok_or_else(|| SapientError::internal("Cannot mutate shared tensor buffer"))?;
+        let bytes = buf.as_bytes_mut();
+        Ok(&mut bytes[offset..end])
+    }
+
     pub fn as_f32_slice_mut(&mut self) -> Result<&mut [f32]> {
         if self.dtype != DType::F32 {
             return Err(SapientError::internal("Tensor dtype is not F32"));

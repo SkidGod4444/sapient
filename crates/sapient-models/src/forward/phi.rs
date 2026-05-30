@@ -7,7 +7,10 @@ use sapient_core::Tensor;
 use sapient_hub::model_info::ModelInfo;
 
 use super::backend::{LlmBackend, LlmBackendDispatch, LlmBackendKind};
-use super::common::{embed_tokens, mean_pool_hidden, merge_heads, split_heads};
+use super::common::{
+    embed_tokens, mean_pool_hidden, merge_heads, quantize_tensor_to_q8_0,
+    should_quantize_online, split_heads,
+};
 use crate::weights::{
     detect_weight_prefix, load_hf_weights, resolve_bias, resolve_lm_head, resolve_weight,
     tie_word_embeddings_from_config,
@@ -53,21 +56,21 @@ impl PhiForward {
         weights: HashMap<String, Tensor>,
         backend: LlmBackendKind,
     ) -> Result<Self> {
-        // Pre-convert F16/BF16 weights to F32 once — same rationale as LlamaForward.
+        let prefix = detect_weight_prefix(&weights);
+
+        // Online quantization: convert F16/BF16 projection matrices to Q8_0 at
+        // load time.  Same rationale as LlamaForward: avoids per-step F16->F32
+        // conversion overhead while using less RAM than F32 expansion.
         let weights: HashMap<String, Tensor> = weights
             .into_iter()
             .map(|(k, v)| {
-                let v = match v.dtype() {
-                    sapient_core::DType::F16 | sapient_core::DType::BF16 => {
-                        v.to_f32_tensor().unwrap_or(v)
-                    }
-                    _ => v,
-                };
-                (k, v)
+                if should_quantize_online(&k, &v) {
+                    (k, quantize_tensor_to_q8_0(v))
+                } else {
+                    (k, v)
+                }
             })
             .collect();
-
-        let prefix = detect_weight_prefix(&weights);
         let embed_key = format!("{prefix}embed_tokens.weight");
         let tie = tie_word_embeddings_from_config(&info.raw);
         let lm_head = resolve_lm_head(&weights, &prefix, tie, &embed_key)?.clone();

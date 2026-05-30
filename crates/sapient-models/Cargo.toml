@@ -19,6 +19,7 @@ serde        = { workspace = true }
 serde_json   = { workspace = true }
 anyhow       = { workspace = true }
 tracing      = { workspace = true }
+rayon        = { workspace = true }
 ordered-float = { workspace = true }
 parking_lot  = { workspace = true }
 half         = { workspace = true }

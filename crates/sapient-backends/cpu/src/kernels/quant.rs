@@ -213,6 +213,24 @@ pub fn quantize_q4_0_row(w: &[f32]) -> Vec<u8> {
 
 // ── Q8_0 ──────────────────────────────────────────────────────────────────────
 
+/// Quantize a length-`QK` (32) slice of f32 into one Q8_0 block (ggml convention).
+///
+/// Returns the 34-byte block: 2-byte f16 scale followed by 32 i8 quantized values.
+/// Used for online quantization of F16/BF16 weight matrices at load time.
+pub fn quantize_q8_0_block(x: &[f32]) -> [u8; Q8_0_BLOCK_BYTES] {
+    debug_assert_eq!(x.len(), QK);
+    let max_abs = x.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+    let scale = max_abs / 127.0;
+    let d = half::f16::from_f32(scale);
+    let inv_scale = if scale > 0.0 { 1.0 / scale } else { 0.0 };
+    let mut out = [0u8; Q8_0_BLOCK_BYTES];
+    out[0..2].copy_from_slice(&d.to_le_bytes());
+    for (i, &v) in x.iter().enumerate() {
+        out[2 + i] = (v * inv_scale).round().clamp(-127.0, 127.0) as i8 as u8;
+    }
+    out
+}
+
 /// Dot product of a Q8_0 block with an f32 activation slice.
 ///
 /// On aarch64 widens i8→i16→f32 with NEON vfmaq, processing 8 elements per
@@ -362,7 +380,18 @@ fn get_scale_min_k4(j: usize, scales: &[u8]) -> (u8, u8) {
 ///   [2..3] dmin (f16) — super-block min scale
 ///   [4..15] scales (12 bytes) — 8 pairs of 6-bit (scale, min) packed
 ///   [16..143] qs (128 bytes) — 256 × 4-bit quantized values (lo/hi nibble)
+///
+/// Dispatches to the NEON path on aarch64, scalar otherwise.
 pub fn dot_q4_k_row_f32(row_data: &[u8], x: &[f32]) -> f32 {
+    #[cfg(target_arch = "aarch64")]
+    return unsafe { dot_q4_k_row_f32_neon(row_data, x) };
+    #[cfg(not(target_arch = "aarch64"))]
+    dot_q4_k_row_f32_scalar(row_data, x)
+}
+
+/// Scalar fallback for Q4_K row dot product.
+#[allow(dead_code)]
+fn dot_q4_k_row_f32_scalar(row_data: &[u8], x: &[f32]) -> f32 {
     let mut acc = 0.0f32;
     let mut x_off = 0usize;
     for block in row_data.chunks_exact(Q4_K_BLOCK_BYTES) {
@@ -383,6 +412,90 @@ pub fn dot_q4_k_row_f32(row_data: &[u8], x: &[f32]) -> f32 {
                 acc += (d1 * (qs[q_off + l] & 0x0F) as f32 - m1v) * x[x_off + l];
                 acc += (d2 * (qs[q_off + l] >> 4) as f32 - m2v) * x[x_off + l + 32];
             }
+            x_off += 64;
+            q_off += 32;
+            is += 2;
+        }
+    }
+    acc
+}
+
+/// NEON Q4_K row dot product (aarch64).
+///
+/// Processes 8 bytes (16 nibbles) per NEON iteration with FMA for both the
+/// lo-nibble (sub-block 1) and hi-nibble (sub-block 2) contributions.
+/// Also accumulates the x sums required for the min correction term.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn dot_q4_k_row_f32_neon(row_data: &[u8], x: &[f32]) -> f32 {
+    let mut acc = 0.0f32;
+    let mut x_off = 0usize;
+    let mask4 = vdup_n_u8(0x0F);
+
+    for block in row_data.chunks_exact(Q4_K_BLOCK_BYTES) {
+        let d = f16::from_le_bytes([block[0], block[1]]).to_f32();
+        let dmin = f16::from_le_bytes([block[2], block[3]]).to_f32();
+        let scales = &block[4..16];
+        let qs = &block[16..Q4_K_BLOCK_BYTES];
+
+        let mut q_off = 0usize;
+        let mut is = 0usize;
+
+        // QK_K / 64 = 4 iterations, each handling 64 weights (32 lo-nibble + 32 hi-nibble)
+        for _ in 0..(QK_K / 64) {
+            let (sc1, m1) = get_scale_min_k4(is, scales);
+            let (sc2, m2) = get_scale_min_k4(is + 1, scales);
+            let d1 = d * sc1 as f32;
+            let m1v = dmin * m1 as f32;
+            let d2 = d * sc2 as f32;
+            let m2v = dmin * m2 as f32;
+
+            // x_lo = activations for lo-nibble sub-block (indices x_off..x_off+32)
+            // x_hi = activations for hi-nibble sub-block (indices x_off+32..x_off+64)
+            let x_lo = &x[x_off..x_off + 32];
+            let x_hi = &x[x_off + 32..x_off + 64];
+
+            // NEON: process 8 bytes of qs at a time -> 8 lo-nibbles, 8 hi-nibbles
+            // 4 rounds x 8 bytes = 32 bytes total (covers the 32 lo and 32 hi elements)
+            let mut vsum_lo = vdupq_n_f32(0.0); // dot(lo_nibbles, x_lo)
+            let mut vsum_hi = vdupq_n_f32(0.0); // dot(hi_nibbles, x_hi)
+            let mut vsum_xl = vdupq_n_f32(0.0); // sum(x_lo) for min correction
+            let mut vsum_xh = vdupq_n_f32(0.0); // sum(x_hi) for min correction
+
+            for chunk in 0..4usize {
+                // Load 8 packed bytes -> 8 lo nibbles + 8 hi nibbles
+                let q8 = vld1_u8(qs.as_ptr().add(q_off + chunk * 8));
+                let lo8 = vand_u8(q8, mask4);
+                let hi8 = vshr_n_u8::<4>(q8);
+
+                // Widen u8x8 -> u16x8 -> two u32x4 -> two f32x4
+                let lo16 = vmovl_u8(lo8);
+                let lof0 = vcvtq_f32_u32(vmovl_u16(vget_low_u16(lo16)));
+                let lof1 = vcvtq_f32_u32(vmovl_high_u16(lo16));
+
+                let hi16 = vmovl_u8(hi8);
+                let hif0 = vcvtq_f32_u32(vmovl_u16(vget_low_u16(hi16)));
+                let hif1 = vcvtq_f32_u32(vmovl_high_u16(hi16));
+
+                // Load 8 activation values for each sub-block
+                let xl0 = vld1q_f32(x_lo.as_ptr().add(chunk * 8));
+                let xl1 = vld1q_f32(x_lo.as_ptr().add(chunk * 8 + 4));
+                let xh0 = vld1q_f32(x_hi.as_ptr().add(chunk * 8));
+                let xh1 = vld1q_f32(x_hi.as_ptr().add(chunk * 8 + 4));
+
+                vsum_lo = vfmaq_f32(vsum_lo, lof0, xl0);
+                vsum_lo = vfmaq_f32(vsum_lo, lof1, xl1);
+                vsum_hi = vfmaq_f32(vsum_hi, hif0, xh0);
+                vsum_hi = vfmaq_f32(vsum_hi, hif1, xh1);
+                vsum_xl = vaddq_f32(vsum_xl, vaddq_f32(xl0, xl1));
+                vsum_xh = vaddq_f32(vsum_xh, vaddq_f32(xh0, xh1));
+            }
+
+            // acc += d1 * sum(lo * x_lo) - m1v * sum(x_lo)
+            // acc += d2 * sum(hi * x_hi) - m2v * sum(x_hi)
+            acc += d1 * vaddvq_f32(vsum_lo) - m1v * vaddvq_f32(vsum_xl);
+            acc += d2 * vaddvq_f32(vsum_hi) - m2v * vaddvq_f32(vsum_xh);
+
             x_off += 64;
             q_off += 32;
             is += 2;

@@ -3002,6 +3002,7 @@ dependencies = [
  "mlx-rs",
  "ordered-float",
  "parking_lot",
+ "rayon",
  "sapient-backends-cpu",
  "sapient-core",
  "sapient-hub",

@@ -126,7 +126,7 @@ impl CpuBuffer {
         })
     }
 
-    /// Wrap existing `f32` data.
+    /// Wrap existing `f32` data (copies into a new aligned allocation).
     pub fn from_f32_slice(data: &[f32]) -> Result<Self> {
         let bytes = data.len() * 4;
         let buf = Self::with_capacity(bytes, 64)?;
@@ -135,6 +135,30 @@ impl CpuBuffer {
             std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, buf.ptr.as_ptr(), bytes);
         }
         Ok(buf)
+    }
+
+    /// Take ownership of a `Vec<f32>` without copying.
+    /// Eliminates the allocation + memcopy overhead in `from_f32_slice`.
+    /// Used by hot matmul paths that already have a Vec<f32> output buffer.
+    pub fn from_f32_vec(data: Vec<f32>) -> Result<Self> {
+        if data.is_empty() {
+            return Self::with_capacity(0, 4);
+        }
+        let len = data.len() * 4;
+        let layout = Layout::array::<f32>(data.len())
+            .map_err(|_| SapientError::AllocationFailed { bytes: len, align: 4 })?;
+        let ptr = data.as_ptr() as *mut u8;
+        // SAFETY: We transfer ownership from the Vec — `forget` prevents the Vec's
+        // drop from freeing the allocation; we free it ourselves in CpuBuffer::drop
+        // using the same layout that the Vec's allocator used.
+        std::mem::forget(data);
+        Ok(Self {
+            ptr: NonNull::new(ptr)
+                .ok_or(SapientError::AllocationFailed { bytes: len, align: 4 })?,
+            len,
+            align: std::mem::align_of::<f32>(),
+            layout,
+        })
     }
 
     /// Wrap existing raw bytes (e.g., native BF16 or F16 from safetensors).

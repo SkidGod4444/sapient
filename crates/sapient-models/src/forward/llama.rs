@@ -7,7 +7,10 @@ use sapient_core::Tensor;
 use sapient_hub::model_info::ModelInfo;
 
 use super::backend::{LlmBackend, LlmBackendDispatch, LlmBackendKind};
-use super::common::{embed_tokens, mean_pool_hidden, merge_heads, split_heads};
+use super::common::{
+    embed_tokens, mean_pool_hidden, merge_heads, quantize_tensor_to_q8_0,
+    should_quantize_online, split_heads,
+};
 use crate::weights::{
     detect_weight_prefix, load_hf_weights, resolve_bias, resolve_lm_head, resolve_weight,
     tie_word_embeddings_from_config,
@@ -55,31 +58,27 @@ impl LlamaForward {
         weights: HashMap<String, Tensor>,
         backend: LlmBackendKind,
     ) -> Result<Self> {
-        // Pre-convert F16/BF16 weights to F32 once at load time.
-        //
-        // Without this, every decode step calls `w.to_f32_cow()` on each
-        // weight matrix — for Phi-2 that's 25 GB of F16→F32 conversion traffic
-        // per token, reducing decode from the bandwidth ceiling to ~0.5 tok/s.
-        // With F32 weights in place, matmul_nt_float reads pre-converted F32
-        // directly, cutting per-token traffic to ~10 GB and enabling 5–10 tok/s.
-        //
-        // Trade-off: doubles weight RAM (5.4 GB F16 → 10.8 GB F32 for Phi-2).
-        // For quantized (Q4_0/Q8_0/K-quant) models this is a no-op — their
-        // dtype is already non-float and they go through the quantized kernels.
+        let prefix = detect_weight_prefix(&weights);
+
+        // Online quantization: convert F16/BF16 projection matrices to Q8_0 at
+        // load time.  This is strictly better than expanding to F32:
+        //   - F32 expansion: 2 bytes/weight (F16) -> 4 bytes/weight (F32) = 2x RAM
+        //   - Q8_0 quantization: 2 bytes/weight (F16) -> ~1.06 bytes/weight = half RAM
+        //   - Per-step bandwidth: Q8_0 kernel reads ~1 byte/weight vs 4 for F32
+        //   - Quality: Q8_0 is near-lossless (~0.01 PPL increase over F16)
+        // Norm weights, biases, and embeddings retain their original dtype since
+        // they are accessed differently (row gather, broadcast, etc.).
+        // For already-quantized (Q4_0/Q8_0/K-quant) models this is a no-op.
         let weights: HashMap<String, Tensor> = weights
             .into_iter()
             .map(|(k, v)| {
-                let v = match v.dtype() {
-                    sapient_core::DType::F16 | sapient_core::DType::BF16 => {
-                        v.to_f32_tensor().unwrap_or(v)
-                    }
-                    _ => v,
-                };
-                (k, v)
+                if should_quantize_online(&k, &v) {
+                    (k, quantize_tensor_to_q8_0(v))
+                } else {
+                    (k, v)
+                }
             })
             .collect();
-
-        let prefix = detect_weight_prefix(&weights);
         let embed_key = format!("{prefix}embed_tokens.weight");
         let tie = tie_word_embeddings_from_config(&info.raw);
         let lm_head = resolve_lm_head(&weights, &prefix, tie, &embed_key)?.clone();
@@ -214,11 +213,24 @@ impl LlamaForward {
         )?;
         let h = self.backend.rms_norm(&x, attn_norm_w, eps)?;
 
-        // Q/K/V projections. Llama/Mistral have no bias; Qwen2 has q/k/v biases —
-        // resolve_bias returns None when absent, so this is correct for both.
-        let q = self.linear(&h, &format!("{pfx}.self_attn.q_proj"))?;
-        let k = self.linear(&h, &format!("{pfx}.self_attn.k_proj"))?;
-        let v = self.linear(&h, &format!("{pfx}.self_attn.v_proj"))?;
+        // Q/K/V projections — run all three in parallel since they read disjoint
+        // weight tensors and the same (read-only) activation h.
+        // rayon::join uses the existing thread pool; no extra threads created.
+        let q_name = format!("{pfx}.self_attn.q_proj");
+        let k_name = format!("{pfx}.self_attn.k_proj");
+        let v_name = format!("{pfx}.self_attn.v_proj");
+        let ((q_res, k_res), v_res) = rayon::join(
+            || {
+                rayon::join(
+                    || self.linear(&h, &q_name),
+                    || self.linear(&h, &k_name),
+                )
+            },
+            || self.linear(&h, &v_name),
+        );
+        let q = q_res?;
+        let k = k_res?;
+        let v = v_res?;
 
         let mut q = split_heads(&q, n_heads, head_dim)?;
         let mut k = split_heads(&k, n_kv, head_dim)?;
@@ -253,14 +265,16 @@ impl LlamaForward {
         )?;
         let h = self.backend.rms_norm(&x, ffn_norm_w, eps)?;
 
-        let gate = self.backend.linear_3d(
-            &h,
-            resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.mlp.gate_proj"))?,
-        )?;
-        let up = self.backend.linear_3d(
-            &h,
-            resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.mlp.up_proj"))?,
-        )?;
+        // Gate and up projections are identical shape — run them in parallel.
+        let gate_w = resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.mlp.gate_proj"))?;
+        let up_w = resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.mlp.up_proj"))?;
+        let backend = &self.backend;
+        let (gate_res, up_res) = rayon::join(
+            || backend.linear_3d(&h, gate_w),
+            || backend.linear_3d(&h, up_w),
+        );
+        let gate = gate_res?;
+        let up = up_res?;
         let gate = self.backend.silu(&gate)?;
         let mid = self.backend.mul(&gate, &up)?;
         let down = self.backend.linear_3d(
