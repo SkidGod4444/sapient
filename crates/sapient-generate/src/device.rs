@@ -316,6 +316,7 @@ fn detect_gpus() -> Vec<GpuInfo> {
     gpus
 }
 
+#[cfg(target_os = "macos")]
 fn macos_gpu_name() -> String {
     // system_profiler SPDisplaysDataType prints GPU info; parse Chipset Model line.
     let out = Command::new("system_profiler")
