@@ -6,6 +6,8 @@
 use super::quant;
 use rayon::prelude::*;
 use sapient_core::error::{Result, SapientError};
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
 use sapient_core::{
     DType, Shape, Tensor, Q4_0_BLOCK_BYTES, Q4_K_BLOCK_BYTES, Q5_K_BLOCK_BYTES, Q6_K_BLOCK_BYTES,
     Q8_0_BLOCK_BYTES, QUANT_BLOCK_SIZE,
@@ -141,6 +143,94 @@ pub fn matmul_nt(x: &Tensor, w: &Tensor) -> Result<Tensor> {
 /// At decode (m = 1) the GEMV is embarrassingly parallel across output rows,
 /// so we use rayon to match the throughput of the quantized paths; for large
 /// hidden dimensions (k ≥ 512) the speedup is 4–8× vs single-threaded SGEMM.
+/// NEON-vectorised F32 dot product (aarch64).
+/// Processes 4 floats/cycle via vfmaq_f32, horizontal-sums with vaddvq_f32.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn dot_f32_neon_fast(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::aarch64::*;
+    let n = a.len();
+    let mut acc = vdupq_n_f32(0.0);
+    let mut i = 0;
+    // 16-element unrolled inner loop
+    while i + 16 <= n {
+        let a0 = vld1q_f32(a.as_ptr().add(i));
+        let b0 = vld1q_f32(b.as_ptr().add(i));
+        acc = vfmaq_f32(acc, a0, b0);
+        let a1 = vld1q_f32(a.as_ptr().add(i + 4));
+        let b1 = vld1q_f32(b.as_ptr().add(i + 4));
+        acc = vfmaq_f32(acc, a1, b1);
+        let a2 = vld1q_f32(a.as_ptr().add(i + 8));
+        let b2 = vld1q_f32(b.as_ptr().add(i + 8));
+        acc = vfmaq_f32(acc, a2, b2);
+        let a3 = vld1q_f32(a.as_ptr().add(i + 12));
+        let b3 = vld1q_f32(b.as_ptr().add(i + 12));
+        acc = vfmaq_f32(acc, a3, b3);
+        i += 16;
+    }
+    // 4-element tail
+    while i + 4 <= n {
+        let av = vld1q_f32(a.as_ptr().add(i));
+        let bv = vld1q_f32(b.as_ptr().add(i));
+        acc = vfmaq_f32(acc, av, bv);
+        i += 4;
+    }
+    let mut s = vaddvq_f32(acc);
+    while i < n {
+        s += a[i] * b[i];
+        i += 1;
+    }
+    s
+}
+
+/// AVX2+FMA F32 dot product (x86_64).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+    let n = a.len();
+    let mut acc = _mm256_setzero_ps();
+    let mut i = 0;
+    while i + 8 <= n {
+        let av = _mm256_loadu_ps(a.as_ptr().add(i));
+        let bv = _mm256_loadu_ps(b.as_ptr().add(i));
+        acc = _mm256_fmadd_ps(av, bv, acc);
+        i += 8;
+    }
+    // Horizontal sum
+    let lo = _mm256_castps256_ps128(acc);
+    let hi = _mm256_extractf128_ps(acc, 1);
+    let sum4 = _mm_add_ps(lo, hi);
+    let shuf = _mm_movehdup_ps(sum4);
+    let sum2 = _mm_add_ps(sum4, shuf);
+    let sum1 = _mm_add_ss(sum2, _mm_movehl_ps(shuf, sum2));
+    let mut s = _mm_cvtss_f32(sum1);
+    while i < n { s += a[i] * b[i]; i += 1; }
+    s
+}
+
+/// Dispatch to the fastest available F32 dot product for this platform.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn dot_f32_fast(a: &[f32], b: &[f32]) -> f32 {
+    unsafe { dot_f32_neon_fast(a, b) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn dot_f32_fast(a: &[f32], b: &[f32]) -> f32 {
+    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        return unsafe { dot_f32_avx2(a, b) };
+    }
+    a.iter().zip(b).map(|(ai, bi)| ai * bi).sum()
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[inline(always)]
+fn dot_f32_fast(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(ai, bi)| ai * bi).sum()
+}
+
 fn matmul_nt_float(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Result<Tensor> {
     let x_cow = x.to_f32_cow();
     let w_cow = w.to_f32_cow();
@@ -149,10 +239,12 @@ fn matmul_nt_float(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resu
     let mut out = vec![0.0f32; m * n];
 
     if m == 1 && k >= 512 {
-        // GEMV: one query vector vs N weight rows — parallel dot products.
+        // GEMV decode path: one query vector dotted with N weight rows.
+        // NEON/AVX2 vectorised — this is the innermost hot loop for all
+        // F32-weight models (phi-2, qwen2.5-0.5b safetensors, etc.).
         out.par_iter_mut().enumerate().for_each(|(j, slot)| {
             let w_row = &w_data[j * k..(j + 1) * k];
-            *slot = x_data.iter().zip(w_row).map(|(xi, wi)| xi * wi).sum();
+            *slot = dot_f32_fast(x_data, w_row);
         });
     } else {
         // Batched SGEMM for prefill. W is [N, K] contiguous; row-stride=1, col-stride=K.

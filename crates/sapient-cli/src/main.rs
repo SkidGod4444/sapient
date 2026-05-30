@@ -470,6 +470,28 @@ async fn chat_command(
     };
     ui::print_chat_banner(model, &arch, &effective_backend);
 
+    // Hint: if the user loaded a full-precision safetensors model, suggest the
+    // GGUF-quantized alternative which is 4-10× faster on CPU.
+    if !model.contains("gguf") && !model.contains("-q4") && !model.contains("-q8") {
+        // Look for a quantized alias in the registry (e.g. phi-2 → phi-2-q4)
+        let gguf_hint = sapient_hub::registry::catalog()
+            .iter()
+            .find(|m| {
+                (m.alias.contains("-q4") || m.alias.contains("-q8"))
+                    && (m.alias.contains(
+                        model.rsplit('/').next().unwrap_or(model)
+                            .trim_end_matches("-instruct")
+                            .trim_end_matches("-chat"),
+                    ))
+            })
+            .map(|m| m.alias);
+        if let Some(faster) = gguf_hint {
+            ui::hint(format!(
+                "For 4-8× faster inference use the quantized version:  sapient chat {faster}"
+            ));
+        }
+    }
+
     let mut history: Vec<ChatMessage> = Vec::new();
     loop {
         ui::write_user_prompt()?;

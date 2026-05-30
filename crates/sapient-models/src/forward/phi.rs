@@ -53,6 +53,20 @@ impl PhiForward {
         weights: HashMap<String, Tensor>,
         backend: LlmBackendKind,
     ) -> Result<Self> {
+        // Pre-convert F16/BF16 weights to F32 once — same rationale as LlamaForward.
+        let weights: HashMap<String, Tensor> = weights
+            .into_iter()
+            .map(|(k, v)| {
+                let v = match v.dtype() {
+                    sapient_core::DType::F16 | sapient_core::DType::BF16 => {
+                        v.to_f32_tensor().unwrap_or(v)
+                    }
+                    _ => v,
+                };
+                (k, v)
+            })
+            .collect();
+
         let prefix = detect_weight_prefix(&weights);
         let embed_key = format!("{prefix}embed_tokens.weight");
         let tie = tie_word_embeddings_from_config(&info.raw);

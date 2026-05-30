@@ -55,6 +55,30 @@ impl LlamaForward {
         weights: HashMap<String, Tensor>,
         backend: LlmBackendKind,
     ) -> Result<Self> {
+        // Pre-convert F16/BF16 weights to F32 once at load time.
+        //
+        // Without this, every decode step calls `w.to_f32_cow()` on each
+        // weight matrix — for Phi-2 that's 25 GB of F16→F32 conversion traffic
+        // per token, reducing decode from the bandwidth ceiling to ~0.5 tok/s.
+        // With F32 weights in place, matmul_nt_float reads pre-converted F32
+        // directly, cutting per-token traffic to ~10 GB and enabling 5–10 tok/s.
+        //
+        // Trade-off: doubles weight RAM (5.4 GB F16 → 10.8 GB F32 for Phi-2).
+        // For quantized (Q4_0/Q8_0/K-quant) models this is a no-op — their
+        // dtype is already non-float and they go through the quantized kernels.
+        let weights: HashMap<String, Tensor> = weights
+            .into_iter()
+            .map(|(k, v)| {
+                let v = match v.dtype() {
+                    sapient_core::DType::F16 | sapient_core::DType::BF16 => {
+                        v.to_f32_tensor().unwrap_or(v)
+                    }
+                    _ => v,
+                };
+                (k, v)
+            })
+            .collect();
+
         let prefix = detect_weight_prefix(&weights);
         let embed_key = format!("{prefix}embed_tokens.weight");
         let tie = tie_word_embeddings_from_config(&info.raw);
