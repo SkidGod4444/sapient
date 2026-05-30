@@ -803,6 +803,34 @@ impl LlmBackendDispatch {
         Self::from_kind_with_model_bytes(kind, 0)
     }
 
+    /// Like `from_kind` but gates Metal on SDPA shader availability for `head_dim`.
+    ///
+    /// MLX ships a fixed set of pre-compiled Metal SDPA shaders (head_dims: 32, 64,
+    /// 96, 128, 256).  Selecting Metal for an unsupported head_dim would panic at
+    /// inference time with "Unable to load function sdpa_vector_float_N_N".
+    /// - Auto → silently falls back to CPU with a tracing::info log.
+    /// - Metal (explicit) → returns a user-readable error with a `--backend cpu` hint.
+    pub fn from_kind_with_head_dim(kind: LlmBackendKind, head_dim: usize) -> Result<Self> {
+        if MetalLlmBackend::is_available() && !mlx_sdpa_supported_head_dim(head_dim) {
+            match kind {
+                LlmBackendKind::Metal => anyhow::bail!(
+                    "Metal/MLX does not support head_dim={head_dim} for this model architecture \
+                     (supported: 32, 64, 96, 128, 256). Run with `--backend cpu` instead."
+                ),
+                LlmBackendKind::Auto => {
+                    tracing::info!(
+                        head_dim,
+                        "auto-backend: CPU (Metal SDPA has no pre-compiled shader for \
+                         head_dim={head_dim}; supported: 32, 64, 96, 128, 256)"
+                    );
+                    return Ok(Self::Cpu(CpuLlmBackend));
+                }
+                LlmBackendKind::Cpu => {}
+            }
+        }
+        Self::from_kind(kind)
+    }
+
     /// Select a backend, optionally accounting for the model's weight footprint.
     ///
     /// `model_bytes` is the total weight size in bytes (0 = unknown).  On Apple
@@ -842,6 +870,15 @@ impl LlmBackendDispatch {
             }
         }
     }
+}
+
+/// Returns true when MLX ships a pre-compiled Metal SDPA shader for `head_dim`.
+///
+/// MLX hard-codes a discrete set of (head_dim, head_dim) shader variants. Requesting
+/// any other value causes a runtime panic: "Unable to load function sdpa_vector_float_N_N".
+/// Callers should check this before selecting the Metal backend for a model.
+pub fn mlx_sdpa_supported_head_dim(head_dim: usize) -> bool {
+    matches!(head_dim, 32 | 64 | 96 | 128 | 256)
 }
 
 /// Returns true when `model_bytes` fit in the Apple Silicon unified memory pool

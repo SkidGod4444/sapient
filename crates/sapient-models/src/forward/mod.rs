@@ -154,4 +154,20 @@ impl ForwardEngine {
             Self::Phi(f) => f.embed(input_ids),
         }
     }
+
+    /// True when layers are split between Metal GPU and CPU (hybrid mode).
+    pub fn is_hybrid(&self) -> bool {
+        match self {
+            Self::Llama(f) => f.is_hybrid(),
+            Self::Phi(f) => f.is_hybrid(),
+        }
+    }
+
+    /// Human-readable backend label, e.g. "metal+cpu hybrid (24/32 layers on GPU)".
+    pub fn backend_label(&self) -> String {
+        match self {
+            Self::Llama(f) => f.backend_label(),
+            Self::Phi(f) => f.backend_label(),
+        }
+    }
 }
