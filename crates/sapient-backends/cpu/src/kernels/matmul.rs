@@ -444,6 +444,46 @@ fn matmul_nt_q8_0(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
     let w_blocks: &[u8] = w.as_quant_blocks();
     let row_bytes = k / QUANT_BLOCK_SIZE * Q8_0_BLOCK_BYTES;
     let mut out = vec![0.0f32; m * n];
+
+    // ── SDOT path (aarch64 dotprod — Apple M-series, DGX Spark/Grace) ─────────
+    //
+    // Pre-quantize each activation row to i8 ONCE, then call dot_q8_0_row_sdot
+    // which uses vdotq_s32: 16 i8×i8 dot products per cycle instead of the
+    // widening chain (i8→i16→i32→f32) in dot_q8_0_block_neon.
+    //
+    // For gate_proj [4864 out, 896 in]:
+    //   NEON widening:  4864 × 28 blocks × ~40 ops  = 5.46M NEON ops
+    //   SDOT:           (896 pre-quant) + 4864 × 28 × 6 ops = 0.82M + tiny = ~5× fewer
+    // SDOT dispatch: ARMv8.4-A `sdot` via inline asm, stable Rust.
+    // All Apple M-series and DGX Spark (Grace ARM64) support dotprod.
+    #[cfg(target_arch = "aarch64")]
+    if std::arch::is_aarch64_feature_detected!("dotprod") {
+        for i in 0..m {
+            let x_row = &x_data[i * k..(i + 1) * k];
+            let (x_i8, x_scale) = quant::quantize_row_to_i8(x_row);
+            let chunk = gemv_chunk(n);
+            // SAFETY: dot_q8_0_row_sdot requires neon (always true on aarch64)
+            // and emits `sdot` (detected above via is_aarch64_feature_detected).
+            out[i * n..(i + 1) * n]
+                .par_chunks_mut(chunk)
+                .enumerate()
+                .for_each(|(ci, cs)| {
+                    for (local, slot) in cs.iter_mut().enumerate() {
+                        let j = ci * chunk + local;
+                        *slot = unsafe {
+                            quant::dot_q8_0_row_sdot(
+                                &w_blocks[j * row_bytes..(j + 1) * row_bytes],
+                                &x_i8,
+                                x_scale,
+                            )
+                        };
+                    }
+                });
+        }
+        return Tensor::from_f32_vec(out, Shape::new([m, n]));
+    }
+
+    // ── Fallback: NEON widening or AVX2 ──────────────────────────────────────
     for i in 0..m {
         let x_row = &x_data[i * k..(i + 1) * k];
         gemv_parallel!(

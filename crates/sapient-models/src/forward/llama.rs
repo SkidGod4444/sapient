@@ -213,24 +213,27 @@ impl LlamaForward {
         )?;
         let h = self.backend.rms_norm(&x, attn_norm_w, eps)?;
 
-        // Q/K/V projections — run all three in parallel since they read disjoint
-        // weight tensors and the same (read-only) activation h.
-        // rayon::join uses the existing thread pool; no extra threads created.
+        // Q/K/V projections — parallel on CPU (rayon thread pool, thread-safe).
+        // Sequential on Metal/GPU: Metal command buffers do not support concurrent
+        // encoding from multiple threads — parallel join causes assertion failures.
         let q_name = format!("{pfx}.self_attn.q_proj");
         let k_name = format!("{pfx}.self_attn.k_proj");
         let v_name = format!("{pfx}.self_attn.v_proj");
-        let ((q_res, k_res), v_res) = rayon::join(
-            || {
-                rayon::join(
+        let (q, k, v) = if self.backend.is_cpu() {
+            let ((q_res, k_res), v_res) = rayon::join(
+                || rayon::join(
                     || self.linear(&h, &q_name),
                     || self.linear(&h, &k_name),
-                )
-            },
-            || self.linear(&h, &v_name),
-        );
-        let q = q_res?;
-        let k = k_res?;
-        let v = v_res?;
+                ),
+                || self.linear(&h, &v_name),
+            );
+            (q_res?, k_res?, v_res?)
+        } else {
+            let q = self.linear(&h, &q_name)?;
+            let k = self.linear(&h, &k_name)?;
+            let v = self.linear(&h, &v_name)?;
+            (q, k, v)
+        };
 
         let mut q = split_heads(&q, n_heads, head_dim)?;
         let mut k = split_heads(&k, n_kv, head_dim)?;
@@ -265,16 +268,22 @@ impl LlamaForward {
         )?;
         let h = self.backend.rms_norm(&x, ffn_norm_w, eps)?;
 
-        // Gate and up projections are identical shape — run them in parallel.
+        // Gate and up projections — parallel on CPU, sequential on Metal.
         let gate_w = resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.mlp.gate_proj"))?;
         let up_w = resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.mlp.up_proj"))?;
-        let backend = &self.backend;
-        let (gate_res, up_res) = rayon::join(
-            || backend.linear_3d(&h, gate_w),
-            || backend.linear_3d(&h, up_w),
-        );
-        let gate = gate_res?;
-        let up = up_res?;
+        let (gate, up) = if self.backend.is_cpu() {
+            let backend = &self.backend;
+            let (gr, ur) = rayon::join(
+                || backend.linear_3d(&h, gate_w),
+                || backend.linear_3d(&h, up_w),
+            );
+            (gr?, ur?)
+        } else {
+            (
+                self.backend.linear_3d(&h, gate_w)?,
+                self.backend.linear_3d(&h, up_w)?,
+            )
+        };
         let gate = self.backend.silu(&gate)?;
         let mid = self.backend.mul(&gate, &up)?;
         let down = self.backend.linear_3d(

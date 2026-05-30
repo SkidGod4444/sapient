@@ -792,6 +792,13 @@ pub enum LlmBackendDispatch {
 }
 
 impl LlmBackendDispatch {
+    /// Returns `true` when the backend is CPU-only (thread-safe for concurrent
+    /// compute calls). Returns `false` for GPU backends (Metal/MLX) whose
+    /// command buffers do not support concurrent encoding from multiple threads.
+    pub fn is_cpu(&self) -> bool {
+        matches!(self, Self::Cpu(_))
+    }
+
     pub fn from_kind(kind: LlmBackendKind) -> Result<Self> {
         Self::from_kind_with_model_bytes(kind, 0)
     }
