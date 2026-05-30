@@ -98,6 +98,13 @@ pub trait LlmBackend: Send + Sync {
         causal: bool,
     ) -> Result<Tensor>;
     fn logits_from_hidden(&self, hidden: &Tensor, lm_head: &Tensor) -> Result<Vec<f32>>;
+
+    /// Compute logits for ALL positions in the sequence.
+    /// Returns `seq_len` vectors each of length `vocab_size`.
+    /// Default impl delegates to the CPU reference kernel; backends may override.
+    fn all_logits_from_hidden(&self, hidden: &Tensor, lm_head: &Tensor) -> Result<Vec<Vec<f32>>> {
+        common::all_logits_from_hidden(hidden, lm_head)
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -951,6 +958,13 @@ impl LlmBackend for LlmBackendDispatch {
         match self {
             Self::Cpu(b) => b.logits_from_hidden(hidden, lm_head),
             Self::Metal(b) => b.logits_from_hidden(hidden, lm_head),
+        }
+    }
+
+    fn all_logits_from_hidden(&self, hidden: &Tensor, lm_head: &Tensor) -> Result<Vec<Vec<f32>>> {
+        match self {
+            Self::Cpu(b) => b.all_logits_from_hidden(hidden, lm_head),
+            Self::Metal(b) => b.all_logits_from_hidden(hidden, lm_head),
         }
     }
 }

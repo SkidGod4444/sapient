@@ -2998,6 +2998,7 @@ name = "sapient-models"
 version = "0.2.8"
 dependencies = [
  "anyhow",
+ "half",
  "mlx-rs",
  "ordered-float",
  "parking_lot",

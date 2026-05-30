@@ -138,6 +138,16 @@ impl ForwardEngine {
         }
     }
 
+    /// Run the model on `input_ids` WITHOUT updating the KV cache and return
+    /// logits for ALL positions. Used by speculative decoding to verify K draft
+    /// tokens in a single target-model forward pass.
+    pub fn forward_all_logits(&mut self, input_ids: &[u32]) -> Result<Vec<Vec<f32>>> {
+        match self {
+            Self::Llama(f) => f.forward_all_logits(input_ids),
+            Self::Phi(f) => f.forward_all_logits(input_ids),
+        }
+    }
+
     pub fn embed(&mut self, input_ids: &[u32]) -> Result<Vec<f32>> {
         match self {
             Self::Llama(f) => f.embed(input_ids),

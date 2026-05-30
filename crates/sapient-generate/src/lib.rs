@@ -43,8 +43,10 @@
 pub mod kv_cache;
 pub mod pipeline;
 pub mod sampler;
+pub mod speculative;
 
 pub use kv_cache::KVCache;
 pub use pipeline::{GenerationConfig, LoadOptions, Pipeline};
 pub use sampler::{Sampler, SamplingStrategy};
 pub use sapient_models::{mac_gpu_support, LlmBackendKind as GenerationBackend, MacGpuSupport};
+pub use speculative::SpeculativePipeline;

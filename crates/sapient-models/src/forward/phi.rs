@@ -66,10 +66,33 @@ impl PhiForward {
         let hd = info.head_dim;
         let cache_shape = vec![1, n_kv, max_seq, hd];
 
+        // Allocate KV cache as Q8_0 (4× smaller than F32) when head_dim is a multiple
+        // of 32 (the Q8_0 block size).  Fall back to F32 otherwise.
+        let use_q8_cache = hd % 32 == 0;
+
         let cache = (0..info.num_hidden_layers)
             .map(|_| {
-                let keys = Tensor::zeros(cache_shape.clone(), sapient_core::DType::F32).unwrap();
-                let values = Tensor::zeros(cache_shape.clone(), sapient_core::DType::F32).unwrap();
+                let (keys, values) = if use_q8_cache {
+                    let numel = n_kv * max_seq * hd;
+                    let kv_bytes = numel / 32 * 34;
+                    let k = Tensor::from_quant_bytes(
+                        &vec![0u8; kv_bytes],
+                        cache_shape.clone(),
+                        sapient_core::DType::Q8_0,
+                    )
+                    .unwrap();
+                    let v = Tensor::from_quant_bytes(
+                        &vec![0u8; kv_bytes],
+                        cache_shape.clone(),
+                        sapient_core::DType::Q8_0,
+                    )
+                    .unwrap();
+                    (k, v)
+                } else {
+                    let k = Tensor::zeros(cache_shape.clone(), sapient_core::DType::F32).unwrap();
+                    let v = Tensor::zeros(cache_shape.clone(), sapient_core::DType::F32).unwrap();
+                    (k, v)
+                };
                 LayerCache {
                     keys: Some(keys),
                     values: Some(values),
@@ -106,6 +129,22 @@ impl PhiForward {
             }
         }
         Ok(logits)
+    }
+
+    /// Returns logits for ALL positions without updating the KV cache.
+    pub fn forward_all_logits(&mut self, input_ids: &[u32]) -> Result<Vec<Vec<f32>>> {
+        let hidden = self.forward_hidden(input_ids, false)?;
+        let mut all = self.backend.all_logits_from_hidden(&hidden, &self.lm_head)?;
+        // Phi's lm_head has a bias term; add it to every position if present.
+        if let Some(bias) = resolve_bias(&self.weights, &self.prefix, "lm_head") {
+            let bias_cow = bias.to_f32_cow();
+            for logits in &mut all {
+                for (l, b) in logits.iter_mut().zip(bias_cow.iter()) {
+                    *l += *b;
+                }
+            }
+        }
+        Ok(all)
     }
 
     pub fn embed(&mut self, input_ids: &[u32]) -> Result<Vec<f32>> {

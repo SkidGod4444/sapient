@@ -3,7 +3,7 @@
 use anyhow::Result;
 use sapient_backends_cpu::kernels::{self, attention, layernorm, matmul, rope};
 use sapient_core::error::SapientError;
-use sapient_core::{Shape, Tensor};
+use sapient_core::{DType, Shape, Tensor};
 
 fn map_err<T>(result: std::result::Result<T, SapientError>) -> Result<T> {
     result.map_err(|e| anyhow::anyhow!("{e}"))
@@ -143,20 +143,46 @@ fn strides_for(dims: &[usize]) -> Vec<usize> {
     strides
 }
 
+/// Quantize 32 `f32` values into a single Q8_0 block (2-byte f16 scale + 32 × i8).
+/// Returns the 34-byte block in ggml layout.
+#[inline]
+fn quantize_f32_to_q8_0_block(data: &[f32]) -> [u8; 34] {
+    debug_assert_eq!(data.len(), 32, "Q8_0 block must have exactly 32 elements");
+    let max_abs = data.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+    let scale = max_abs / 127.0;
+    let d = half::f16::from_f32(scale);
+    let inv_scale = if scale > 0.0 { 1.0 / scale } else { 0.0 };
+    let mut block = [0u8; 34];
+    block[0..2].copy_from_slice(&d.to_le_bytes());
+    for (i, &v) in data.iter().enumerate() {
+        block[2 + i] = (v * inv_scale).round().clamp(-127.0, 127.0) as i8 as u8;
+    }
+    block
+}
+
 /// Update the pre-allocated KV cache in place and return a view of length `seq_len + new_seq`.
+///
+/// When the cache holds Q8_0 blocks (quantized KV cache), the new F32 values are
+/// quantized on write and the returned tensor is a freshly-allocated F32 tensor
+/// (dequantized from the cache). When the cache is F32, the old in-place path is used.
 pub fn update_kv_cache(
     cache: &mut Tensor,
     current_seq_len: usize,
     new_k: &Tensor,
 ) -> Result<Tensor> {
-    let cd = cache.shape().dims();
-    let nd = new_k.shape().dims();
+    let cd = cache.shape().dims().to_vec();
+    let nd = new_k.shape().dims().to_vec();
 
     if cd.len() != 4 || nd.len() != 4 {
         anyhow::bail!("update_kv_cache expects 4-D tensors");
     }
     if cd[0] != nd[0] || cd[1] != nd[1] || cd[3] != nd[3] {
         anyhow::bail!("update_kv_cache shape mismatch");
+    }
+
+    // Dispatch to the Q8_0-quantized path when the cache holds packed blocks.
+    if cache.dtype() == DType::Q8_0 {
+        return update_kv_cache_q8(cache, &cd, &nd, current_seq_len, new_k);
     }
 
     let max_seq = cd[2];
@@ -221,6 +247,121 @@ pub fn update_kv_cache(
     // Return a sliced view of the cache from 0 to total_seq
     cache
         .slice_axis(2, 0, total_seq)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// Q8_0-quantized KV cache update.
+///
+/// Writes new F32 tokens as Q8_0 blocks into the packed cache buffer by copying the
+/// existing bytes, mutating them, then swapping the cache tensor in place.
+/// Returns a freshly-allocated contiguous F32 tensor (dequantized from the live prefix)
+/// suitable for the attention kernel.
+///
+/// Buffer layout: flat row-major over [b, h, seq_pos], each position is
+/// `blocks_per_head * 34` bytes (one Q8_0 block per 32 head_dim elements).
+fn update_kv_cache_q8(
+    cache: &mut Tensor,
+    cd: &[usize], // cache shape dims: [b, h, max_seq, hd]
+    nd: &[usize], // new_k shape dims: [b, h, new_seq, hd]
+    current_seq_len: usize,
+    new_k: &Tensor,
+) -> Result<Tensor> {
+    let (b_sz, h, max_seq, hd) = (cd[0], cd[1], cd[2], cd[3]);
+    let new_seq = nd[2];
+
+    if new_seq > max_seq {
+        anyhow::bail!("new tokens {} exceeds max cache size {}", new_seq, max_seq);
+    }
+
+    // Number of Q8_0 blocks covering one head_dim slice (hd is a multiple of 32).
+    let blocks_per_head = hd / 32;
+    let bytes_per_pos = blocks_per_head * 34;
+
+    let mut total_seq = current_seq_len + new_seq;
+    let shift = total_seq.saturating_sub(max_seq);
+
+    // Copy the cache bytes out so we can mutate them.
+    // `cache.as_bytes()` returns exactly `byte_count(numel)` bytes for quantized tensors.
+    let mut cache_bytes: Vec<u8> = cache.as_bytes().to_vec();
+
+    // `new_k` is always F32 (output of RoPE / split_heads).
+    let new_k_f32 = new_k.to_f32_vec();
+
+    // Helper: byte offset for position (bi, hi, si) in the flat byte buffer.
+    let pos_off = |bi: usize, hi: usize, si: usize| -> usize {
+        (bi * h * max_seq + hi * max_seq + si) * bytes_per_pos
+    };
+
+    // Shift existing entries left when the cache is full.
+    if shift > 0 {
+        let keep_seq = current_seq_len - shift;
+        for bi in 0..b_sz {
+            for hi in 0..h {
+                for si in 0..keep_seq {
+                    let src = pos_off(bi, hi, si + shift);
+                    let dst = pos_off(bi, hi, si);
+                    cache_bytes.copy_within(src..src + bytes_per_pos, dst);
+                }
+            }
+        }
+    }
+
+    // Append new tokens: quantize each F32 head slice → Q8_0 blocks.
+    let insert_pos = if shift > 0 {
+        current_seq_len - shift
+    } else {
+        current_seq_len
+    };
+
+    for bi in 0..b_sz {
+        for hi in 0..h {
+            for si in 0..new_seq {
+                let dst_start = pos_off(bi, hi, insert_pos + si);
+                // new_k shape [b, h, new_seq, hd] — contiguous from split_heads.
+                let src_f32_start = (bi * h * new_seq + hi * new_seq + si) * hd;
+                let src_f32 = &new_k_f32[src_f32_start..src_f32_start + hd];
+
+                for blk in 0..blocks_per_head {
+                    let f_blk = &src_f32[blk * 32..(blk + 1) * 32];
+                    let encoded = quantize_f32_to_q8_0_block(f_blk);
+                    let byte_off = dst_start + blk * 34;
+                    cache_bytes[byte_off..byte_off + 34].copy_from_slice(&encoded);
+                }
+            }
+        }
+    }
+
+    if shift > 0 {
+        total_seq = max_seq;
+    }
+
+    // Swap the mutated bytes back into the cache tensor.
+    *cache = Tensor::from_quant_bytes(&cache_bytes, vec![b_sz, h, max_seq, hd], DType::Q8_0)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Dequantize the live prefix [0..total_seq] to a contiguous F32 tensor.
+    let out_numel = b_sz * h * total_seq * hd;
+    let mut out_f32 = vec![0.0f32; out_numel];
+
+    for bi in 0..b_sz {
+        for hi in 0..h {
+            for si in 0..total_seq {
+                let src_start = pos_off(bi, hi, si);
+                let dst_f32_start = (bi * h * total_seq + hi * total_seq + si) * hd;
+                let src_slice = &cache_bytes[src_start..src_start + bytes_per_pos];
+
+                for blk in 0..blocks_per_head {
+                    let blk_bytes = &src_slice[blk * 34..(blk + 1) * 34];
+                    let d = half::f16::from_le_bytes([blk_bytes[0], blk_bytes[1]]).to_f32();
+                    for j in 0..32 {
+                        out_f32[dst_f32_start + blk * 32 + j] = blk_bytes[2 + j] as i8 as f32 * d;
+                    }
+                }
+            }
+        }
+    }
+
+    Tensor::from_f32(&out_f32, Shape::new(vec![b_sz, h, total_seq, hd]))
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
@@ -301,6 +442,25 @@ pub fn gqa_attention(
         None,
         n_kv_heads,
     ))
+}
+
+/// Compute logits for ALL positions in the sequence. Used by speculative
+/// decoding to verify K draft tokens in a single target-model forward pass.
+pub fn all_logits_from_hidden(hidden: &Tensor, lm_head: &Tensor) -> Result<Vec<Vec<f32>>> {
+    let dims = hidden.shape().dims();
+    let hidden_size = dims[2];
+    let seq = dims[1];
+    let vocab_size = lm_head.shape().dims()[0];
+    let h = hidden.as_f32_slice();
+    let h_all =
+        Tensor::from_f32(h, Shape::new([seq, hidden_size])).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let logits_flat = map_err(matmul::matmul_nt(&h_all, lm_head))?;
+    let flat = logits_flat.as_f32_slice();
+    let mut all = Vec::with_capacity(seq);
+    for i in 0..seq {
+        all.push(flat[i * vocab_size..(i + 1) * vocab_size].to_vec());
+    }
+    Ok(all)
 }
 
 pub fn logits_from_hidden(hidden: &Tensor, lm_head: &Tensor) -> Result<Vec<f32>> {

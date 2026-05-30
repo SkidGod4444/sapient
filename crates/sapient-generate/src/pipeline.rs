@@ -742,6 +742,12 @@ impl Pipeline {
     pub fn tokenizer(&self) -> &SapientTokenizer {
         &self.tokenizer
     }
+
+    /// An `Arc` clone of the tokenizer — useful for passing into a `spawn_blocking` closure.
+    pub fn tokenizer_arc(&self) -> Arc<SapientTokenizer> {
+        Arc::clone(&self.tokenizer)
+    }
+
     pub fn model_info(&self) -> &ModelInfo {
         &self.model_info
     }
@@ -760,6 +766,31 @@ impl Pipeline {
         if let Ok(mut engine) = self.engine.lock() {
             engine.reset_cache();
         }
+    }
+
+    /// The configured generation backend kind (CPU / Metal / Auto).
+    pub fn configured_backend_kind(&self) -> LlmBackendKind {
+        self.backend
+    }
+
+    /// The local weight-file paths for this model.
+    pub fn weight_paths(&self) -> &[PathBuf] {
+        &self.weight_paths
+    }
+
+    /// All EOS token IDs recognised by this pipeline.
+    pub fn eos_token_ids_pub(&self) -> Vec<u32> {
+        self.eos_token_ids()
+    }
+
+    /// The configured stop sequences.
+    pub fn stop_sequences(&self) -> &[String] {
+        &self.config.stop_sequences
+    }
+
+    /// A reference to the active generation config.
+    pub fn config(&self) -> &GenerationConfig {
+        &self.config
     }
 
     fn configured_backend(&self) -> LlmBackendKind {

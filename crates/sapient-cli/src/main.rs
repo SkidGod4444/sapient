@@ -14,7 +14,9 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
-use sapient_generate::{mac_gpu_support, GenerationBackend, LoadOptions, Pipeline};
+use sapient_generate::{
+    mac_gpu_support, GenerationBackend, LoadOptions, Pipeline, SpeculativePipeline,
+};
 use sapient_hub::LoadOptions as HubLoadOptions;
 use sapient_runtime::{InferenceSession, Model, ModelConfig, SessionOptions};
 use sapient_telemetry::init_tracing;
@@ -61,6 +63,16 @@ enum Commands {
         /// Use this flag to force it on smaller devices (e.g. Raspberry Pi).
         #[arg(long)]
         mmap: bool,
+
+        /// Enable speculative decoding with an auto-selected small draft model
+        /// (prefers smollm2-135m, falls back to qwen2.5-0.5b).
+        /// Expected speedup: 2-4× on generation. Both models are downloaded if needed.
+        #[arg(long)]
+        speculative: bool,
+
+        /// Draft model to use with --speculative (default: auto-selected).
+        #[arg(long, requires = "speculative")]
+        draft_model: Option<String>,
     },
 
     /// Download a model from HuggingFace Hub to the local cache.
@@ -265,7 +277,19 @@ async fn dispatch(cli: Cli) -> Result<()> {
             model,
             backend,
             mmap,
-        } => chat_command(model.as_str(), &backend, cli.verbose, mmap).await,
+            speculative,
+            draft_model,
+        } => {
+            chat_command(
+                model.as_str(),
+                &backend,
+                cli.verbose,
+                mmap,
+                speculative,
+                draft_model.as_deref(),
+            )
+            .await
+        }
         Commands::Pull { model } => pull_command(model.as_str(), cli.verbose).await,
         Commands::List => list_command(),
         Commands::Models => models_command(),
@@ -342,7 +366,19 @@ async fn dispatch(cli: Cli) -> Result<()> {
 
 // ── Hub commands ──────────────────────────────────────────────────────────────
 
-async fn chat_command(model: &str, backend: &str, verbose: bool, force_mmap: bool) -> Result<()> {
+async fn chat_command(
+    model: &str,
+    backend: &str,
+    verbose: bool,
+    force_mmap: bool,
+    speculative: bool,
+    draft_model: Option<&str>,
+) -> Result<()> {
+    // If speculative decoding is requested, branch into the speculative path.
+    if speculative {
+        return chat_speculative_command(model, backend, verbose, draft_model).await;
+    }
+
     let backend_kind = parse_generation_backend(backend)?;
     let backend_label = backend_kind.to_string();
     let mut load_opts = LoadOptions {
@@ -499,6 +535,110 @@ async fn chat_command(model: &str, backend: &str, verbose: bool, force_mmap: boo
 
     Ok(())
 }
+
+// ── Speculative chat ──────────────────────────────────────────────────────────
+
+async fn chat_speculative_command(
+    model: &str,
+    backend: &str,
+    verbose: bool,
+    draft_model: Option<&str>,
+) -> Result<()> {
+    let _ = parse_generation_backend(backend)?; // validate backend string early
+
+    if verbose {
+        eprintln!("Loading target model {model} (speculative mode)…");
+        if let Some(d) = draft_model {
+            eprintln!("Using draft model: {d}");
+        } else {
+            eprintln!("Auto-selecting draft model…");
+        }
+    }
+
+    let load_spinner = if verbose {
+        None
+    } else {
+        Some(ui::spinner(format!("loading {model} + draft…")))
+    };
+
+    let pipeline = match draft_model {
+        Some(draft) => SpeculativePipeline::new(model, draft, 5).await,
+        None => SpeculativePipeline::with_auto_draft(model, 5).await,
+    }
+    .with_context(|| format!("failed to load speculative pipeline for '{model}'"))?;
+
+    if let Some(pb) = load_spinner {
+        pb.finish_and_clear();
+    }
+
+    ui::print_chat_banner(model, "speculative", backend);
+
+    let mut history: Vec<ChatMessage> = Vec::new();
+    loop {
+        ui::write_user_prompt()?;
+
+        let mut line = String::new();
+        let n = std::io::stdin().read_line(&mut line)?;
+        if n == 0 {
+            break;
+        }
+
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if matches!(line, "/exit" | "/quit" | "/q") {
+            break;
+        }
+        if matches!(line, "/help" | "/?") {
+            ui::print_chat_help();
+            continue;
+        }
+        if matches!(line, "/clear" | "/reset") {
+            history.clear();
+            ui::hint("conversation history cleared");
+            continue;
+        }
+
+        history.push(ChatMessage::user(line));
+
+        let think = ui::spinner("thinking…");
+        let start = std::time::Instant::now();
+        let mut stream = pipeline.chat_stream(&history).await;
+        let mut reply = String::new();
+        let mut first = true;
+        let mut ttft: Option<std::time::Duration> = None;
+
+        use futures::StreamExt;
+        while let Some(token) = stream.next().await {
+            if first {
+                ttft = Some(start.elapsed());
+                think.finish_and_clear();
+                ui::write_assistant_prompt()?;
+                first = false;
+            }
+            print!("{token}");
+            reply.push_str(&token);
+            std::io::Write::flush(&mut std::io::stdout())?;
+        }
+        if first {
+            think.finish_and_clear();
+        }
+        println!();
+
+        if !reply.is_empty() {
+            // We don't have direct tokenizer access from SpeculativePipeline, so
+            // approximate token count by whitespace splitting.
+            let tokens = reply.split_whitespace().count();
+            ui::print_gen_stats(tokens, start.elapsed(), ttft);
+        }
+        history.push(ChatMessage::assistant(reply));
+    }
+
+    Ok(())
+}
+
+// ── Pull ──────────────────────────────────────────────────────────────────────
 
 async fn pull_command(model: &str, verbose: bool) -> Result<()> {
     if verbose {

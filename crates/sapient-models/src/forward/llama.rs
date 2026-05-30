@@ -71,10 +71,34 @@ impl LlamaForward {
         let hd = info.head_dim;
         let cache_shape = vec![1, n_kv, max_seq, hd];
 
+        // Allocate KV cache as Q8_0 (4× smaller than F32) when head_dim is a multiple
+        // of 32 (the Q8_0 block size).  Fall back to F32 otherwise.
+        let use_q8_cache = hd % 32 == 0;
+
         let cache = (0..info.num_hidden_layers)
             .map(|_| {
-                let keys = Tensor::zeros(cache_shape.clone(), sapient_core::DType::F32).unwrap();
-                let values = Tensor::zeros(cache_shape.clone(), sapient_core::DType::F32).unwrap();
+                let (keys, values) = if use_q8_cache {
+                    // Q8_0: numel/32 blocks × 34 bytes each.
+                    let numel = n_kv * max_seq * hd;
+                    let kv_bytes = numel / 32 * 34;
+                    let k = Tensor::from_quant_bytes(
+                        &vec![0u8; kv_bytes],
+                        cache_shape.clone(),
+                        sapient_core::DType::Q8_0,
+                    )
+                    .unwrap();
+                    let v = Tensor::from_quant_bytes(
+                        &vec![0u8; kv_bytes],
+                        cache_shape.clone(),
+                        sapient_core::DType::Q8_0,
+                    )
+                    .unwrap();
+                    (k, v)
+                } else {
+                    let k = Tensor::zeros(cache_shape.clone(), sapient_core::DType::F32).unwrap();
+                    let v = Tensor::zeros(cache_shape.clone(), sapient_core::DType::F32).unwrap();
+                    (k, v)
+                };
                 LayerCache {
                     keys: Some(keys),
                     values: Some(values),
@@ -104,6 +128,13 @@ impl LlamaForward {
     pub fn forward_logits(&mut self, input_ids: &[u32], use_cache: bool) -> Result<Vec<f32>> {
         let hidden = self.forward_hidden(input_ids, use_cache)?;
         self.backend.logits_from_hidden(&hidden, &self.lm_head)
+    }
+
+    /// Returns logits for ALL positions without updating the KV cache.
+    /// Used by speculative decoding to verify draft tokens in one shot.
+    pub fn forward_all_logits(&mut self, input_ids: &[u32]) -> Result<Vec<Vec<f32>>> {
+        let hidden = self.forward_hidden(input_ids, false)?;
+        self.backend.all_logits_from_hidden(&hidden, &self.lm_head)
     }
 
     /// Mean-pooled hidden states for embedding models.
