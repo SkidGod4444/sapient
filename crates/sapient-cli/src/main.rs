@@ -389,13 +389,15 @@ async fn chat_command(
 
     let is_local_gguf = model.ends_with(".gguf") || std::path::Path::new(model).is_file();
 
-    // If the model isn't cached and we need to download, show a live download
-    // progress bar with bytes + speed instead of a silent spinner.
+    // A model is "already cached" only if it is fully downloaded — no .sync.part
+    // files in the blobs directory. A partial download is treated as not cached so
+    // we show the download progress bar and hf-hub resumes from where it left off.
     let already_cached = is_local_gguf
-        || hub::list_cached_models()
+        || (hub::list_cached_models()
             .unwrap_or_default()
             .iter()
-            .any(|m| m == model);
+            .any(|m| m == model)
+            && !hub::has_stale_downloads(model));
 
     let dl_handle = if !already_cached && !verbose {
         let hub_check = HubClient::with_options(sapient_hub::LoadOptions {

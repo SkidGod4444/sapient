@@ -84,7 +84,35 @@ fn model_cache_dir_name(model_id: &str) -> String {
     format!("models--{}", model_id.replace('/', "--"))
 }
 
-/// List models cached by the HuggingFace Hub client.
+/// Returns true if a model's blobs directory contains any `.sync.part` files,
+/// which means a download was interrupted and the model is not fully cached.
+pub fn has_stale_downloads(model_id: &str) -> bool {
+    let actual_id = sapient_hub::registry::resolve_model_alias(model_id)
+        .unwrap_or_else(|_| model_id.to_string());
+    let Some(hub_cache) = hub_cache_root() else {
+        return false;
+    };
+    let blobs_dir = hub_cache
+        .join(format!("models--{}", actual_id.replace('/', "--")))
+        .join("blobs");
+    has_part_files(&blobs_dir)
+}
+
+/// Walk the blobs directory and return true if any `.sync.part` file exists.
+fn has_part_files(dir: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        e.file_name()
+            .to_string_lossy()
+            .ends_with(".sync.part")
+    })
+}
+
+/// List models fully cached by the HuggingFace Hub client.
+/// Models with interrupted downloads (`.sync.part` files present) are excluded —
+/// they are partial and must be re-downloaded before use.
 pub fn list_cached_models() -> Result<Vec<String>> {
     let Some(hub_cache) = hub_cache_root() else {
         return Ok(vec![]);
@@ -100,17 +128,21 @@ pub fn list_cached_models() -> Result<Vec<String>> {
 
         let name = entry.file_name().to_string_lossy().into_owned();
         if let Some(rest) = name.strip_prefix("models--") {
-            // Verify it's a properly installed model, not an empty or failed directory
             let snapshots_dir = path.join("snapshots");
             if snapshots_dir.is_dir() {
-                // Check if there's at least one commit hash folder inside snapshots
                 let has_commits = std::fs::read_dir(&snapshots_dir)
                     .map(|mut dirs| dirs.next().is_some())
                     .unwrap_or(false);
 
                 if has_commits {
+                    // Skip models whose blobs directory still contains .sync.part
+                    // files — these are interrupted downloads, not usable models.
+                    let blobs_dir = path.join("blobs");
+                    if has_part_files(&blobs_dir) {
+                        continue;
+                    }
+
                     let hf_id = rest.replace("--", "/");
-                    // Show the registry alias if one exists, otherwise skip (hide internal models)
                     if let Some(alias) = reverse_aliases.get(hf_id.to_lowercase().as_str()) {
                         models.push(alias.clone());
                     }
