@@ -524,7 +524,11 @@ pub async fn serve_llm(
         let guard = state.cache.lock().await;
         if let Some(loaded) = guard.as_ref() {
             let arch = format!("{:?}", loaded.pipeline.arch());
-            let mmap_label = if loaded.pipeline.is_mmap() { " · mmap" } else { "" };
+            let mmap_label = if loaded.pipeline.is_mmap() {
+                " · mmap"
+            } else {
+                ""
+            };
             drop(guard);
             print_banner(port, backend, Some((model_id, &arch, mmap_label)));
         }
@@ -564,10 +568,7 @@ fn print_banner(port: u16, backend: &str, loaded: Option<(&str, &str, &str)>) {
     } else {
         println!(
             "  {}",
-            console::style(
-                "no model pre-loaded — models load on first API request"
-            )
-            .dim()
+            console::style("no model pre-loaded — models load on first API request").dim()
         );
     }
     println!(
