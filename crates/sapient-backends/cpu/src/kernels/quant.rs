@@ -320,7 +320,7 @@ pub fn quantize_row_to_i8(x: &[f32]) -> (Vec<i8>, f32) {
 /// into an i32x4 accumulator in one instruction (16 MAC ops per cycle).
 /// Two calls cover all 32 elements of a Q8_0 block.
 #[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
+#[target_feature(enable = "neon,dotprod")]
 unsafe fn dot_q8_0_block_sdot(block: &[u8], x_i8: &[i8]) -> i32 {
     use std::arch::aarch64::*;
     debug_assert_eq!(block.len(), Q8_0_BLOCK_BYTES);
@@ -362,7 +362,7 @@ unsafe fn dot_q8_0_block_sdot(block: &[u8], x_i8: &[i8]) -> i32 {
 /// `row_blocks` must be a valid slice of packed Q8_0 blocks; `x_i8` must have
 /// length equal to the number of elements covered by those blocks.
 #[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
+#[target_feature(enable = "neon,dotprod")]
 pub unsafe fn dot_q8_0_row_sdot(row_blocks: &[u8], x_i8: &[i8], x_scale: f32) -> f32 {
     let mut acc = 0.0f32;
     let mut x_off = 0usize;
