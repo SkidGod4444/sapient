@@ -8,18 +8,22 @@
 > portability, curated registry, modern CLI, and edge-specific automation
 > (auto-pick quantization for available RAM, auto CPU/GPU offload, single static binary).
 
-## Where we are (v0.2.9)
+## Where we are (v0.3.2)
 - ✅ Correct CPU + Metal inference for Phi & Llama/Qwen families (F16/BF16 safetensors + GGUF Q4/Q8).
-- ✅ Curated registry, modern CLI (`chat`, `pull`, `run`, `models`, `serve`, `reset`, `rm`, `update`), self-update, published to crates.io.
+- ✅ Curated registry, modern CLI (`chat`, `pull`, `run`, `models`, `serve`, `reset`, `rm`, `update`, `devices`), self-update, published to crates.io.
 - ✅ GGUF Q4_0/Q8_0/K-quant loading with mmap support (models larger than RAM).
 - ✅ Flash-Edge attention (online-softmax, O(head_dim) memory, NEON).
 - ✅ Q8_0 KV cache (in-place, 4× RAM reduction vs F32, zero per-step allocation).
 - ✅ Online F16→Q8_0 quantization at load time (near-lossless, ~1.06 bytes/weight).
 - ✅ Native F16 GEMV and NEON Q4_K GEMV; adaptive rayon chunking.
+- ✅ SDOT Q8_0 kernel (ARMv8.4A `sdot` via inline asm, runtime-detected, ~3% net gain — bandwidth-bound).
 - ✅ Speculative decoding (`sapient chat --speculative`).
 - ✅ OpenAI-compatible HTTP server (`sapient serve`) with lazy model loading.
 - ✅ Benchmark suite (`scripts/benchmark-compare.sh`, `scripts/gen-benchmark-report.py`).
-- ⚠️ **Next bottleneck:** Q8_0 NEON is compute-bound (i8→i16→i32→f32 widening chain, ~10 ops/8 weights). SDOT (ARMv8.4A) not yet used.
+- ✅ `sapient devices` — CPU/GPU detection, backend recommendations, hybrid Metal+CPU plan.
+- ✅ Hybrid Metal+CPU layer-split inference for **both** LlamaForward and PhiForward.
+- ✅ Phi-2 Metal crash fix — `mlx_sdpa_supported_head_dim()` gate prevents panic for unsupported head dims.
+- ✅ Linux/Windows build fixes (cfg-gated `macos_gpu_name`, `dotprod` target_feature on SDOT functions).
 
 ## Guiding principles
 1. **One PR/phase → one release.** Ship gradually; never a big-bang.

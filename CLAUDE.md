@@ -83,7 +83,7 @@ When `from_pretrained` downloads a GGUF-only repo (no `config.json`), the hub cl
 
 **Adaptive rayon chunking:** `gemv_chunk()` targets 4 tasks per core (not one task per output row). For a 151 936-row `lm_head` this avoids spawning 151 936 micro-tasks. `matmul_nt_q*` and `scaled_dot_product_attention` are parallelised with `rayon::par_iter_mut` / `par_chunks_mut` over the output dimension; `LlamaForward::forward_layer` uses `rayon::join` for parallel Q/K/V and gate/up projections.
 
-**Known compute bottleneck (Q8_0 NEON):** the i8→i16→i32→f32 widening chain requires ~10 NEON ops per 8 weights. Next improvement: SDOT integer arithmetic (ARMv8.4A, available on all M-series) for ~4× compute improvement.
+**SDOT Q8_0 (v0.3.x):** `dot_q8_0_block_sdot` uses `core::arch::asm!` inline assembly to emit the ARMv8.4A `sdot` instruction. Marked `#[target_feature(enable = "neon,dotprod")]` — the `dotprod` feature is required by the assembler even though the call site already gates on `is_aarch64_feature_detected!("dotprod")`. Net gain is ~3% because Q8_0 GEMV is memory-bandwidth-bound (not compute-bound) on M-series UMA.
 
 **Do not** add `-C target-cpu=native` to `.cargo/config.toml` for the `aarch64-apple-darwin` target — it causes `ring`'s compile-time const assertions to fail on CI runners.
 
@@ -112,6 +112,16 @@ F16/BF16 safetensors weights are auto-quantized to Q8_0 during loading (near-los
 - `GET /v1/health` — liveness check
 
 No model is loaded at startup; the first API request triggers download + load (Ollama-style lazy loading).
+
+### Hybrid Metal+CPU inference (v0.3.x)
+Both `LlamaForward` and `PhiForward` support layer-split hybrid execution. `compute_backend_split()` / `compute_phi_backend_split()` run at model load and decide: full Metal, hybrid split, or CPU-only based on `(model_bytes × 1.5 ≤ RAM − 2 GB)`. The `forward_layer` is structured in **three borrow-safe phases** to satisfy the Rust borrow checker:
+1. Pre-cache phase — borrows `&self.backend` (or `&self.cpu_fallback`) to compute norm, QKV, RoPE.
+2. Cache phase — borrows `&mut self.cache[layer_idx]` (backend ref dropped).
+3. Post-cache phase — re-borrows backend for attention + FFN.
+Helper functions (`linear_with_bias_bk`, `mlp_phi2_bk`, `mlp_phi3_bk`) take explicit `bk: &LlmBackendDispatch` and `weights: &HashMap` so individual fields are borrowed rather than all of `self`.
+
+### Metal SDPA head_dim compatibility
+`mlx_sdpa_supported_head_dim(head_dim)` returns true only for {32, 64, 96, 128, 256}. MLX pre-compiles Metal SDPA shaders for this fixed set; any other value (e.g. Phi-2's 80) panics at runtime. `LlmBackendDispatch::from_kind_with_head_dim()` checks this at init: Auto silently falls back to CPU; explicit `--backend metal` returns a user-readable error.
 
 ### Stop-sequence handling
 The streaming generator (`generate_stream`) buffers decoded text and withholds up to `max(stop_len)` bytes from the tail before emitting, preventing stop markers from leaking. Both EOS-by-token-id (multi-EOS, all candidates collected from the tokenizer vocab) and EOS-by-string are checked every step.

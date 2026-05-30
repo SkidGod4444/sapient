@@ -215,22 +215,23 @@ and validating its architecture in `sapient-models`.
 
 ---
 
-## Performance (v0.2.9, CPU, Apple M-series)
+## Performance (v0.3.x, CPU, Apple M-series)
 
-SAPIENT v0.2.9 ships a fully overhauled CPU engine (Flash-Edge attention, Q8_0 KV cache,
-NEON GEMV kernels, adaptive rayon chunking). Measured on Apple M-series, GGUF Q8_0 models:
+SAPIENT v0.3.x ships a fully overhauled inference engine. Measured on Apple M-series, GGUF Q8_0 models:
 
-| Model | v0.2.8 | v0.2.9 | Change |
+| Model | v0.2.8 | v0.3.x | Change |
 |---|---|---|---|
 | Qwen2.5-0.5B Q8_0 | ~10 tok/s | ~18.9 tok/s | **+89%** |
 | Qwen2.5-1.5B Q8_0 | ~4.2 tok/s | ~10.0 tok/s | **+138%** |
 
-Key improvements behind these numbers:
+Key improvements:
 - **Flash-Edge attention** — online-softmax, O(head_dim) working memory, NEON `vfmaq_f32`.
 - **Q8_0 KV cache** — 4× RAM reduction vs F32; zero per-step heap allocation.
-- **Online quantization** — F16/BF16 safetensors weights auto-quantized to Q8_0 at load (no more F16→F32 per token).
-- **NEON GEMV kernels** — native F16 (`vcvt_f32_f16`) and Q4_K nibble-unpacking + FMA.
-- **Adaptive rayon** — `gemv_chunk()` targets 4 tasks/core; avoids micro-task overhead on large vocab projections.
+- **Online quantization** — F16/BF16 safetensors weights auto-quantized to Q8_0 at load.
+- **NEON GEMV kernels** — native F16 (`vcvt_f32_f16`), Q4_K nibble-unpacking + FMA, SDOT Q8_0.
+- **Adaptive rayon** — `gemv_chunk()` targets 4 tasks/core; avoids micro-task overhead.
+- **Hybrid Metal+CPU** — large models that don't fully fit GPU are layer-split automatically (Llama + Phi).
+- **`sapient devices`** — detect CPU/GPU, estimate tok/s, recommend backend before loading a model.
 
 ---
 

@@ -420,9 +420,9 @@ Releases are automated via GitHub Actions when a semver tag is pushed:
 #    and Formula/sapient.rb if needed
 
 # 2. Commit, tag, push
-git tag v0.1.x
+git tag v0.3.2   # use actual version
 git push origin main
-git push origin v0.1.x
+git push origin v0.3.2
 ```
 
 The [release workflow](.github/workflows/release.yml) builds binaries for:
