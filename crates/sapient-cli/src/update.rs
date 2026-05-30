@@ -138,10 +138,7 @@ fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
 
 fn fetch_latest_tag() -> Result<String> {
     let api_url = format!("https://api.github.com/repos/{REPO}/releases/latest");
-    match ureq::get(&api_url)
-        .set("User-Agent", "sapient-cli")
-        .call()
-    {
+    match ureq::get(&api_url).set("User-Agent", "sapient-cli").call() {
         Ok(resp) => {
             let body = resp.into_string()?;
             let json: serde_json::Value = serde_json::from_str(&body)?;
