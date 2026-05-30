@@ -1,38 +1,53 @@
 #!/usr/bin/env bash
 # =============================================================================
-# benchmark-compare.sh — Portable SAPIENT vs llama.cpp / Ollama / llamafile
+# benchmark-compare.sh — SAPIENT vs llama.cpp / Ollama / llamafile / mlx-lm / vllm
 #
 # Designed to run on:
-#   - macOS Intel (x86_64) or Apple Silicon (aarch64)
-#   - Linux x86_64  (DGX H200, cloud VMs)
-#   - Linux aarch64 (DGX Spark, Raspberry Pi 5)
+#   - macOS Apple Silicon (aarch64)  — sapient, sapient-metal, llamacpp, ollama, mlx-lm
+#   - macOS Intel (x86_64)           — sapient, llamacpp, ollama, llamafile
+#   - Linux x86_64 + CUDA            — sapient, llamacpp-cuda, ollama, vllm
+#   - Linux aarch64 (DGX Spark)      — sapient, llamacpp, ollama
+#   - Linux aarch64 (Raspberry Pi 5) — sapient, llamacpp, ollama
+#
+# Engines:
+#   sapient          SAPIENT CPU path (NEON/AVX2, Q4/Q8/K-quant)
+#   sapient-metal    SAPIENT Metal GPU path (Apple Silicon only, --features mlx)
+#   llamacpp         llama.cpp CPU (Metal on macOS, CUDA on Linux if --cuda)
+#   ollama           Ollama (uses llama.cpp backend, includes daemon overhead)
+#   llamafile        Mozilla llamafile (cosmopolitan llama.cpp, zero-install)
+#   mlx-lm           Apple MLX Python framework (Apple Silicon only)
+#   vllm             vLLM (CUDA only, PagedAttention, optimised for A100/H100)
 #
 # Measures (per engine, per model):
 #   load_ms      — wall time from process start to model ready
 #   ttft_ms      — time from prompt send to first output byte
 #   decode_tps   — tokens/second during generation (after first token)
-#   peak_rss_mb  — max resident RAM during inference
-#   binary_mb    — size of the engine binary on disk
+#   peak_rss_mb  — max resident RAM (or VRAM for GPU engines)
+#   binary_mb    — size of the engine binary/install on disk
 #
 # Usage:
 #   ./scripts/benchmark-compare.sh [OPTIONS]
 #
 # Options:
-#   --engines   sapient,llamacpp,ollama,llamafile   (default: sapient,llamacpp,ollama)
-#   --models    0.5b,8b                             (default: 0.5b)
-#   --tokens    50                                  (tokens to generate per run)
-#   --runs      3                                   (measured runs per engine+model)
-#   --out       ./results/benchmark                 (output directory for JSON)
-#   --no-install                                    (skip engine installation)
-#   --cuda                                          (enable CUDA for llama.cpp on Linux)
+#   --engines   sapient,llamacpp,ollama,mlx-lm,vllm  (default: sapient,llamacpp,ollama)
+#   --models    0.5b,1.5b,3b,7b                      (default: 0.5b,3b)
+#   --tokens    100                                   (tokens to generate per run)
+#   --runs      3                                     (measured runs per engine+model)
+#   --out       ./results/benchmark                   (output directory for JSON)
+#   --no-install                                      (skip engine installation)
+#   --cuda                                            (enable CUDA for llama.cpp + vllm)
+#   --metal                                           (run sapient-metal on Apple Silicon)
 #
 # Output:
 #   results/benchmark/
 #     system_info.json
 #     sapient_<model>.json
+#     sapient_metal_<model>.json   (if --metal)
 #     llamacpp_<model>.json
 #     ollama_<model>.json
 #     llamafile_<model>.json
+#     mlxlm_<model>.json           (if mlx-lm engine selected)
+#     vllm_<model>.json            (if vllm engine selected)
 #     summary.md
 #
 # After running, generate the report:
@@ -43,12 +58,13 @@ set -euo pipefail
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 ENGINES="sapient,llamacpp,ollama"
-MODELS_ARG="0.5b"
+MODELS_ARG="0.5b,3b"
 MAX_TOKENS=50
 RUNS=3
 OUT_DIR="./results/benchmark"
 SKIP_INSTALL=false
 USE_CUDA=false
+USE_METAL=false
 PROMPT_SHORT="What is the capital of France? Answer in one word."
 PROMPT_MEDIUM="Explain quantum entanglement in one sentence."
 PROMPT_LONG="You are a helpful assistant. The user asks: Explain the difference between supervised and unsupervised machine learning, including 2 examples of each."
@@ -63,6 +79,7 @@ while [[ $# -gt 0 ]]; do
     --out)        OUT_DIR="$2";       shift 2 ;;
     --no-install) SKIP_INSTALL=true;  shift   ;;
     --cuda)       USE_CUDA=true;      shift   ;;
+    --metal)      USE_METAL=true;     shift   ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done
@@ -160,6 +177,7 @@ resolve_gguf_for_llamacpp() {
     0.5b) echo "Qwen/Qwen2.5-0.5B-Instruct-GGUF:qwen2.5-0.5b-instruct-q8_0.gguf" ;;
     1.5b) echo "Qwen/Qwen2.5-1.5B-Instruct-GGUF:qwen2.5-1.5b-instruct-q8_0.gguf" ;;
     3b)   echo "unsloth/Llama-3.2-3B-Instruct-GGUF:Llama-3.2-3B-Instruct-Q4_K_M.gguf" ;;
+    7b)   echo "TheBloke/Mistral-7B-Instruct-v0.2-GGUF:mistral-7b-instruct-v0.2.Q4_K_M.gguf" ;;
     8b)   echo "unsloth/Llama-3.1-8B-Instruct-GGUF:Llama-3.1-8B-Instruct-Q4_K_M.gguf" ;;
     *) echo "Qwen/Qwen2.5-0.5B-Instruct-GGUF:qwen2.5-0.5b-instruct-q8_0.gguf" ;;
   esac
@@ -170,7 +188,8 @@ resolve_sapient_model() {
     0.5b) echo "openhorizon/qwen2.5-0.5b-q4" ;;
     1.5b) echo "openhorizon/qwen2.5-1.5b-q4" ;;
     3b)   echo "openhorizon/llama-3.2-3b-q4" ;;
-    8b)   echo "openhorizon/llama-3.1-8b-q4" ;;
+    7b)   echo "openhorizon/mistral-7b" ;;
+    8b)   echo "openhorizon/llama-3.2-3b-q4" ;;  # use closest available
     *)    echo "openhorizon/qwen2.5-0.5b-q4" ;;
   esac
 }
@@ -180,8 +199,33 @@ resolve_ollama_model() {
     0.5b) echo "qwen2.5:0.5b" ;;
     1.5b) echo "qwen2.5:1.5b" ;;
     3b)   echo "llama3.2:3b"  ;;
+    7b)   echo "mistral:7b"   ;;
     8b)   echo "llama3.1:8b"  ;;
     *)    echo "qwen2.5:0.5b" ;;
+  esac
+}
+
+# HuggingFace model IDs for mlx-lm (MLX-compatible repos)
+resolve_mlx_model() {
+  case "$1" in
+    0.5b) echo "mlx-community/Qwen2.5-0.5B-Instruct-4bit" ;;
+    1.5b) echo "mlx-community/Qwen2.5-1.5B-Instruct-4bit" ;;
+    3b)   echo "mlx-community/Llama-3.2-3B-Instruct-4bit" ;;
+    7b)   echo "mlx-community/Mistral-7B-Instruct-v0.3-4bit" ;;
+    8b)   echo "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit" ;;
+    *)    echo "mlx-community/Qwen2.5-0.5B-Instruct-4bit" ;;
+  esac
+}
+
+# vLLM uses HuggingFace model IDs directly (downloads full BF16 weights)
+resolve_vllm_model() {
+  case "$1" in
+    0.5b) echo "Qwen/Qwen2.5-0.5B-Instruct" ;;
+    1.5b) echo "Qwen/Qwen2.5-1.5B-Instruct" ;;
+    3b)   echo "meta-llama/Llama-3.2-3B-Instruct" ;;
+    7b)   echo "mistralai/Mistral-7B-Instruct-v0.3" ;;
+    8b)   echo "meta-llama/Meta-Llama-3.1-8B-Instruct" ;;
+    *)    echo "Qwen/Qwen2.5-0.5B-Instruct" ;;
   esac
 }
 
@@ -617,6 +661,208 @@ if '$tg_tps':
 "
 }
 
+# ── mlx-lm benchmark (Apple Silicon only) ────────────────────────────────────
+run_mlxlm() {
+  local model_size=$1
+  local mlx_model
+  mlx_model=$(resolve_mlx_model "$model_size")
+  local out_file="$OUT_DIR/mlxlm_${model_size}.json"
+
+  if [[ "$ARCH" != "arm64" && "$ARCH" != "aarch64" ]] || [[ "$OS" != "Darwin" ]]; then
+    echo "  [SKIP] mlx-lm requires Apple Silicon macOS"
+    return
+  fi
+
+  if ! python3 -c "import mlx_lm" 2>/dev/null; then
+    if [[ "$SKIP_INSTALL" == "false" ]]; then
+      echo "  Installing mlx-lm..."
+      pip install mlx-lm 2>&1 | tail -2
+    else
+      echo "  [SKIP] mlx-lm not installed (pip install mlx-lm)"
+      return
+    fi
+  fi
+
+  echo ""
+  echo "▶ mlx-lm — $mlx_model"
+
+  python3 - "$out_file" "$mlx_model" "$model_size" \
+    "$PROMPT_MEDIUM" "$MAX_TOKENS" "$RUNS" <<'PYEOF'
+import json, sys, time, subprocess, statistics
+
+out_file   = sys.argv[1]
+model_id   = sys.argv[2]
+model_size = sys.argv[3]
+prompt     = sys.argv[4]
+max_tokens = int(sys.argv[5])
+n_runs     = int(sys.argv[6])
+
+runs = []
+for i in range(n_runs):
+    t0 = time.perf_counter()
+    result = subprocess.run(
+        ["python3", "-m", "mlx_lm.generate",
+         "--model", model_id,
+         "--prompt", prompt,
+         "--max-tokens", str(max_tokens),
+         "--temp", "0.0"],
+        capture_output=True, text=True, timeout=300
+    )
+    t1 = time.perf_counter()
+    elapsed_ms = int((t1 - t0) * 1000)
+
+    # Parse mlx-lm output: "Prompt: N tokens, Generation: N tokens, N.N tokens-per-sec"
+    tps = None
+    for line in result.stderr.split("\n") + result.stdout.split("\n"):
+        if "tokens-per-sec" in line or "tokens/sec" in line:
+            parts = line.split()
+            for j, p in enumerate(parts):
+                try:
+                    if "tokens" in parts[j+1] if j+1 < len(parts) else False:
+                        tps = float(p)
+                        break
+                except (ValueError, IndexError):
+                    pass
+            if not tps:
+                import re
+                m = re.search(r'(\d+\.?\d*)\s*tokens.per.sec', line, re.IGNORECASE)
+                if m:
+                    tps = float(m.group(1))
+
+    run = {"run": i+1, "elapsed_ms": elapsed_ms, "tps": tps}
+    runs.append(run)
+    print(f"  run {i+1}: elapsed={elapsed_ms}ms  tps={tps}")
+
+mean_tps = round(statistics.mean(r["tps"] for r in runs if r["tps"]), 1) if any(r["tps"] for r in runs) else None
+result_json = {
+    "engine": "mlx-lm",
+    "model": model_id,
+    "model_size": model_size,
+    "decode_tps": mean_tps,
+    "runs": runs,
+}
+with open(out_file, "w") as f:
+    json.dump(result_json, f, indent=2)
+print(f"  Saved → {out_file}")
+if mean_tps:
+    print(f"  mean tps={mean_tps}")
+PYEOF
+}
+
+# ── vllm benchmark (CUDA only) ────────────────────────────────────────────────
+run_vllm() {
+  local model_size=$1
+  local vllm_model
+  vllm_model=$(resolve_vllm_model "$model_size")
+  local out_file="$OUT_DIR/vllm_${model_size}.json"
+
+  if ! command -v nvcc &>/dev/null && ! python3 -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
+    echo "  [SKIP] vllm requires CUDA — not detected"
+    return
+  fi
+
+  if ! python3 -c "from vllm import LLM" 2>/dev/null; then
+    if [[ "$SKIP_INSTALL" == "false" ]]; then
+      echo "  Installing vllm..."
+      pip install vllm 2>&1 | tail -3
+    else
+      echo "  [SKIP] vllm not installed (pip install vllm)"
+      return
+    fi
+  fi
+
+  echo ""
+  echo "▶ vLLM — $vllm_model"
+
+  python3 - "$out_file" "$vllm_model" "$model_size" \
+    "$PROMPT_MEDIUM" "$MAX_TOKENS" "$RUNS" <<'PYEOF'
+import json, sys, time, statistics
+
+out_file   = sys.argv[1]
+model_id   = sys.argv[2]
+model_size = sys.argv[3]
+prompt     = sys.argv[4]
+max_tokens = int(sys.argv[5])
+n_runs     = int(sys.argv[6])
+
+try:
+    from vllm import LLM, SamplingParams
+    t_load = time.perf_counter()
+    llm = LLM(model=model_id, dtype="bfloat16", max_model_len=2048)
+    load_ms = int((time.perf_counter() - t_load) * 1000)
+    sampling = SamplingParams(temperature=0.0, max_tokens=max_tokens)
+
+    runs = []
+    for i in range(n_runs):
+        t0 = time.perf_counter()
+        outputs = llm.generate([prompt], sampling)
+        t1 = time.perf_counter()
+        elapsed_ms = int((t1 - t0) * 1000)
+        n_tokens = len(outputs[0].outputs[0].token_ids)
+        tps = round(n_tokens / ((t1 - t0)), 1)
+        run = {"run": i+1, "elapsed_ms": elapsed_ms, "tokens": n_tokens, "tps": tps}
+        runs.append(run)
+        print(f"  run {i+1}: elapsed={elapsed_ms}ms  tps={tps}  tokens={n_tokens}")
+
+    mean_tps = round(statistics.mean(r["tps"] for r in runs), 1)
+    result = {
+        "engine": "vllm",
+        "model": model_id,
+        "model_size": model_size,
+        "load_ms": load_ms,
+        "decode_tps": mean_tps,
+        "runs": runs,
+    }
+    with open(out_file, "w") as f:
+        json.dump(result, f, indent=2)
+    print(f"  Saved → {out_file}")
+    print(f"  load={load_ms}ms  mean tps={mean_tps}")
+except Exception as e:
+    print(f"  [ERROR] vllm benchmark failed: {e}")
+PYEOF
+}
+
+# ── SAPIENT Metal benchmark (Apple Silicon, --features mlx build) ─────────────
+run_sapient_metal() {
+  local model_size=$1
+  local model
+  model=$(resolve_sapient_model "$model_size")
+  local sapient_bin
+  sapient_bin=$(command -v sapient 2>/dev/null || echo "")
+
+  if [[ -z "$sapient_bin" ]]; then
+    echo "  [SKIP] sapient not found in PATH"
+    return
+  fi
+  if [[ "$ARCH" != "arm64" && "$ARCH" != "aarch64" ]] || [[ "$OS" != "Darwin" ]]; then
+    echo "  [SKIP] sapient-metal requires Apple Silicon macOS"
+    return
+  fi
+
+  local out_file="$OUT_DIR/sapient_metal_${model_size}.json"
+  echo ""
+  echo "▶ SAPIENT Metal — $model"
+
+  "$sapient_bin" bench-llm "$model" \
+    --prompt "$PROMPT_MEDIUM" \
+    --max-tokens "$MAX_TOKENS" \
+    --runs "$RUNS" \
+    --backend metal \
+    --mmap \
+    --json > "$out_file" 2>/dev/null || {
+      echo "  [SKIP] Metal backend not available (build without --features mlx?)"
+      return
+    }
+
+  echo "  Saved → $out_file"
+  python3 -c "
+import json
+with open('$out_file') as f: d = json.load(f)
+s = d.get('summary', {})
+print(f\"  load={d.get('load_time_ms','?')}ms  ttft={s.get('mean_ttft_ms','?')}ms  tps={s.get('mean_tps','?')}  rss={s.get('peak_rss_mb','?')}MB\")
+"
+}
+
 # ── Main run loop ─────────────────────────────────────────────────────────────
 # Install requested engines
 if [[ "$SKIP_INSTALL" == "false" ]]; then
@@ -628,9 +874,16 @@ if [[ "$SKIP_INSTALL" == "false" ]]; then
       llamacpp|llama_cpp|llama.cpp) install_llamacpp ;;
       ollama)                        install_ollama ;;
       llamafile)                     install_llamafile ;;
-      sapient)                       : ;;  # assume already installed
+      sapient|sapient-metal)         : ;;  # assume already installed
+      mlx-lm|mlxlm)                 python3 -c "import mlx_lm" 2>/dev/null || pip install mlx-lm ;;
+      vllm)                          python3 -c "from vllm import LLM" 2>/dev/null || pip install vllm ;;
     esac
   done
+fi
+
+# Also run sapient-metal if --metal flag set
+if [[ "$USE_METAL" == "true" ]]; then
+  ENGINES="$ENGINES,sapient-metal"
 fi
 
 # Run benchmarks
@@ -645,10 +898,13 @@ for model_size in "${MODEL_LIST[@]}"; do
   echo "━━━ Model: ${model_size} ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   for eng in "${ENGINE_LIST[@]}"; do
     case "$eng" in
-      sapient)                       run_sapient   "$model_size" ;;
-      llamacpp|llama_cpp|llama.cpp)  run_llamacpp  "$model_size" ;;
-      ollama)                        run_ollama    "$model_size" ;;
-      llamafile)                     run_llamafile "$model_size" ;;
+      sapient)                       run_sapient        "$model_size" ;;
+      sapient-metal|sapient_metal)   run_sapient_metal  "$model_size" ;;
+      llamacpp|llama_cpp|llama.cpp)  run_llamacpp       "$model_size" ;;
+      ollama)                        run_ollama         "$model_size" ;;
+      llamafile)                     run_llamafile      "$model_size" ;;
+      mlx-lm|mlxlm)                 run_mlxlm          "$model_size" ;;
+      vllm)                          run_vllm           "$model_size" ;;
       *) echo "  Unknown engine: $eng" ;;
     esac
   done
@@ -666,7 +922,7 @@ import json, sys, os, glob
 out_dir = sys.argv[1]
 models  = sys.argv[2:]
 
-engines_order = ["sapient", "llamacpp", "ollama", "llamafile"]
+engines_order = ["sapient", "sapient_metal", "mlxlm", "llamacpp", "ollama", "llamafile", "vllm"]
 
 for model_size in models:
     print(f"\n  Model: {model_size}")

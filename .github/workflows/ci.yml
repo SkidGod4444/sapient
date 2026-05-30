@@ -11,21 +11,44 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # ── Format + Clippy ──────────────────────────────────────────────────────────
-  # Non-blocking: lint is enforced locally by the .githooks/pre-push hook, which
-  # auto-formats and applies clippy fixes before each push. CI still reports lint
-  # as a signal, but never blocks merges or releases.
-  lint:
-    name: Lint
+  # ── Auto-format ──────────────────────────────────────────────────────────────
+  # Runs `cargo fmt --all` and commits any formatting changes back to the branch.
+  # Only runs on push (not PRs, to avoid permission issues on forks).
+  auto-fmt:
+    name: Auto-format
     runs-on: ubuntu-latest
-    continue-on-error: true
+    if: github.event_name == 'push'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Run cargo fmt
+        run: cargo fmt --all
+      - name: Commit formatting fixes (if any)
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "style: cargo fmt auto-format [skip ci]"
+          commit_author: "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
+
+  # ── Clippy (enforced, no continue-on-error) ──────────────────────────────────
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    needs: auto-fmt
+    if: always()
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   # ── Tests on macOS (arm64 + x86_64 cross-compile) ─────────────────────────────
@@ -66,7 +89,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace -- --test-threads=1
 
-  # ── Cross-compile check for ARM64 (Raspberry Pi) ─────────────────────────────
+  # ── Cross-compile check for ARM64 (Raspberry Pi / DGX Spark) ─────────────────
   cross-rpi:
     name: Cross-compile (aarch64-linux)
     runs-on: ubuntu-24.04-arm
@@ -78,7 +101,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install OpenSSL (ARM64 Linux)
         run: sudo apt-get update -q && sudo apt-get install -y pkg-config libssl-dev
-      - name: Check (native ARM64 runner — no cross-toolchain apt hacks)
+      - name: Check (native ARM64 runner)
         run: cargo check --workspace --target aarch64-unknown-linux-gnu
 
   # ── Documentation build ──────────────────────────────────────────────────────
