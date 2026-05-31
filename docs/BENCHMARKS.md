@@ -3,6 +3,10 @@
 > Generated: 2026-05-31 · Hardware: **Apple M4 · 16 GB RAM · macOS 26.5 aarch64**
 > SAPIENT **v0.3.5** · mlx-lm 0.31.2 · Ollama 0.12.x
 
+> This page covers single-request **engine** throughput. For the **HTTP serving**
+> comparison (`sapient serve` vs Ollama vs vLLM — TTFT, concurrency, model
+> switch-back, prefix caching) see [SERVING_BENCHMARKS.md](SERVING_BENCHMARKS.md).
+
 ---
 
 ## TL;DR

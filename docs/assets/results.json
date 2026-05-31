@@ -1,0 +1,20 @@
+[
+  {
+    "name": "SAPIENT",
+    "warm_ttft_ms": 14.19812500171247,
+    "decode_tok_s": 234.30153863857828,
+    "conc_tok_s": 231.5441176044289,
+    "conc_p95_ms": 642.6219160020992,
+    "switchback_ttft_ms": 14.08741700288374,
+    "note": ""
+  },
+  {
+    "name": "Ollama",
+    "warm_ttft_ms": 59.02504099867656,
+    "decode_tok_s": 187.7359000012266,
+    "conc_tok_s": 176.19479803234518,
+    "conc_p95_ms": 1225.651332999405,
+    "switchback_ttft_ms": 84.08520900047733,
+    "note": ""
+  }
+]

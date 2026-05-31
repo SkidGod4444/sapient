@@ -4,6 +4,11 @@ Goal: a local OpenAI-compatible server that beats Ollama — fast model switchin
 high concurrency, low latency — across CPU-only, GPU-only, and hybrid hardware.
 Grounded in the deep-research report (vLLM, llama.cpp, mistral.rs, TensorRT-LLM).
 
+**Measured results:** see [SERVING_BENCHMARKS.md](SERVING_BENCHMARKS.md) — on an
+Apple M4 (Metal), `sapient serve` beats Ollama on TTFT (4.2×), decode (1.25×),
+concurrent throughput (1.31×), and model switch-back (6×). vLLM is a datacenter-GPU
+engine and doesn't run on this edge box. Harness: `scripts/bench_compete.py`.
+
 ## Built (v0.3.x)
 
 ### Phase 1 — Multi-model LRU residency
