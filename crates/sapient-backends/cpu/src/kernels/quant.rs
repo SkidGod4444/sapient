@@ -783,6 +783,15 @@ pub unsafe fn dot_q4_k_row_q8_neon(row_data: &[u8], x_i8: &[i8], x_scales: &[f32
 ///   [16..47] qh (32B — high bits, one per 32-weight sub-block),
 ///   [48..175] ql (128B — low 4-bit nibbles)
 pub fn dot_q5_k_row_f32(row_data: &[u8], x: &[f32]) -> f32 {
+    #[cfg(target_arch = "aarch64")]
+    return unsafe { dot_q5_k_row_f32_neon(row_data, x) };
+    #[cfg(not(target_arch = "aarch64"))]
+    dot_q5_k_row_f32_scalar(row_data, x)
+}
+
+/// Scalar reference for the Q5_K row dot (oracle for the NEON kernel).
+#[allow(dead_code)]
+fn dot_q5_k_row_f32_scalar(row_data: &[u8], x: &[f32]) -> f32 {
     let mut acc = 0.0f32;
     let mut x_off = 0usize;
     for block in row_data.chunks_exact(Q5_K_BLOCK_BYTES) {
@@ -802,10 +811,14 @@ pub fn dot_q5_k_row_f32(row_data: &[u8], x: &[f32]) -> f32 {
             let (sc2, m2) = get_scale_min_k4(is + 1, scales);
             let d2 = d * sc2 as f32;
             let m2v = dmin * m2 as f32;
-            let qh_byte = qh[is / 8];
+            // The 5th bit is PER-ELEMENT: ggml reads qh[l] (l = 0..32, one of the
+            // 32 qh bytes) and selects the active bit-plane with u1/u2 (which shift
+            // by 2 each sub-block pair). The previous code used a single qh[is/8]
+            // byte for the whole 32-element sub-block — that collapses 32 distinct
+            // high bits to one, corrupting Q5_K (Q5_K_M models would hallucinate).
             for l in 0..32 {
-                let hi1 = if qh_byte & u1 != 0 { 16.0f32 } else { 0.0 };
-                let hi2 = if qh_byte & u2 != 0 { 16.0f32 } else { 0.0 };
+                let hi1 = if qh[l] & u1 != 0 { 16.0f32 } else { 0.0 };
+                let hi2 = if qh[l] & u2 != 0 { 16.0f32 } else { 0.0 };
                 acc += (d1 * ((ql[ql_off + l] & 0x0F) as f32 + hi1) - m1v) * x[x_off + l];
                 acc += (d2 * ((ql[ql_off + l] >> 4) as f32 + hi2) - m2v) * x[x_off + l + 32];
             }
@@ -822,6 +835,88 @@ pub fn dot_q5_k_row_f32(row_data: &[u8], x: &[f32]) -> f32 {
         }
     }
     acc
+}
+
+/// NEON Q5_K row dot (aarch64) — vectorises the (now-fixed) scalar reference 16
+/// lanes at a time. Q5_K = Q4_K plus a per-element 5th bit from `qh[l]` selected
+/// by the bit-plane `u1`/`u2`. Regression-tested bit-close to
+/// [`dot_q5_k_row_f32_scalar`].
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn dot_q5_k_row_f32_neon(row_data: &[u8], x: &[f32]) -> f32 {
+    use std::arch::aarch64::*;
+    let mask0f = vdupq_n_u8(0x0F);
+    let sixteen = vdupq_n_u8(16);
+    let mut acc = vdupq_n_f32(0.0);
+    let mut x_off = 0usize;
+    for block in row_data.chunks_exact(Q5_K_BLOCK_BYTES) {
+        let d = f16::from_le_bytes([block[0], block[1]]).to_f32();
+        let dmin = f16::from_le_bytes([block[2], block[3]]).to_f32();
+        let scales = &block[4..16];
+        let qh = block.as_ptr().add(16); // 32 bytes
+        let ql = block.as_ptr().add(48); // 128 bytes
+        let mut ql_off = 0usize;
+        let mut is = 0usize;
+        let mut u1: u8 = 1;
+        let mut u2: u8 = 2;
+        for _ in 0..(QK_K / 64) {
+            let (sc1, m1) = get_scale_min_k4(is, scales);
+            let (sc2, m2) = get_scale_min_k4(is + 1, scales);
+            let d1 = d * sc1 as f32;
+            let m1v = dmin * m1 as f32;
+            let d2 = d * sc2 as f32;
+            let m2v = dmin * m2 as f32;
+            let u1v = vdupq_n_u8(u1);
+            let u2v = vdupq_n_u8(u2);
+
+            // Two 16-lane halves cover the 32-element sub-blocks.
+            for half in [0usize, 16usize] {
+                let qlv = vld1q_u8(ql.add(ql_off + half));
+                let qhv = vld1q_u8(qh.add(half));
+                // 5th bit → 16 or 0 (per element): (qh & u) ? 16 : 0.
+                let hi1 = vandq_u8(vtstq_u8(qhv, u1v), sixteen);
+                let hi2 = vandq_u8(vtstq_u8(qhv, u2v), sixteen);
+                let val_lo = vaddq_u8(vandq_u8(qlv, mask0f), hi1); // 0..31
+                let val_hi = vaddq_u8(vshrq_n_u8::<4>(qlv), hi2);
+
+                // acc += (d·val − m)·x over 16 lanes (4× f32x4).
+                macro_rules! accum {
+                    ($val:expr, $dd:expr, $mm:expr, $xbase:expr) => {{
+                        let v16lo = vmovl_u8(vget_low_u8($val));
+                        let v16hi = vmovl_high_u8($val);
+                        let vf = [
+                            vcvtq_f32_u32(vmovl_u16(vget_low_u16(v16lo))),
+                            vcvtq_f32_u32(vmovl_high_u16(v16lo)),
+                            vcvtq_f32_u32(vmovl_u16(vget_low_u16(v16hi))),
+                            vcvtq_f32_u32(vmovl_high_u16(v16hi)),
+                        ];
+                        let xb = x.as_ptr().add($xbase);
+                        let mneg = vdupq_n_f32($mm);
+                        for c in 0..4 {
+                            // d·val − m
+                            let t = vsubq_f32(vmulq_n_f32(vf[c], $dd), mneg);
+                            let xc = vld1q_f32(xb.add(c * 4));
+                            acc = vfmaq_f32(acc, t, xc);
+                        }
+                    }};
+                }
+                accum!(val_lo, d1, m1v, x_off + half);
+                accum!(val_hi, d2, m2v, x_off + 32 + half);
+            }
+
+            x_off += 64;
+            ql_off += 32;
+            is += 2;
+            if is % 8 == 0 {
+                u1 = 1;
+                u2 = 2;
+            } else {
+                u1 <<= 2;
+                u2 <<= 2;
+            }
+        }
+    }
+    vaddvq_f32(acc)
 }
 
 /// Dot product of a full Q6_K-quantized weight row with an f32 activation vector.
@@ -1235,6 +1330,37 @@ mod tests {
         assert!(
             rel < 1e-4,
             "Q6_K NEON≠scalar: neon={got} scalar={scalar} rel={rel}"
+        );
+    }
+
+    #[test]
+    fn q5_k_neon_matches_scalar() {
+        // Q5_K vectorisation must equal the (per-element-qh-fixed) scalar reference.
+        let mut seed = 0xA5A5_1234u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        let nblocks = 3usize;
+        let mut row = vec![0u8; nblocks * Q5_K_BLOCK_BYTES];
+        for b in row.iter_mut() {
+            *b = (next() & 0xFF) as u8;
+        }
+        for blk in row.chunks_exact_mut(Q5_K_BLOCK_BYTES) {
+            blk[0..2].copy_from_slice(&f16::from_f32(0.05).to_le_bytes());
+            blk[2..4].copy_from_slice(&f16::from_f32(0.02).to_le_bytes());
+        }
+        let x: Vec<f32> = (0..nblocks * QK_K)
+            .map(|_| (next() as f32 / u32::MAX as f32) * 3.0 - 1.5)
+            .collect();
+        let scalar = dot_q5_k_row_f32_scalar(&row, &x);
+        let got = dot_q5_k_row_f32(&row, &x);
+        let rel = (got - scalar).abs() / scalar.abs().max(1e-3);
+        assert!(
+            rel < 1e-4,
+            "Q5_K NEON≠scalar: neon={got} scalar={scalar} rel={rel}"
         );
     }
 }
