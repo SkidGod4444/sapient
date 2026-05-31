@@ -233,6 +233,12 @@ any engine on 0.5B**, within **1.3–1.5× of mlx-lm** — from a single daemon-
 binary. Full methodology, charts, and the remaining peak-RAM gap are in
 **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)**.
 
+**Serving head-to-head** (`sapient serve` vs Ollama vs vLLM, Apple M4 / Metal): SAPIENT
+beats Ollama on TTFT (**4.2×**, 14 ms vs 59 ms), decode (**1.25×**), concurrent
+throughput (**1.31×**, 1.9× lower p95), and model switch-back (**6×**). vLLM is a
+datacenter-GPU engine and doesn't run on this edge box. Charts + method:
+**[docs/SERVING_BENCHMARKS.md](docs/SERVING_BENCHMARKS.md)**.
+
 ![Decode throughput](docs/assets/decode_throughput.png)
 ![Time to first token](docs/assets/ttft.png)
 
