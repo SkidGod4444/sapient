@@ -273,6 +273,16 @@ impl LlamaForward {
         }
     }
 
+    /// Keep only the first `n` cached positions; returns the actual kept length
+    /// (clamped to the current cache length). Used for prompt/prefix reuse.
+    pub fn truncate_cache(&mut self, n: usize) -> usize {
+        let kept = self.cache.first().map(|l| l.seq_len.min(n)).unwrap_or(0);
+        for layer in &mut self.cache {
+            layer.seq_len = kept;
+        }
+        kept
+    }
+
     /// Run forward on token ids and return logits for the last token.
     pub fn forward_logits(&mut self, input_ids: &[u32], use_cache: bool) -> Result<Vec<f32>> {
         let hidden = self.forward_hidden(input_ids, use_cache)?;

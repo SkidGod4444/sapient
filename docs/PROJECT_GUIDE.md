@@ -53,7 +53,7 @@ dive into the internals.
 | Qwen2.5-1.5B Q8_0 | 4.2 tok/s | 10.0 tok/s | +138% |
 
 **New features:**
-- `sapient serve` — OpenAI-compatible HTTP server (`GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/completions`, `GET /v1/health`). Lazy model loading on first request (Ollama-style).
+- `sapient serve` — OpenAI-compatible HTTP server (`GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/completions`, `GET /v1/health`). Lazy loading on first request, plus a **multi-model LRU cache**: the N most-recently-used models stay resident (`--max-models`, default 3; byte budget via `--cache-gb`), so switching back to a recent model is instant — no cold reload like Ollama.
 - `sapient chat --speculative [--draft-model <alias>]` — speculative decoding with auto-selected draft model.
 - `sapient reset` / `sapient rm` — alias resolution fixed; now correctly resolves `openhorizon/*` aliases.
 - ENOSPC auto-cleanup during `sapient pull` (disk-full guard).

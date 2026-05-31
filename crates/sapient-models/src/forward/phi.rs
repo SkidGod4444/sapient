@@ -245,6 +245,15 @@ impl PhiForward {
         }
     }
 
+    /// Keep only the first `n` cached positions; returns the actual kept length.
+    pub fn truncate_cache(&mut self, n: usize) -> usize {
+        let kept = self.cache.first().map(|l| l.seq_len.min(n)).unwrap_or(0);
+        for layer in &mut self.cache {
+            layer.seq_len = kept;
+        }
+        kept
+    }
+
     /// True when layers are split between Metal (primary) and CPU (fallback).
     pub fn is_hybrid(&self) -> bool {
         self.gpu_layers > 0 && self.cpu_fallback.is_some()

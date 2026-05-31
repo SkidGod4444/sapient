@@ -21,7 +21,7 @@
 - ✅ Native F16 GEMV and NEON Q4_K GEMV; adaptive rayon chunking.
 - ✅ SDOT Q8_0 kernel (ARMv8.4A `sdot` via inline asm, runtime-detected, ~3% net gain — bandwidth-bound).
 - ✅ Speculative decoding (`sapient chat --speculative`).
-- ✅ OpenAI-compatible HTTP server (`sapient serve`) with lazy model loading.
+- ✅ OpenAI-compatible HTTP server (`sapient serve`) with lazy loading + **multi-model LRU cache** (top-N resident, byte-budgeted; instant switch-back vs Ollama's cold reload).
 - ✅ Benchmark suite (`scripts/benchmark-compare.sh`, `scripts/gen-benchmark-report.py`).
 - ✅ `sapient devices` — CPU/GPU detection, backend recommendations, hybrid Metal+CPU plan.
 - ✅ Hybrid Metal+CPU layer-split inference for **both** LlamaForward and PhiForward.
@@ -109,11 +109,16 @@ The hardest, most differentiating CPU target (2–8 GB RAM).
 - **Success metric:** run a 3B Q4 model on a 4 GB Pi 5 without OOM.
 
 ## Phase 4b — Multi-model server  → **`v0.3.x`**
-`sapient serve` currently loads one model lazily. Extend to:
-- [ ] Multiple simultaneous models in memory (switchable by `model` field in API request).
-- [ ] LRU eviction when total model RAM exceeds a configurable budget.
-- [ ] Streaming SSE for `POST /v1/chat/completions`.
-- [ ] OpenAI-compatible `logprobs`, `n`, `stream` parameters.
+- [x] **Multi-model LRU residency** — keep the N most-recently-used models in memory (`--max-models`, default 3), switchable by the `model` field. Switch-back is a cache hit (no reload), ~5× faster than a cold load; beats Ollama's single-resident-model design.
+- [x] **LRU eviction by count + RAM byte budget** (`--cache-gb`, default ~70% of system RAM).
+- [x] **Streaming SSE** for `/v1/chat/completions` and `/v1/completions`; cache lock not held during inference, so different models serve concurrently.
+- [x] **Admission control** — bounded inference concurrency (`--max-concurrency`, tokio semaphore) so bursts queue instead of oversubscribing.
+- [x] **Prefix/prompt caching** — reuse the KV cache for the longest shared token prefix (multi-turn chat / shared system prompts skip re-prefilling history); byte-identical output, verified. `ForwardEngine::truncate_cache` + `Pipeline::enable_prefix_cache`.
+- [ ] Speculative decoding wired into `serve` (needs SpeculativePipeline engine-reuse refactor first — see `docs/SERVING.md`).
+- [ ] Continuous (in-flight) batching + parallel slots + chunked prefill; paged KV (block pool) — large single-sequence-engine rewrite, designed in `docs/SERVING.md`.
+- [ ] OpenAI-compatible `logprobs`, `n` parameters.
+
+Architecture + design for the deferred phases: **`docs/SERVING.md`** (built on the deep-research report — vLLM sleep mode, PagedAttention, mistral.rs as the pure-Rust precedent).
 
 ## Phase 5 — Phones (iOS / Android)  → **`v0.4.0`**
 Most constrained, biggest "wow".

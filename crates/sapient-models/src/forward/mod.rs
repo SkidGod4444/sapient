@@ -181,6 +181,22 @@ impl ForwardEngine {
         }
     }
 
+    /// Keep only the first `n` cached positions (prefix reuse) and return the
+    /// actual number kept (≤ current cache length). The next `forward_logits`
+    /// with `use_cache=true` continues from this position. Engines that can't
+    /// truncate (MLX) reset fully and return 0 (correct — just no reuse).
+    pub fn truncate_cache(&mut self, n: usize) -> usize {
+        match self {
+            Self::Llama(f) => f.truncate_cache(n),
+            Self::Phi(f) => f.truncate_cache(n),
+            #[cfg(all(target_os = "macos", feature = "mlx"))]
+            Self::MlxLlama(f) => {
+                f.reset_cache();
+                0
+            }
+        }
+    }
+
     pub fn forward_logits(&mut self, input_ids: &[u32], use_cache: bool) -> Result<Vec<f32>> {
         match self {
             Self::Llama(f) => f.forward_logits(input_ids, use_cache),

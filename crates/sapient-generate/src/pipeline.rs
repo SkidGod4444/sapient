@@ -126,6 +126,12 @@ pub struct Pipeline {
     backend: LlmBackendKind,
     /// Whether weights are mmap'd from disk (true) or fully heap-resident (false).
     mmap: bool,
+    /// When true, reuse the KV cache across calls for a shared prompt prefix
+    /// (prefix/prompt caching) instead of resetting + re-prefilling every call.
+    /// Off by default; `sapient serve` enables it. `last_prompt` is the token
+    /// sequence currently represented in the engine's KV cache.
+    prefix_cache: bool,
+    last_prompt: Arc<std::sync::Mutex<Vec<u32>>>,
 }
 
 impl Pipeline {
@@ -253,6 +259,8 @@ impl Pipeline {
             config,
             backend,
             mmap: false,
+            prefix_cache: false,
+            last_prompt: Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     }
 
@@ -364,6 +372,8 @@ impl Pipeline {
             config,
             backend,
             mmap: use_mmap,
+            prefix_cache: false,
+            last_prompt: Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     }
 
@@ -483,6 +493,8 @@ impl Pipeline {
         }
         let tok = Arc::clone(&self.tokenizer);
         let engine = Arc::clone(&self.engine);
+        let prefix_cache = self.prefix_cache;
+        let last_prompt = Arc::clone(&self.last_prompt);
 
         tokio::task::spawn_blocking(move || {
             // Reuse the already-loaded engine instead of rebuilding it — re-loading
@@ -500,10 +512,23 @@ impl Pipeline {
             let mut emitted = 0usize;
             let mut clean_stop = false;
 
-            engine.reset_cache();
+            // Prefix caching: keep the KV for the longest token prefix shared with
+            // the previous call and only prefill the new suffix. Falls back to a
+            // full reset when disabled or when there's no shared prefix.
+            let prefill_start = if prefix_cache {
+                let p = {
+                    let prev = last_prompt.lock().expect("last_prompt poisoned");
+                    common_prefix_len(&prev, &all_tokens)
+                }
+                .min(all_tokens.len().saturating_sub(1));
+                engine.truncate_cache(p) // actual kept positions (≤ p, ≤ cache len)
+            } else {
+                engine.reset_cache();
+                0
+            };
             for step in 0..max_new {
                 let chunk = if step == 0 {
-                    all_tokens.clone()
+                    all_tokens[prefill_start..].to_vec()
                 } else {
                     vec![*all_tokens.last().unwrap()]
                 };
@@ -552,6 +577,11 @@ impl Pipeline {
                         let _ = tx.blocking_send(text[emitted..].to_string());
                     }
                 }
+            }
+            // Record the full token sequence now resident in the KV cache so the
+            // next call can reuse its shared prefix.
+            if prefix_cache {
+                *last_prompt.lock().expect("last_prompt poisoned") = all_tokens;
             }
         });
         ReceiverStream::new(rx)
@@ -757,6 +787,16 @@ impl Pipeline {
         self.mmap
     }
 
+    /// Enable prompt/prefix KV caching: generation reuses the KV cache for the
+    /// longest token prefix shared with the previous call instead of resetting
+    /// and re-prefilling the whole prompt. Big win for multi-turn chat / shared
+    /// system prompts. Safe only when calls on this pipeline are serialized
+    /// (they are — the engine lock is held for a whole generation). Used by
+    /// `sapient serve`. CLI chat leaves it off (byte-identical to before).
+    pub fn enable_prefix_cache(&mut self) {
+        self.prefix_cache = true;
+    }
+
     /// Backend label suitable for display — e.g. "metal", "cpu",
     /// or "metal+cpu hybrid (24/32 layers on GPU)" in hybrid mode.
     pub fn backend_display_label(&self) -> String {
@@ -853,6 +893,13 @@ fn validate_tokenizer_model_compat(
 }
 
 /// Byte index of the earliest stop-sequence occurrence in `text`, if any.
+/// Length of the longest shared prefix of two token sequences (for prefix-cache
+/// KV reuse). E.g. a chat turn whose prompt extends the previous one shares all
+/// but the new user/assistant tokens.
+fn common_prefix_len(a: &[u32], b: &[u32]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
+}
+
 fn earliest_stop(text: &str, stops: &[String]) -> Option<usize> {
     stops
         .iter()
@@ -925,5 +972,19 @@ fn builtin_template_for(
         ),
         ArchType::Phi | ArchType::Qwen => chatml(),
         _ => chatml(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::common_prefix_len;
+
+    #[test]
+    fn common_prefix_len_basic() {
+        assert_eq!(common_prefix_len(&[1, 2, 3, 4], &[1, 2, 9, 4]), 2);
+        assert_eq!(common_prefix_len(&[1, 2, 3], &[1, 2, 3, 4, 5]), 3); // prefix-extension
+        assert_eq!(common_prefix_len(&[1, 2, 3], &[1, 2, 3]), 3); // identical
+        assert_eq!(common_prefix_len(&[9, 1], &[1, 9]), 0); // no shared prefix
+        assert_eq!(common_prefix_len(&[], &[1, 2]), 0);
     }
 }

@@ -253,6 +253,20 @@ enum Commands {
         /// Load weights via mmap (auto-enabled when model > available RAM).
         #[arg(long)]
         mmap: bool,
+
+        /// Keep up to N most-recently-used models resident in memory, so
+        /// switching back to a recent model is instant (no reload). LRU-evicted.
+        #[arg(long, default_value = "3")]
+        max_models: usize,
+
+        /// Cap total resident model memory (GB). 0 = derive from system RAM.
+        /// Evicts least-recently-used models when exceeded (in addition to --max-models).
+        #[arg(long, default_value = "0")]
+        cache_gb: f64,
+
+        /// Max concurrent inferences (admission control). 0 = auto (CPU count, capped).
+        #[arg(long, default_value = "0")]
+        max_concurrency: usize,
     },
 
     /// Update sapient to the latest release from GitHub.
@@ -369,7 +383,21 @@ async fn dispatch(cli: Cli) -> Result<()> {
             port,
             backend,
             mmap,
-        } => server::serve_llm(model.as_deref(), port, &backend, mmap).await,
+            max_models,
+            cache_gb,
+            max_concurrency,
+        } => {
+            server::serve_llm(
+                model.as_deref(),
+                port,
+                &backend,
+                mmap,
+                max_models,
+                cache_gb,
+                max_concurrency,
+            )
+            .await
+        }
         Commands::Update { force, metal, cpu } => {
             let variant = if metal {
                 Some(update::Variant::Metal)
