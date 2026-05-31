@@ -832,6 +832,15 @@ pub fn dot_q5_k_row_f32(row_data: &[u8], x: &[f32]) -> f32 {
 ///   [192..207] scales (16B — i8 per 16-element group)
 ///   [208..209] d (f16)
 pub fn dot_q6_k_row_f32(row_data: &[u8], x: &[f32]) -> f32 {
+    #[cfg(target_arch = "aarch64")]
+    return unsafe { dot_q6_k_row_f32_neon(row_data, x) };
+    #[cfg(not(target_arch = "aarch64"))]
+    dot_q6_k_row_f32_scalar(row_data, x)
+}
+
+/// Scalar reference for the Q6_K row dot (oracle for the NEON kernel).
+#[allow(dead_code)]
+fn dot_q6_k_row_f32_scalar(row_data: &[u8], x: &[f32]) -> f32 {
     let mut acc = 0.0f32;
     let mut x_off = 0usize;
     for block in row_data.chunks_exact(Q6_K_BLOCK_BYTES) {
@@ -871,6 +880,95 @@ pub fn dot_q6_k_row_f32(row_data: &[u8], x: &[f32]) -> f32 {
         }
     }
     acc
+}
+
+/// NEON Q6_K row dot (aarch64) — vectorises the scalar reference 16 lanes at a
+/// time. Q6_K is ~⅓ of a Q4_K_M model (lm_head, half of ffn_down, attn_v) and the
+/// scalar path made it the dominant Pi decode cost. Computes the identical f32
+/// math (only the reduction order differs); regression-tested against
+/// [`dot_q6_k_row_f32_scalar`]. The four 6-bit sub-positions per 128-block and the
+/// per-16 scale layout (`sc_base + is + {0,2,4,6}`) match the scalar exactly.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn dot_q6_k_row_f32_neon(row_data: &[u8], x: &[f32]) -> f32 {
+    use std::arch::aarch64::*;
+    let mask0f = vdupq_n_u8(0x0F);
+    let mask3 = vdupq_n_u8(0x03);
+    let m32 = vdupq_n_f32(32.0);
+    let mut acc = vdupq_n_f32(0.0);
+    let mut x_off = 0usize;
+    for block in row_data.chunks_exact(Q6_K_BLOCK_BYTES) {
+        let ql = block.as_ptr();
+        let qh = block.as_ptr().add(128);
+        let sc = &block[192..208];
+        let d = f16::from_le_bytes([block[208], block[209]]).to_f32();
+        let mut ql_off = 0usize;
+        let mut qh_off = 0usize;
+        let mut sc_base = 0usize;
+        for _ in 0..(QK_K / 128) {
+            // Two 16-lane scale groups within this 128-block: L=0 (is=0), L=16 (is=1).
+            for &l0 in &[0usize, 16usize] {
+                let is = l0 / 16;
+                let ql_lo = vld1q_u8(ql.add(ql_off + l0));
+                let ql_hi = vld1q_u8(ql.add(ql_off + l0 + 32));
+                let qhv = vld1q_u8(qh.add(qh_off + l0));
+
+                // Reconstruct the four 6-bit sub-positions (each 16× u8 in [0,63]).
+                let q1 = vorrq_u8(
+                    vandq_u8(ql_lo, mask0f),
+                    vshlq_n_u8::<4>(vandq_u8(qhv, mask3)),
+                );
+                let q2 = vorrq_u8(
+                    vandq_u8(ql_hi, mask0f),
+                    vshlq_n_u8::<4>(vandq_u8(vshrq_n_u8::<2>(qhv), mask3)),
+                );
+                let q3 = vorrq_u8(
+                    vshrq_n_u8::<4>(ql_lo),
+                    vshlq_n_u8::<4>(vandq_u8(vshrq_n_u8::<4>(qhv), mask3)),
+                );
+                let q4 = vorrq_u8(
+                    vshrq_n_u8::<4>(ql_hi),
+                    vshlq_n_u8::<4>(vandq_u8(vshrq_n_u8::<6>(qhv), mask3)),
+                );
+
+                let s1 = d * (sc[sc_base + is] as i8 as f32);
+                let s2 = d * (sc[sc_base + is + 2] as i8 as f32);
+                let s3 = d * (sc[sc_base + is + 4] as i8 as f32);
+                let s4 = d * (sc[sc_base + is + 6] as i8 as f32);
+
+                // acc += scale · Σ_lane (q − 32) · x, over the 16 lanes (4× f32x4).
+                macro_rules! accum {
+                    ($q:expr, $scale:expr, $xbase:expr) => {{
+                        let q = $q;
+                        let q16lo = vmovl_u8(vget_low_u8(q));
+                        let q16hi = vmovl_high_u8(q);
+                        let qf = [
+                            vcvtq_f32_u32(vmovl_u16(vget_low_u16(q16lo))),
+                            vcvtq_f32_u32(vmovl_high_u16(q16lo)),
+                            vcvtq_f32_u32(vmovl_u16(vget_low_u16(q16hi))),
+                            vcvtq_f32_u32(vmovl_high_u16(q16hi)),
+                        ];
+                        let xb = x.as_ptr().add($xbase);
+                        let sv = vdupq_n_f32($scale);
+                        for c in 0..4 {
+                            let qm = vsubq_f32(qf[c], m32);
+                            let xc = vld1q_f32(xb.add(c * 4));
+                            acc = vfmaq_f32(acc, vmulq_f32(qm, sv), xc);
+                        }
+                    }};
+                }
+                accum!(q1, s1, x_off + l0);
+                accum!(q2, s2, x_off + 32 + l0);
+                accum!(q3, s3, x_off + 64 + l0);
+                accum!(q4, s4, x_off + 96 + l0);
+            }
+            x_off += 128;
+            ql_off += 64;
+            qh_off += 32;
+            sc_base += 8;
+        }
+    }
+    vaddvq_f32(acc)
 }
 
 #[cfg(test)]
@@ -1106,5 +1204,37 @@ mod tests {
                 "NEON≠scalar W4A8: neon={neon} scalar={q8_dot}"
             );
         }
+    }
+
+    #[test]
+    fn q6_k_neon_matches_scalar() {
+        // The vectorised Q6_K dot must equal the scalar reference (same f32 math,
+        // only reduction order differs). A bit-layout/scale bug here = token-salad.
+        let mut seed = 0x51ED_C0DEu64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        let nblocks = 3usize;
+        let mut row = vec![0u8; nblocks * Q6_K_BLOCK_BYTES];
+        for b in row.iter_mut() {
+            *b = (next() & 0xFF) as u8;
+        }
+        // d (f16) at [208..210] of each block — set a small positive scale.
+        for blk in row.chunks_exact_mut(Q6_K_BLOCK_BYTES) {
+            blk[208..210].copy_from_slice(&f16::from_f32(0.04).to_le_bytes());
+        }
+        let x: Vec<f32> = (0..nblocks * QK_K)
+            .map(|_| (next() as f32 / u32::MAX as f32) * 3.0 - 1.5)
+            .collect();
+        let scalar = dot_q6_k_row_f32_scalar(&row, &x);
+        let got = dot_q6_k_row_f32(&row, &x); // dispatches to NEON on aarch64
+        let rel = (got - scalar).abs() / scalar.abs().max(1e-3);
+        assert!(
+            rel < 1e-4,
+            "Q6_K NEON≠scalar: neon={got} scalar={scalar} rel={rel}"
+        );
     }
 }
