@@ -517,7 +517,9 @@ impl Pipeline {
             // full reset when disabled or when there's no shared prefix.
             let prefill_start = if prefix_cache {
                 let p = {
-                    let prev = last_prompt.lock().expect("last_prompt poisoned");
+                    // Recover from a poisoned lock (a prior panic) rather than
+                    // cascading the panic — stale prefix tracking is harmless.
+                    let prev = last_prompt.lock().unwrap_or_else(|e| e.into_inner());
                     common_prefix_len(&prev, &all_tokens)
                 }
                 .min(all_tokens.len().saturating_sub(1));
@@ -581,7 +583,7 @@ impl Pipeline {
             // Record the full token sequence now resident in the KV cache so the
             // next call can reuse its shared prefix.
             if prefix_cache {
-                *last_prompt.lock().expect("last_prompt poisoned") = all_tokens;
+                *last_prompt.lock().unwrap_or_else(|e| e.into_inner()) = all_tokens;
             }
         });
         ReceiverStream::new(rx)

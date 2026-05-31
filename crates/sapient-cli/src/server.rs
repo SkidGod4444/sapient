@@ -43,23 +43,24 @@ use sapient_tokenizers::ChatMessage;
 // its model after the cache lock is released (and even if the model is evicted
 // mid-request — the Arc keeps it alive until the stream finishes).
 
-/// A model held resident in the cache.
-struct CachedModel {
+/// A model held resident in the cache. Generic over the payload so the LRU
+/// bookkeeping can be unit-tested without constructing a real `Pipeline`.
+struct CachedModel<P> {
     model_id: String,
-    pipeline: Pipeline,
+    payload: P,
     /// Resident-size estimate (bytes) used for budget-based eviction.
     bytes: u64,
 }
 
 /// Bounded LRU cache of loaded models. Most-recently-used is at the back.
-struct ModelCache {
-    entries: VecDeque<Arc<CachedModel>>,
+struct ModelCache<P> {
+    entries: VecDeque<Arc<CachedModel<P>>>,
     max_models: usize,
     budget_bytes: u64,
     used_bytes: u64,
 }
 
-impl ModelCache {
+impl<P> ModelCache<P> {
     fn new(max_models: usize, budget_bytes: u64) -> Self {
         Self {
             entries: VecDeque::new(),
@@ -70,7 +71,7 @@ impl ModelCache {
     }
 
     /// Promote an already-resident model to MRU and return it.
-    fn touch(&mut self, id: &str) -> Option<Arc<CachedModel>> {
+    fn touch(&mut self, id: &str) -> Option<Arc<CachedModel<P>>> {
         let pos = self.entries.iter().position(|m| m.model_id == id)?;
         let m = self.entries.remove(pos).expect("position just found");
         self.entries.push_back(m.clone());
@@ -80,7 +81,7 @@ impl ModelCache {
     /// Insert a freshly-loaded model at MRU, evicting LRU entries until both the
     /// count and byte budgets are satisfied. Returns the evicted model IDs.
     /// The just-inserted model is never evicted (it stays at the back).
-    fn insert(&mut self, entry: Arc<CachedModel>) -> Vec<String> {
+    fn insert(&mut self, entry: Arc<CachedModel<P>>) -> Vec<String> {
         if self.touch(&entry.model_id).is_some() {
             return Vec::new(); // already present (concurrent load race)
         }
@@ -111,7 +112,7 @@ impl ModelCache {
 
 #[derive(Clone)]
 struct ServeState {
-    cache: Arc<Mutex<ModelCache>>,
+    cache: Arc<Mutex<ModelCache<Pipeline>>>,
     /// Serializes model loads so two concurrent first-requests for the same model
     /// don't both download/load it, and loads don't thrash each other.
     load_lock: Arc<Mutex<()>>,
@@ -127,7 +128,7 @@ impl ServeState {
     /// Return the resident model for `model_id`, loading (and LRU-evicting) it if
     /// needed. The cache lock is NOT held during the (slow) load or during
     /// inference, so cache hits and other models' requests aren't blocked.
-    async fn get_or_load(&self, model_id: &str) -> Result<Arc<CachedModel>> {
+    async fn get_or_load(&self, model_id: &str) -> Result<Arc<CachedModel<Pipeline>>> {
         // Fast path: already resident.
         if let Some(m) = self.cache.lock().await.touch(model_id) {
             return Ok(m);
@@ -157,7 +158,7 @@ impl ServeState {
         let bytes = estimate_model_bytes(model_id);
         let entry = Arc::new(CachedModel {
             model_id: model_id.to_string(),
-            pipeline,
+            payload: pipeline,
             bytes,
         });
 
@@ -390,7 +391,7 @@ fn server_err(msg: impl std::fmt::Display) -> Response {
 /// 3. Return a 400 if neither is available.
 async fn resolve_model(
     requested: Option<&str>,
-    cache: &Mutex<ModelCache>,
+    cache: &Mutex<ModelCache<Pipeline>>,
 ) -> std::result::Result<String, Response> {
     if let Some(m) = requested.filter(|s| !s.is_empty()) {
         return Ok(m.to_string());
@@ -508,10 +509,7 @@ async fn handle_chat_completions(
             // other models' requests run concurrently and the cache stays free.
             // `permit` is held for the stream's lifetime, released on completion.
             let _permit = permit;
-            let mut stream = model
-                .pipeline
-                .chat_stream_with_config(&messages, &cfg)
-                .await;
+            let mut stream = model.payload.chat_stream_with_config(&messages, &cfg).await;
             while let Some(token) = stream.next().await {
                 let chunk_json = serde_json::to_string(&ChatCompletionChunk {
                     id: id.clone(),
@@ -554,7 +552,7 @@ async fn handle_chat_completions(
 
         Sse::new(ReceiverStream::new(rx)).into_response()
     } else {
-        match model.pipeline.chat_with_config(&messages, &cfg).await {
+        match model.payload.chat_with_config(&messages, &cfg).await {
             Ok(reply) => Json(ChatCompletionResponse {
                 id: gen_id(),
                 object: "chat.completion",
@@ -608,7 +606,7 @@ async fn handle_completions(
         tokio::task::spawn(async move {
             let _permit = permit;
             let mut stream = model
-                .pipeline
+                .payload
                 .generate_stream_with_config(&prompt, &cfg)
                 .await;
             while let Some(token) = stream.next().await {
@@ -631,7 +629,7 @@ async fn handle_completions(
 
         Sse::new(ReceiverStream::new(rx)).into_response()
     } else {
-        match model.pipeline.generate_with_config(&prompt, &cfg).await {
+        match model.payload.generate_with_config(&prompt, &cfg).await {
             Ok(text) => Json(CompletionResponse {
                 id: gen_id(),
                 object: "text_completion",
@@ -691,7 +689,10 @@ pub async fn serve_llm(
 
     info!("inference concurrency limit: {concurrency}");
     let state = ServeState {
-        cache: Arc::new(Mutex::new(ModelCache::new(max_models, budget_bytes))),
+        cache: Arc::new(Mutex::new(ModelCache::<Pipeline>::new(
+            max_models,
+            budget_bytes,
+        ))),
         load_lock: Arc::new(Mutex::new(())),
         inference_sem: Arc::new(tokio::sync::Semaphore::new(concurrency)),
         backend: backend.to_string(),
@@ -702,8 +703,8 @@ pub async fn serve_llm(
         let spinner = crate::ui::spinner(format!("loading {model_id}…"));
         let entry = state.get_or_load(model_id).await?;
         spinner.finish_and_clear();
-        let arch = format!("{:?}", entry.pipeline.arch());
-        let mmap_label = if entry.pipeline.is_mmap() {
+        let arch = format!("{:?}", entry.payload.arch());
+        let mmap_label = if entry.payload.is_mmap() {
             " · mmap"
         } else {
             ""
@@ -719,6 +720,9 @@ pub async fn serve_llm(
         .route("/v1/completions", post(handle_completions))
         .route("/v1/health", get(handle_health))
         .layer(CorsLayer::permissive())
+        // Allow large prompts (long context / pasted documents) but cap to guard
+        // against unbounded request bodies. 32 MiB ≫ any realistic chat payload.
+        .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -781,4 +785,65 @@ fn print_banner(port: u16, backend: &str, loaded: Option<(&str, &str, &str)>) {
         .dim()
     );
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(id: &str, bytes: u64) -> Arc<CachedModel<()>> {
+        Arc::new(CachedModel {
+            model_id: id.to_string(),
+            payload: (),
+            bytes,
+        })
+    }
+
+    #[test]
+    fn lru_evicts_by_count() {
+        let mut c = ModelCache::<()>::new(2, u64::MAX);
+        c.insert(entry("a", 1));
+        c.insert(entry("b", 1));
+        assert_eq!(c.ids(), vec!["a", "b"]);
+        c.insert(entry("c", 1)); // exceeds count → evict LRU "a"
+        assert_eq!(c.ids(), vec!["b", "c"]);
+        assert_eq!(c.mru_id().as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn touch_promotes_to_mru_and_changes_eviction_order() {
+        let mut c = ModelCache::<()>::new(2, u64::MAX);
+        c.insert(entry("a", 1));
+        c.insert(entry("b", 1));
+        assert!(c.touch("a").is_some()); // now order is [b, a]
+        c.insert(entry("c", 1)); // evicts LRU "b", not "a"
+        assert_eq!(c.ids(), vec!["a", "c"]);
+    }
+
+    #[test]
+    fn evicts_by_byte_budget() {
+        let mut c = ModelCache::<()>::new(10, 100);
+        c.insert(entry("a", 60));
+        c.insert(entry("b", 60)); // 120 > 100 → evict "a"
+        assert_eq!(c.ids(), vec!["b"]);
+        assert_eq!(c.used_bytes, 60);
+    }
+
+    #[test]
+    fn never_evicts_the_just_inserted_even_if_over_budget() {
+        let mut c = ModelCache::<()>::new(10, 10);
+        c.insert(entry("big", 999)); // single oversized model stays resident
+        assert_eq!(c.ids(), vec!["big"]);
+    }
+
+    #[test]
+    fn reinserting_resident_model_is_a_touch_not_a_duplicate() {
+        let mut c = ModelCache::<()>::new(3, u64::MAX);
+        c.insert(entry("a", 5));
+        c.insert(entry("b", 5));
+        let evicted = c.insert(entry("a", 5)); // already present → touch
+        assert!(evicted.is_empty());
+        assert_eq!(c.ids(), vec!["b", "a"]); // a promoted to MRU
+        assert_eq!(c.used_bytes, 10); // not double-counted
+    }
 }
