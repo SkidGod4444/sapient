@@ -511,6 +511,39 @@ fn matmul_nt_q4_k(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
     let w_blocks = w.as_quant_blocks();
     let row_bytes = k / 256 * Q4_K_BLOCK_BYTES;
     let mut out = vec![0.0f32; m * n];
+
+    // ── W4A8 SDOT path (aarch64 dotprod) ─────────────────────────────────────
+    // Quantize each activation row to per-32-block i8 ONCE, then do the Q4_K dot
+    // with int8 activations + `sdot` (16 MACs/instr) instead of expanding every
+    // nibble to f32. This is the ARM hot path for K-quant decode — the dominant
+    // cost on a Raspberry Pi 5 / Cortex-A76. Per-block scales (not one per row)
+    // keep activation outliers from collapsing the signal (cf. Q8_0 SDOT).
+    #[cfg(target_arch = "aarch64")]
+    if std::arch::is_aarch64_feature_detected!("dotprod") {
+        for i in 0..m {
+            let x_row = &x_data[i * k..(i + 1) * k];
+            let (x_i8, x_scales) = quant::quantize_row_to_i8_blocks(x_row);
+            let chunk = gemv_chunk(n);
+            out[i * n..(i + 1) * n]
+                .par_chunks_mut(chunk)
+                .enumerate()
+                .for_each(|(ci, cs)| {
+                    for (local, slot) in cs.iter_mut().enumerate() {
+                        let j = ci * chunk + local;
+                        // SAFETY: dotprod verified above; row slice is one Q4_K row.
+                        *slot = unsafe {
+                            quant::dot_q4_k_row_q8_neon(
+                                &w_blocks[j * row_bytes..(j + 1) * row_bytes],
+                                &x_i8,
+                                &x_scales,
+                            )
+                        };
+                    }
+                });
+        }
+        return Tensor::from_f32_vec(out, Shape::new([m, n]));
+    }
+
     for i in 0..m {
         let x_row = &x_data[i * k..(i + 1) * k];
         gemv_parallel!(

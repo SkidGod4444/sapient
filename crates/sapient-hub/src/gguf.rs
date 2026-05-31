@@ -118,8 +118,17 @@ pub fn tokenizer_fallback_model(model_id: &str) -> Option<&'static str> {
     if id == "llama" {
         return Some("unsloth/Meta-Llama-3.1-8B-Instruct");
     }
+    // Mistral v0.3 (vocab 32768) REORDERED the vocabulary vs v0.1/v0.2 (vocab
+    // 32000) — the tokenizers are NOT interchangeable. Loading a v0.1 tokenizer for
+    // a v0.3 GGUF mis-encodes the prompt and mis-decodes output into mixed-script
+    // token-salad (verified: v0.1 decodes v0.3 ids as "Г str — ...らíses...レ").
+    // Our GGUF catalog ships Mistral-7B-Instruct-v0.3, so default to the matching
+    // (ungated) v0.3 tokenizer; only fall back to v0.1 when the id names v0.1/v0.2.
     if id.contains("mistral") || id.contains("ministral") {
-        return Some("mistralai/Mistral-7B-v0.1");
+        if id.contains("v0.1") || id.contains("v0.2") || id.contains("v01") || id.contains("v02") {
+            return Some("mistralai/Mistral-7B-v0.1");
+        }
+        return Some("unsloth/mistral-7b-instruct-v0.3");
     }
     if id.contains("codellama") || id.contains("code-llama") {
         return Some("codellama/CodeLlama-7b-hf");
@@ -190,6 +199,25 @@ mod tests {
         assert_eq!(
             tokenizer_fallback_model("TheBloke/Llama-2-7B-GGUF"),
             Some("NousResearch/Llama-2-7b-hf")
+        );
+    }
+
+    #[test]
+    fn mistral_tokenizer_fallback_defaults_to_v03() {
+        // v0.3 reordered the vocab (32768) vs v0.1/v0.2 (32000); a v0.1 tokenizer on
+        // a v0.3 GGUF produces mixed-script salad. Default to the matching v0.3.
+        assert_eq!(
+            tokenizer_fallback_model("Mistral-7B-Instruct-v0.3"),
+            Some("unsloth/mistral-7b-instruct-v0.3")
+        );
+        assert_eq!(
+            tokenizer_fallback_model("bartowski/Mistral-7B-Instruct-v0.3-GGUF"),
+            Some("unsloth/mistral-7b-instruct-v0.3")
+        );
+        // Explicit older versions still map to the 32000-vocab v0.1 tokenizer.
+        assert_eq!(
+            tokenizer_fallback_model("mistralai/Mistral-7B-v0.1"),
+            Some("mistralai/Mistral-7B-v0.1")
         );
     }
 }
