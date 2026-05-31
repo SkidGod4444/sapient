@@ -47,20 +47,44 @@ the whole history.
   the engine lock; a non-matching prefix simply falls back to a full prefill.
 - Off by default (CLI chat is byte-identical to before); only `serve` enables it.
 
-## Deferred (designed, not yet implemented)
-
 ### Phase 2 — Speculative decoding in serve
-`SpeculativePipeline` exists (`--speculative` in `sapient chat`) but is **unsuitable
-for serve as-is**: it rebuilds *both* target+draft engines from scratch on every
-request (no `Arc<Mutex<ForwardEngine>>` reuse like `Pipeline`), so TTFT pays the full
-load cost per request — a regression for a server. It also has no `*_with_config`
-(can't honor per-request `max_tokens`/`temperature`/`stop`) and no
-`tokenizer()`/`arch()`/`is_mmap()`.
-**Plan:** refactor `SpeculativePipeline` to hold reusable target+draft engines
-(mirror `Pipeline`'s `spawn_blocking` + `Arc<Mutex<engine>>` pattern) and add
-`*_with_config` + accessors; then cache spec pipelines in `ModelCache` behind a
-`--speculative` serve flag. Also add NGram/prompt-lookup drafting (no draft model
-needed). Best for single-user decode-bound serving (2–3×).
+`sapient serve --speculative [--draft-model <alias>]` serves every model with
+speculative decoding. `SpeculativePipeline` was refactored to be serve-ready:
+
+- **Engine reuse.** It used to rebuild *both* target+draft engines from scratch on
+  every request (no engine reuse), so TTFT paid the full load+re-quantize cost per
+  request. Now it holds the target and draft as `Pipeline`s and **reuses** their
+  loaded `Arc<Mutex<ForwardEngine>>` inside `spawn_blocking` (locks instead of
+  reloads), exactly like `Pipeline`. One-time load cost; subsequent requests are
+  instant. (`Pipeline::engine_arc()` exposes the engine `Arc` for this.)
+- **Per-request config + accessors.** Added `generate_with_config`,
+  `chat_with_config`, `generate_stream_with_config`, `chat_stream_with_config`
+  (honor `max_tokens`/`temperature`/`stop`) and `tokenizer()`/`arch()`/`is_mmap()`/
+  `config()`/`format_chat_prompt()`, plus `new_with_opts`/`with_auto_draft_with_opts`
+  (so serve passes `--backend`/`--mmap`).
+- **Cache integration.** A resident model is now `ServedModel::{Plain(Pipeline),
+  Speculative(SpeculativePipeline)}`; the LRU cache, admission control, and route
+  handlers treat both uniformly. Speculative residency bills target + draft bytes.
+- **Correctness fix (was fundamentally broken).** The target verification used
+  `forward_all_logits` (`use_cache=false`), which **reset the KV cache and ran the
+  draft tokens with no prompt context** — every speculative reply was token-salad.
+  The verification is now cache-aware: `forward_all_logits_cached` appends the draft
+  tokens to the target KV (positions continue from the prompt), and rejected
+  speculative tokens are rolled back with `truncate_cache(n)`. The loop maintains the
+  invariant "both caches hold exactly the committed tokens" and tracks each model's
+  next-token logits across rounds. Verified: coherent output (e.g. *"The capital of
+  France is Paris."*) on a Qwen2.5-1.5B target + Qwen2.5-0.5B draft.
+- **Vocab guard + family-aware auto-draft.** Speculative decoding requires a shared
+  vocabulary (the draft proposes token IDs the target scores). `new_with_opts` now
+  rejects a draft whose vocab differs from the target's with a clear error (instead
+  of emitting garbage), and `with_auto_draft` picks a draft from the **same family**
+  as the target (Qwen→qwen2.5-0.5b, SmolLM2→smollm2-135m).
+
+Notes/limits: best for single-user decode-bound serving (2–3×). Requires Llama/Phi
+CPU engines (the cache-rollback path); MLX has no incremental cache rollback so it
+isn't used for speculative. Future: NGram/prompt-lookup drafting (no draft model).
+
+## Deferred (designed, not yet implemented)
 
 ### Phase 5 — Continuous batching + PagedAttention
 The forward engine is **strictly single-sequence**: `forward_logits(&[u32])` has no

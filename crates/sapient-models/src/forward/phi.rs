@@ -300,6 +300,25 @@ impl PhiForward {
         Ok(all)
     }
 
+    /// Returns logits for ALL positions while **appending** `input_ids` to the
+    /// KV cache (positions continue from the current cache length). Used by
+    /// speculative decoding to verify draft tokens with prompt context.
+    pub fn forward_all_logits_cached(&mut self, input_ids: &[u32]) -> Result<Vec<Vec<f32>>> {
+        let hidden = self.forward_hidden(input_ids, true)?;
+        let mut all = self
+            .backend
+            .all_logits_from_hidden(&hidden, &self.lm_head)?;
+        if let Some(bias) = resolve_bias(&self.weights, &self.prefix, "lm_head") {
+            let bias_cow = bias.to_f32_cow();
+            for logits in &mut all {
+                for (l, b) in logits.iter_mut().zip(bias_cow.iter()) {
+                    *l += *b;
+                }
+            }
+        }
+        Ok(all)
+    }
+
     pub fn embed(&mut self, input_ids: &[u32]) -> Result<Vec<f32>> {
         self.reset_cache();
         let hidden = self.forward_hidden(input_ids, false)?;

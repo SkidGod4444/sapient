@@ -250,9 +250,12 @@ tokens, streams text, and stops at the right time.
 - `lib.rs` — front door; exposes `GenerationConfig` and `SamplingStrategy`.
 - `pipeline.rs` — the `Pipeline`: load a model, `generate`, `chat`, `generate_stream`,
   `embed`. Handles chat templates, stop sequences, and **multi-EOS** stopping.
-- `speculative.rs` — `SpeculativePipeline`: wraps a draft + target `Pipeline`; draft generates
-  candidates, target verifies via `forward_all_logits` in a single batched forward pass.
-  Auto-selects a smaller registry model as the draft when `--draft-model` is omitted.
+- `speculative.rs` — `SpeculativePipeline`: wraps a draft + target `Pipeline`; draft proposes K
+  candidates, target verifies them in one **cache-aware** forward pass (`forward_all_logits_cached`,
+  with `truncate_cache` rollback of rejected tokens — the older `forward_all_logits` reset the KV
+  cache and produced garbage). Reuses the loaded target+draft engines across requests (no per-request
+  rebuild), has `*_with_config` + accessors, and powers `sapient serve --speculative`. Auto-selects a
+  **same-family** draft when `--draft-model` is omitted (vocab mismatch is rejected up front).
 - `sampler.rs` — **how to pick the next token**: greedy (highest score), temperature,
   top-k, top-p, and repetition penalty.
 - `kv_cache.rs` — the memory notebook (KV cache) helpers. As of v0.2.9 the cache is allocated
@@ -323,7 +326,9 @@ libraries above.
 - `server.rs` — the **OpenAI-compatible HTTP server** (`GET /v1/models`,
   `POST /v1/chat/completions`, `POST /v1/completions`, `GET /v1/health`). No model is loaded
   at startup; the first API request triggers download + load (Ollama-style lazy loading).
-  Supports `--speculative` flag for chat completions.
+  Keeps the N most-recently-used models resident (LRU + RAM budget). Each resident model is a
+  `ServedModel::{Plain, Speculative}`; `--speculative [--draft-model <alias>]` serves every model
+  with speculative decoding (reusing loaded engines, no per-request reload).
 - `update.rs` — `sapient update`: self-updates the binary from GitHub releases, with
   GitHub API rate-limit fallback.
 

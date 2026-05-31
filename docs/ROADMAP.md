@@ -114,7 +114,7 @@ The hardest, most differentiating CPU target (2–8 GB RAM).
 - [x] **Streaming SSE** for `/v1/chat/completions` and `/v1/completions`; cache lock not held during inference, so different models serve concurrently.
 - [x] **Admission control** — bounded inference concurrency (`--max-concurrency`, tokio semaphore) so bursts queue instead of oversubscribing.
 - [x] **Prefix/prompt caching** — reuse the KV cache for the longest shared token prefix (multi-turn chat / shared system prompts skip re-prefilling history); byte-identical output, verified. `ForwardEngine::truncate_cache` + `Pipeline::enable_prefix_cache`.
-- [ ] Speculative decoding wired into `serve` (needs SpeculativePipeline engine-reuse refactor first — see `docs/SERVING.md`).
+- [x] **Speculative decoding wired into `serve`** (`--speculative [--draft-model <alias>]`). `SpeculativePipeline` reuses loaded target+draft engines across requests (`Arc<Mutex<ForwardEngine>>`, no per-request rebuild), gained `*_with_config` + accessors, and is cached via `ServedModel`. Also fixed a pre-existing correctness bug: target verification now uses a cache-aware forward (`forward_all_logits_cached` + `truncate_cache` rollback) instead of resetting the KV cache — output was previously token-salad. Vocab-mismatch guard + family-aware auto-draft. See `docs/SERVING.md`.
 - [ ] Continuous (in-flight) batching + parallel slots + chunked prefill; paged KV (block pool) — large single-sequence-engine rewrite, designed in `docs/SERVING.md`.
 - [ ] OpenAI-compatible `logprobs`, `n` parameters.
 

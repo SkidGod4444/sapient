@@ -267,6 +267,15 @@ enum Commands {
         /// Max concurrent inferences (admission control). 0 = auto (CPU count, capped).
         #[arg(long, default_value = "0")]
         max_concurrency: usize,
+
+        /// Serve every model with speculative decoding (target = requested model,
+        /// draft = auto-selected small model unless --draft-model is given).
+        #[arg(long)]
+        speculative: bool,
+
+        /// Draft model to use with --speculative (default: auto-selected).
+        #[arg(long, requires = "speculative")]
+        draft_model: Option<String>,
     },
 
     /// Update sapient to the latest release from GitHub.
@@ -386,6 +395,8 @@ async fn dispatch(cli: Cli) -> Result<()> {
             max_models,
             cache_gb,
             max_concurrency,
+            speculative,
+            draft_model,
         } => {
             server::serve_llm(
                 model.as_deref(),
@@ -395,6 +406,8 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 max_models,
                 cache_gb,
                 max_concurrency,
+                speculative,
+                draft_model.as_deref(),
             )
             .await
         }
