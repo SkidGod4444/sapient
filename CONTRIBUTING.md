@@ -106,7 +106,8 @@ crates/
 ├── sapient-tokenizers/     # Tokenizers + chat templates
 ├── sapient-models/         # Forward engines (Llama, Phi, …)
 ├── sapient-generate/       # Pipeline API (from_pretrained, chat, stream)
-└── sapient-cli/            # `sapient` binary
+└── sapient-cli/            # `sapient` binary (chat REPL uses a rustyline line
+                            #   editor + markdown.rs live Markdown/code rendering)
 
 install.sh / install.ps1    # Install scripts (attached to releases)
 Formula/sapient.rb          # Homebrew formula template
@@ -135,6 +136,12 @@ invariant is that `as_bytes()` on a quantized tensor returns exactly `byte_count
 Use `as_quant_blocks()` to iterate raw blocks and `to_f32_vec()` to dequantize. Never call
 `as_bytes_mut()` on a mmap-backed tensor (undefined behavior); it is only valid on heap-allocated
 buffers such as the KV cache.
+
+**GGUF q/k RoPE permutation.** llama.cpp permutes `attn_q`/`attn_k` rows for `llama`-arch GGUFs
+(ggml NORM-style RoPE). SAPIENT uses HF/NEOX RoPE, so `gguf_weights::unpermute_llama_gguf_qk`
+inverts it at load — without it those models emit incoherent token-salad. Do **not** apply it to
+Qwen2/Gemma GGUFs (NEOX, not permuted) or to safetensors weights (already HF layout). If you add a
+GGUF architecture, check whether its llama.cpp converter permutes q/k.
 
 **Flash-Edge attention.** `kernels/attention.rs` uses an online-softmax tiled algorithm that
 never materialises the full seq_q × seq_k score matrix (O(head_dim) working memory). If you

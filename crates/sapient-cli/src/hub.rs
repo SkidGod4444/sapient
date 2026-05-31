@@ -188,6 +188,20 @@ pub fn clear_cached_model(model_id: &str) -> Result<u64> {
     Ok(bytes)
 }
 
+/// On-disk size (bytes) of a cached model, or 0 if not cached / unreadable.
+pub fn cached_model_size(model_id: &str) -> u64 {
+    let Some(hub_cache) = hub_cache_root() else {
+        return 0;
+    };
+    let actual_id = sapient_hub::registry::resolve_model_alias(model_id)
+        .unwrap_or_else(|_| model_id.to_string());
+    let dir = hub_cache.join(model_cache_dir_name(&actual_id));
+    if !dir.is_dir() {
+        return 0;
+    }
+    dir_size(&dir).unwrap_or(0)
+}
+
 /// Delete all models from the local HuggingFace Hub cache.
 pub fn clear_all_cached_models() -> Result<(usize, u64)> {
     let models = list_cached_models()?;
@@ -209,8 +223,15 @@ fn walk_files(root: &Path) -> Result<Vec<PathBuf>> {
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
+            // Use file_type() (does NOT follow symlinks). The HF cache stores real
+            // files under blobs/ and symlinks under snapshots/ pointing back at
+            // them — following symlinks would double-count every weight file.
+            let ft = entry.file_type()?;
+            if ft.is_symlink() {
+                continue;
+            }
             let path = entry.path();
-            if path.is_dir() {
+            if ft.is_dir() {
                 stack.push(path);
             } else {
                 files.push(path);

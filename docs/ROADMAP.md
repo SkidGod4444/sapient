@@ -13,7 +13,7 @@
 - ✅ RoPE-axis correctness fix (transpose to `[1, n_heads, seq, head_dim]` before `fast::rope`).
 - ✅ **Engine reuse** — pipeline holds the engine in `Arc<Mutex<…>>`; streaming no longer rebuilds/re-quantizes the model per call (**TTFT 30–44× faster**, 1.5B: 3 s → 70 ms).
 - ✅ Correct CPU + Metal inference for Phi & Llama/Qwen families (F16/BF16 safetensors + GGUF Q4/Q8).
-- ✅ Curated registry, modern CLI (`chat`, `pull`, `run`, `models`, `serve`, `reset`, `rm`, `update`, `devices`), self-update, published to crates.io.
+- ✅ Curated registry, modern CLI (`chat`, `pull`, `run`, `models`, `serve`, `reset`, `rm`, `update`, `devices`), self-update. Distributed as prebuilt GitHub release binaries (not crates.io).
 - ✅ GGUF Q4_0/Q8_0/K-quant loading with mmap support (models larger than RAM).
 - ✅ Flash-Edge attention (online-softmax, O(head_dim) memory, NEON).
 - ✅ Q8_0 KV cache (in-place, 4× RAM reduction vs F32, zero per-step allocation).
@@ -27,6 +27,14 @@
 - ✅ Hybrid Metal+CPU layer-split inference for **both** LlamaForward and PhiForward.
 - ✅ Phi-2 Metal crash fix — `mlx_sdpa_supported_head_dim()` gate prevents panic for unsupported head dims.
 - ✅ Linux/Windows build fixes (cfg-gated `macos_gpu_name`, `dotprod` target_feature on SDOT functions).
+- ✅ Chat UX: paste-safe `rustyline` line editor (bracketed paste — multi-line pastes no longer auto-submit) and **live Markdown rendering** of replies (`termimad` prose + `syntect`-highlighted code blocks; `--raw` / non-TTY falls back to plain text).
+- ✅ GGUF correctness fixes for llama-family models, **verified end-to-end on CPU through Llama-3.2-1B / Llama-3.1-8B / DeepSeek-R1-Distill-Llama-8B (Q4_K_M)**:
+  - **Q6_K dequant scale-indexing fix** (the big one): the old code used one scale per 32-group and only touched 8 of the 16 super-block scales, decoding every Q6_K tensor wrong → token-salad for any Q4_K_M model that stores its output/embedding as Q6_K (Llama-3.x, DeepSeek, Mistral). Catastrophic for tied-embedding models. Fixed in all three Q6_K decoders + regression test.
+  - **q/k RoPE un-permute** for `llama`-arch GGUFs (ggml NORM-RoPE → HF/NEOX layout).
+  - **tied-embedding fallback** (SmolLM2 / Llama-3.2 GGUFs load).
+  - **Q8_0 W8A8 per-block activation quantization** (outlier-robust).
+  - **KV-cache context cap** (`SAPIENT_CTX`, default 8192) so 128K-context 8B models no longer OOM-kill at load.
+  - **Q4_K_M preferred over Q8_0** in GGUF file selection (smaller, fits 16 GB edge devices); **ungated tokenizer fallbacks** (`unsloth/*`, `deepseek-ai/*` instead of gated `meta-llama/*`).
 
 ## Guiding principles
 1. **One PR/phase → one release.** Ship gradually; never a big-bang.

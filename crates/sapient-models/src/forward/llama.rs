@@ -115,6 +115,9 @@ pub struct LlamaForward {
     /// Number of leading layers that run on `backend` (Metal).
     /// 0 means all layers use `backend`.
     gpu_layers: usize,
+    /// Allocated KV-cache context window (≤ model max). `seq_len` is capped here
+    /// so the sliding-window update never indexes past the cache.
+    kv_ctx: usize,
 }
 
 impl LlamaForward {
@@ -189,7 +192,10 @@ impl LlamaForward {
             );
         }
 
-        let max_seq = info.max_position_embeddings;
+        // Cap the pre-allocated cache window so 128K-context models don't reserve
+        // (and OOM on) gigabytes of KV cache at load time. Longer conversations
+        // slide the window. Override with SAPIENT_CTX.
+        let max_seq = super::common::kv_cache_ctx(info.max_position_embeddings);
         let n_kv = info.num_key_value_heads;
         let hd = info.head_dim;
         let cache_shape = vec![1, n_kv, max_seq, hd];
@@ -240,6 +246,7 @@ impl LlamaForward {
             backend,
             cpu_fallback: cpu_fallback.map(Box::new),
             gpu_layers,
+            kv_ctx: max_seq,
         })
     }
 
@@ -394,7 +401,9 @@ impl LlamaForward {
                 k = crate::forward::common::update_kv_cache(ck, current_seq, &k)?;
                 v = crate::forward::common::update_kv_cache(cv, current_seq, &v)?;
             }
-            cache.seq_len = current_seq + positions.len();
+            // Cap at the allocated window so the next sliding-window update stays
+            // in bounds (the cache evicts oldest positions beyond kv_ctx).
+            cache.seq_len = (current_seq + positions.len()).min(self.kv_ctx);
         }
 
         // ── Post-cache phase: attention → FFN ────────────────────────────────

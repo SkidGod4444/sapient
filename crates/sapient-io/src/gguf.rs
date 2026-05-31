@@ -414,9 +414,12 @@ fn dequantize_q6_k(data: &[u8], numel: usize) -> Vec<f32> {
         let d = f16_to_f32(u16::from_le_bytes([data[base + 208], data[base + 209]]));
         let mut ql_off = 0usize;
         let mut qh_off = 0usize;
-        let mut ib = 0usize;
+        // 16 i8 scales/super-block; offsets +0/+2/+4/+6 with split at l==16
+        // (`is = l/16`), base +8 per 128-block. Matches ggml dequantize_row_q6_K.
+        let mut sc_base = 0usize;
         for _ in 0..(QK_K / 128) {
             for l in 0..32usize {
+                let is = l / 16;
                 let q1 =
                     (((ql[ql_off + l] & 0x0F) | ((qh[qh_off + l] & 3) << 4)) as i32 - 32) as f32;
                 let q2 = (((ql[ql_off + l + 32] & 0x0F) | (((qh[qh_off + l] >> 2) & 3) << 4))
@@ -426,15 +429,15 @@ fn dequantize_q6_k(data: &[u8], numel: usize) -> Vec<f32> {
                     as f32;
                 let q4 = (((ql[ql_off + l + 32] >> 4) | (((qh[qh_off + l] >> 6) & 3) << 4)) as i32
                     - 32) as f32;
-                out[out_idx + l] = d * sc[ib] as i8 as f32 * q1;
-                out[out_idx + l + 32] = d * sc[ib + 1] as i8 as f32 * q2;
-                out[out_idx + l + 64] = d * sc[ib + 2] as i8 as f32 * q3;
-                out[out_idx + l + 96] = d * sc[ib + 3] as i8 as f32 * q4;
+                out[out_idx + l] = d * sc[sc_base + is] as i8 as f32 * q1;
+                out[out_idx + l + 32] = d * sc[sc_base + is + 2] as i8 as f32 * q2;
+                out[out_idx + l + 64] = d * sc[sc_base + is + 4] as i8 as f32 * q3;
+                out[out_idx + l + 96] = d * sc[sc_base + is + 6] as i8 as f32 * q4;
             }
             out_idx += 128;
             ql_off += 64;
             qh_off += 32;
-            ib += 4;
+            sc_base += 8;
         }
     }
     out

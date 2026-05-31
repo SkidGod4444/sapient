@@ -2,8 +2,8 @@
 
 /// Pick the best GGUF file from a sorted list of repo filenames.
 ///
-/// Prefers formats we can dequantize natively (Q8_0, Q4_0) then common K-quants
-/// (Q4_K_M, Q5_K_M), and avoids ultra-low-bit quants (Q2_K) when better options exist.
+/// Prefers Q4_K_M (the edge sweet spot — small + near-lossless) over Q8_0 and other
+/// quants, falls back to Q8_0/K-quants/float, and avoids ultra-low-bit Q2_K.
 pub fn select_best_gguf(filenames: &[String]) -> Option<&str> {
     let ggufs: Vec<&str> = filenames
         .iter()
@@ -36,15 +36,19 @@ pub fn gguf_preference_score(name: &str) -> i32 {
         .unwrap_or(&upper)
         .replace(".GGUF", "");
 
-    // Native SAPIENT kernels: Q8_0 and Q4_K_M are the sweet spot.
-    if base.contains("Q8_0") {
+    // Edge-device sweet spot: Q4_K_M is preferred over Q8_0. It is ~40% smaller
+    // (≈4.9 GB vs ≈8.5 GB for an 8B model), near-lossless, and runs through the
+    // Q4_K matmul kernel — which fits a 16 GB Pi where the larger Q8_0 file would
+    // force memory-mapping. Q8_0 stays a high-quality fallback when no K-quant
+    // variant is published.
+    if base.contains("Q4_K_M") {
         return 100;
     }
-    if base.contains("Q4_K_M") {
-        return 95;
-    }
     if base.contains("Q5_K_M") {
-        return 90;
+        return 96;
+    }
+    if base.contains("Q8_0") {
+        return 94;
     }
     if base.contains("Q4_0") {
         return 85;
@@ -98,19 +102,21 @@ pub fn tokenizer_fallback_model(model_id: &str) -> Option<&'static str> {
     if id.contains("smollm") {
         return Some("HuggingFaceTB/SmolLM2-360M-Instruct");
     }
-    // DeepSeek R1 distills use Llama 3.1 tokenizer
+    // DeepSeek R1 distills carry their own (ungated) tokenizer.
     if id.contains("deepseek") {
-        return Some("meta-llama/Meta-Llama-3-8B-Instruct");
+        return Some("deepseek-ai/DeepSeek-R1-Distill-Llama-8B");
     }
     if id.contains("llama-2") || id.contains("llama2") {
         return Some("NousResearch/Llama-2-7b-hf");
     }
+    // Use the ungated unsloth mirror — meta-llama/* repos are gated (401 without a
+    // HF token), which would make every Llama-3 GGUF unusable out of the box.
     if id.contains("llama-3") || id.contains("llama3") {
-        return Some("meta-llama/Meta-Llama-3-8B-Instruct");
+        return Some("unsloth/Meta-Llama-3.1-8B-Instruct");
     }
     // Plain "llama" arch from GGUF metadata (no version suffix)
     if id == "llama" {
-        return Some("meta-llama/Meta-Llama-3-8B-Instruct");
+        return Some("unsloth/Meta-Llama-3.1-8B-Instruct");
     }
     if id.contains("mistral") || id.contains("ministral") {
         return Some("mistralai/Mistral-7B-v0.1");
@@ -152,12 +158,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prefers_q8_over_q2() {
+    fn prefers_q4_k_m_over_q8_and_q2() {
+        // Edge default: Q4_K_M beats Q8_0 (smaller, fits constrained devices) and
+        // both beat the ultra-low-bit Q2_K.
         let files = vec![
             "llama-2-7b.Q2_K.gguf".into(),
             "llama-2-7b.Q4_K_M.gguf".into(),
             "llama-2-7b.Q8_0.gguf".into(),
         ];
+        assert_eq!(select_best_gguf(&files), Some("llama-2-7b.Q4_K_M.gguf"));
+    }
+
+    #[test]
+    fn prefers_q8_when_no_k_quant() {
+        // Q8_0 remains the high-quality fallback when no K-quant is published.
+        let files = vec!["llama-2-7b.Q2_K.gguf".into(), "llama-2-7b.Q8_0.gguf".into()];
         assert_eq!(select_best_gguf(&files), Some("llama-2-7b.Q8_0.gguf"));
     }
 

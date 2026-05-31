@@ -219,7 +219,11 @@ The real generation math: how to run a Phi or Llama-style model layer by layer.
 - `lib.rs` — front door.
 - `weights.rs` — loads weight tensors from Safetensors and finds them by name (handles
   prefixes, biases, and tied embeddings).
-- `gguf_weights.rs` — maps GGUF tensor names to the names the engine expects.
+- `gguf_weights.rs` — maps GGUF tensor names to the names the engine expects, and
+  **un-permutes the q/k attention weights** for `llama`-arch GGUFs (llama.cpp stores
+  them in ggml's NORM-RoPE row order; SAPIENT uses HF/NEOX RoPE, so without this they
+  produce garbage). Qwen2/Gemma GGUFs use NEOX RoPE and are left untouched. Also handles
+  tied-embedding models (no `output.weight` → reuse the token-embedding matrix).
 - `registry.rs` — builds an IR graph for a model type (graph mode).
 - `forward/` — the **forward pass** (running the model to get an answer):
   - `forward/mod.rs` — picks the right engine for a model type.
@@ -302,7 +306,15 @@ The hook for running on a Mac's GPU via Apple's **MLX**. Enabled when built with
 The `sapient` command-line program: parses commands, shows the modern UI, and calls the
 libraries above.
 - `main.rs` — defines all commands (`chat`, `pull`, `run`, `list`, `models`, `info`,
-  `serve`, `login`, `update`, `reset`, `rm`, …) and wires them up.
+  `serve`, `login`, `update`, `reset`, `rm`, …) and wires them up. The interactive chat
+  REPL reads input with a `rustyline` line editor (`read_chat_line`) so pasting multi-line
+  text no longer auto-submits — bracketed-paste mode inserts the paste into the buffer and
+  only a real Enter sends it.
+- `markdown.rs` — **live Markdown rendering** of streamed replies (`StreamRenderer`):
+  prose/headings/lists/tables via `termimad`, fenced code blocks via `syntect` syntax
+  highlighting. It commits completed Markdown blocks permanently and repaints only the
+  trailing in-progress block in place, so formatting appears as the model streams without
+  thrashing the screen. Falls back to raw passthrough for pipes / `NO_COLOR` / `--raw`.
 - `ui.rs` — the **modern terminal UI**: banner, colored role "chip" badges, spinners,
   tables, success/error messages, and the tokens/sec stat line.
 - `hub.rs` — CLI-side model management (list cached, remove, login, resolve paths).

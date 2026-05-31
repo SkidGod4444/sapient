@@ -65,6 +65,91 @@ pub fn map_gguf_tensors_to_hf(raw: HashMap<String, Tensor>) -> Result<HashMap<St
     Ok(mapped)
 }
 
+/// Un-permute the q_proj/k_proj rows of llama-family GGUF weights into HF layout.
+///
+/// llama.cpp's HF→GGUF converter permutes the rows of `attn_q`/`attn_k` so that
+/// ggml's NORM-style RoPE (`rope_type = NORM`, used for the `llama` architecture:
+/// Llama, Mistral, SmolLM, TinyLlama, …) produces the right result. SAPIENT's
+/// RoPE is HF/NEOX-style (`rotate_half`), so the permuted weights make RoPE
+/// scramble positions across each head → incoherent "token-salad" output. We
+/// invert the permutation at load time so q/k match SAPIENT's RoPE.
+///
+/// Architectures that already use NEOX RoPE in ggml (Qwen2, Gemma) are NOT
+/// permuted by the converter and must be left untouched — hence this is gated on
+/// the `llama` architecture by the caller.
+///
+/// The forward permutation maps HF row `h·D + a·(D/2) + b` (head `h`, half `a∈{0,1}`,
+/// `b∈0..D/2`) to GGUF row `h·D + b·2 + a`; we apply the inverse. Works on any
+/// dtype because each output row is a contiguous `byte_count(in)` byte chunk.
+pub fn unpermute_qk_rows(t: &Tensor, n_head: usize, head_dim: usize) -> Result<Tensor> {
+    let dims = t.shape().dims().to_vec();
+    if dims.len() != 2 || head_dim < 2 || head_dim % 2 != 0 || n_head * head_dim != dims[0] {
+        // Shape doesn't match the expected [n_head*head_dim, in] — leave as-is.
+        return Ok(t.clone());
+    }
+    let (out, in_dim) = (dims[0], dims[1]);
+    let half = head_dim / 2;
+    let row_bytes = t.dtype().byte_count(in_dim);
+    let src = t.as_bytes();
+    if src.len() < out * row_bytes {
+        bail!(
+            "unpermute_qk_rows: buffer too small ({} < {})",
+            src.len(),
+            out * row_bytes
+        );
+    }
+    let mut dst = vec![0u8; out * row_bytes];
+    for h in 0..n_head {
+        for a in 0..2 {
+            for b in 0..half {
+                let hf_row = h * head_dim + a * half + b;
+                let gguf_row = h * head_dim + b * 2 + a;
+                dst[hf_row * row_bytes..hf_row * row_bytes + row_bytes]
+                    .copy_from_slice(&src[gguf_row * row_bytes..gguf_row * row_bytes + row_bytes]);
+            }
+        }
+    }
+
+    if t.dtype().is_quantized() {
+        Tensor::from_quant_bytes(&dst, dims, t.dtype()).map_err(|e| anyhow::anyhow!("{e}"))
+    } else if t.dtype() == sapient_core::DType::F32 {
+        let f: Vec<f32> = dst
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        Tensor::from_f32(&f, dims).map_err(|e| anyhow::anyhow!("{e}"))
+    } else {
+        bail!("unpermute_qk_rows: unsupported dtype {:?}", t.dtype())
+    }
+}
+
+/// Apply [`unpermute_qk_rows`] to every `self_attn.q_proj`/`k_proj` weight in a
+/// freshly-loaded llama-family GGUF weight map. `n_head`/`n_kv_head` come from the
+/// model config; `head_dim` is `hidden / n_head`.
+pub fn unpermute_llama_gguf_qk(
+    weights: &mut HashMap<String, Tensor>,
+    n_head: usize,
+    n_kv_head: usize,
+    head_dim: usize,
+) -> Result<()> {
+    let keys: Vec<String> = weights.keys().cloned().collect();
+    for key in keys {
+        let nh = if key.ends_with("self_attn.q_proj.weight") {
+            Some(n_head)
+        } else if key.ends_with("self_attn.k_proj.weight") {
+            Some(n_kv_head)
+        } else {
+            None
+        };
+        if let Some(nh) = nh {
+            let t = weights.get(&key).unwrap();
+            let fixed = unpermute_qk_rows(t, nh, head_dim)?;
+            weights.insert(key, fixed);
+        }
+    }
+    Ok(())
+}
+
 /// Map a single GGUF tensor name to a HuggingFace weight key.
 pub fn map_gguf_tensor_name(name: &str) -> Option<String> {
     match name {
@@ -115,6 +200,51 @@ fn map_blk_tensor(key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // llama.cpp's forward HF→GGUF permutation (the thing we must invert):
+    // GGUF[h·D + b·2 + a] = HF[h·D + a·(D/2) + b].
+    fn llama_cpp_permute(hf_rows: &[Vec<f32>], n_head: usize, head_dim: usize) -> Vec<Vec<f32>> {
+        let half = head_dim / 2;
+        let mut gguf = vec![Vec::new(); hf_rows.len()];
+        for h in 0..n_head {
+            for a in 0..2 {
+                for b in 0..half {
+                    let hf_row = h * head_dim + a * half + b;
+                    let gguf_row = h * head_dim + b * 2 + a;
+                    gguf[gguf_row] = hf_rows[hf_row].clone();
+                }
+            }
+        }
+        gguf
+    }
+
+    #[test]
+    fn unpermute_qk_inverts_llama_cpp_permutation() {
+        let (n_head, head_dim, hidden) = (3usize, 4usize, 5usize);
+        let out = n_head * head_dim;
+        // Distinct HF rows so any mis-mapping is detectable.
+        let hf_rows: Vec<Vec<f32>> = (0..out)
+            .map(|r| (0..hidden).map(|c| (r * 100 + c) as f32).collect())
+            .collect();
+        // ggml stores the permuted weights; build that flat F32 buffer.
+        let gguf_rows = llama_cpp_permute(&hf_rows, n_head, head_dim);
+        let flat: Vec<f32> = gguf_rows.iter().flatten().copied().collect();
+        let gguf = sapient_core::Tensor::from_f32(&flat, vec![out, hidden]).unwrap();
+
+        // Un-permuting must recover the original HF layout exactly.
+        let recovered = unpermute_qk_rows(&gguf, n_head, head_dim).unwrap();
+        let r = recovered.to_f32_cow();
+        let expected: Vec<f32> = hf_rows.iter().flatten().copied().collect();
+        assert_eq!(r.as_ref(), expected.as_slice());
+    }
+
+    #[test]
+    fn unpermute_qk_leaves_mismatched_shapes_untouched() {
+        // 1-D / shape that isn't [n_head*head_dim, in] must be returned unchanged.
+        let t = sapient_core::Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], vec![4, 1]).unwrap();
+        let out = unpermute_qk_rows(&t, 3, 4).unwrap(); // 3*4 != 4
+        assert_eq!(out.to_f32_cow().as_ref(), &[1.0, 2.0, 3.0, 4.0]);
+    }
 
     #[test]
     fn maps_llama_gguf_names() {

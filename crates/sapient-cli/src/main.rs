@@ -1,6 +1,7 @@
 //! SAPIENT CLI — chat, pull, run, bench, inspect, serve
 
 mod hub;
+mod markdown;
 mod progress;
 mod server;
 mod ui;
@@ -74,6 +75,11 @@ enum Commands {
         /// Draft model to use with --speculative (default: auto-selected).
         #[arg(long, requires = "speculative")]
         draft_model: Option<String>,
+
+        /// Print replies as raw Markdown text instead of rendering it in the
+        /// terminal (rendering is on by default on interactive terminals).
+        #[arg(long)]
+        raw: bool,
     },
 
     /// Download a model from HuggingFace Hub to the local cache.
@@ -117,12 +123,14 @@ enum Commands {
     },
 
     /// Show available local inference backends.
+    #[command(hide = true)]
     BackendInfo,
 
     /// Detect all CPUs and GPUs, show memory/bandwidth, and recommend backends.
     ///
     /// Reports which models fit in GPU memory, whether hybrid CPU+GPU execution
     /// is possible, and expected tok/s for common model sizes.
+    #[command(hide = true)]
     Devices,
 
     /// Save a HuggingFace access token for gated models.
@@ -159,6 +167,7 @@ enum Commands {
     },
 
     /// Benchmark a model across batch sizes (file-based models).
+    #[command(hide = true)]
     Bench {
         /// HuggingFace model ID or path to a model file.
         model: String,
@@ -178,7 +187,7 @@ enum Commands {
 
     /// LLM generation benchmark: measures load time, TTFT, tok/s, and peak RAM.
     /// Outputs a side-by-side comparison table suitable for competing with Ollama.
-    #[command(name = "bench-llm", visible_aliases = ["bllm"])]
+    #[command(name = "bench-llm", visible_aliases = ["bllm"], hide = true)]
     BenchLlm {
         /// Model alias (e.g. `openhorizon/qwen2.5-0.5b-q4`) or local .gguf path.
         model: String,
@@ -286,6 +295,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             mmap,
             speculative,
             draft_model,
+            raw,
         } => {
             chat_command(
                 model.as_str(),
@@ -294,6 +304,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 mmap,
                 speculative,
                 draft_model.as_deref(),
+                raw,
             )
             .await
         }
@@ -374,6 +385,30 @@ async fn dispatch(cli: Cli) -> Result<()> {
 
 // ── Hub commands ──────────────────────────────────────────────────────────────
 
+/// Read one line of chat input with a bracketed-paste-aware line editor.
+///
+/// Plain `stdin().read_line()` returns the instant it sees a newline, so any
+/// pasted text that contains (or ends with) `\n` is submitted immediately —
+/// often before the user presses Enter. `rustyline` enables bracketed-paste
+/// mode, so a paste is inserted into the edit buffer as literal text (newlines
+/// included) and only a real Enter key submits.
+///
+/// Returns `Ok(None)` on EOF / Ctrl-C / Ctrl-D — the caller should break.
+fn read_chat_line(editor: &mut rustyline::DefaultEditor) -> Result<Option<String>> {
+    use rustyline::error::ReadlineError;
+    match editor.readline(&ui::user_prompt_str()) {
+        Ok(line) => {
+            if !line.trim().is_empty() {
+                let _ = editor.add_history_entry(line.as_str());
+            }
+            Ok(Some(line))
+        }
+        Err(ReadlineError::Interrupted | ReadlineError::Eof) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn chat_command(
     model: &str,
     backend: &str,
@@ -381,10 +416,11 @@ async fn chat_command(
     force_mmap: bool,
     speculative: bool,
     draft_model: Option<&str>,
+    raw: bool,
 ) -> Result<()> {
     // If speculative decoding is requested, branch into the speculative path.
     if speculative {
-        return chat_speculative_command(model, backend, verbose, draft_model).await;
+        return chat_speculative_command(model, backend, verbose, draft_model, raw).await;
     }
 
     let backend_kind = parse_generation_backend(backend)?;
@@ -508,17 +544,14 @@ async fn chat_command(
         }
     }
 
+    let mut editor = rustyline::DefaultEditor::new()?;
     let mut history: Vec<ChatMessage> = Vec::new();
     loop {
-        ui::write_user_prompt()?;
-
-        let mut line = String::new();
-        let n = io::stdin().read_line(&mut line)?;
-        if n == 0 {
+        let Some(input) = read_chat_line(&mut editor)? else {
             break;
-        }
+        };
 
-        let line = line.trim();
+        let line = input.trim();
         if line.is_empty() {
             continue;
         }
@@ -538,11 +571,11 @@ async fn chat_command(
         history.push(ChatMessage::user(line));
 
         // Spinner shows "thinking" until the first token arrives, then is cleared
-        // and replaced by the assistant prompt + streamed reply.
-        let think = ui::spinner("thinking…");
+        // and replaced by the assistant prompt + the live Markdown-rendered reply.
+        let think = ui::spinner("generating…");
         let start = std::time::Instant::now();
         let mut stream = pipeline.chat_stream(&history).await;
-        let mut reply = String::new();
+        let mut renderer = markdown::StreamRenderer::new(raw);
         let mut first = true;
         let mut ttft: Option<std::time::Duration> = None;
         while let Some(token) = stream.next().await {
@@ -550,17 +583,18 @@ async fn chat_command(
                 ttft = Some(start.elapsed());
                 think.finish_and_clear();
                 ui::write_assistant_prompt()?;
+                renderer.begin()?;
                 first = false;
             }
-            print!("{token}");
-            reply.push_str(&token);
-            io::stdout().flush()?;
+            renderer.push(&token)?;
         }
         if first {
             think.finish_and_clear();
+        } else {
+            renderer.finish()?;
         }
-        println!();
-        if !reply.is_empty() {
+        let reply = renderer.into_text();
+        if !reply.trim().is_empty() {
             let tokens = pipeline
                 .tokenizer()
                 .encode(&reply)
@@ -581,6 +615,7 @@ async fn chat_speculative_command(
     backend: &str,
     verbose: bool,
     draft_model: Option<&str>,
+    raw: bool,
 ) -> Result<()> {
     let _ = parse_generation_backend(backend)?; // validate backend string early
 
@@ -611,17 +646,14 @@ async fn chat_speculative_command(
 
     ui::print_chat_banner(model, "speculative", backend);
 
+    let mut editor = rustyline::DefaultEditor::new()?;
     let mut history: Vec<ChatMessage> = Vec::new();
     loop {
-        ui::write_user_prompt()?;
-
-        let mut line = String::new();
-        let n = std::io::stdin().read_line(&mut line)?;
-        if n == 0 {
+        let Some(input) = read_chat_line(&mut editor)? else {
             break;
-        }
+        };
 
-        let line = line.trim();
+        let line = input.trim();
         if line.is_empty() {
             continue;
         }
@@ -640,10 +672,10 @@ async fn chat_speculative_command(
 
         history.push(ChatMessage::user(line));
 
-        let think = ui::spinner("thinking…");
+        let think = ui::spinner("generating…");
         let start = std::time::Instant::now();
         let mut stream = pipeline.chat_stream(&history).await;
-        let mut reply = String::new();
+        let mut renderer = markdown::StreamRenderer::new(raw);
         let mut first = true;
         let mut ttft: Option<std::time::Duration> = None;
 
@@ -653,18 +685,19 @@ async fn chat_speculative_command(
                 ttft = Some(start.elapsed());
                 think.finish_and_clear();
                 ui::write_assistant_prompt()?;
+                renderer.begin()?;
                 first = false;
             }
-            print!("{token}");
-            reply.push_str(&token);
-            std::io::Write::flush(&mut std::io::stdout())?;
+            renderer.push(&token)?;
         }
         if first {
             think.finish_and_clear();
+        } else {
+            renderer.finish()?;
         }
-        println!();
 
-        if !reply.is_empty() {
+        let reply = renderer.into_text();
+        if !reply.trim().is_empty() {
             // We don't have direct tokenizer access from SpeculativePipeline, so
             // approximate token count by whitespace splitting.
             let tokens = reply.split_whitespace().count();
@@ -756,6 +789,55 @@ async fn pull_command(model: &str, verbose: bool) -> Result<()> {
     }
 }
 
+/// Estimate the download size (GB) of a catalog model from its `params` label
+/// (e.g. "7B Q4_K_M", "360M Q8_0", "1.5B"). Uses bits-per-weight for the quant:
+/// Q4_K≈4.8, Q5_K≈5.6, Q6_K≈6.6, Q8_0≈8.5, otherwise BF16/F16 safetensors ≈16.
+fn estimate_download_gb(params: &str) -> f64 {
+    let lower = params.to_ascii_lowercase();
+    // Parameter count (billions). Accept "7b", "0.5b", "360m".
+    let mut billions = 0.0f64;
+    for tok in lower.split_whitespace() {
+        if let Some(num) = tok.strip_suffix('b') {
+            if let Ok(v) = num.parse::<f64>() {
+                billions = v;
+                break;
+            }
+        } else if let Some(num) = tok.strip_suffix('m') {
+            if let Ok(v) = num.parse::<f64>() {
+                billions = v / 1000.0;
+                break;
+            }
+        }
+    }
+    if billions <= 0.0 {
+        return 0.0;
+    }
+    let bpw = if lower.contains("q4_k") || lower.contains("q4_0") {
+        4.8
+    } else if lower.contains("q5_k") || lower.contains("q5_0") {
+        5.6
+    } else if lower.contains("q6_k") {
+        6.6
+    } else if lower.contains("q8_0") {
+        8.5
+    } else {
+        16.0 // safetensors F16/BF16
+    };
+    // GB = params × bits/weight ÷ 8 bits/byte (≈ GiB; close enough for a label).
+    billions * bpw / 8.0
+}
+
+/// Render an approximate GB string, e.g. "~4.4 GB" (or "<0.1 GB" / "—").
+fn fmt_gb(gb: f64) -> String {
+    if gb <= 0.0 {
+        "—".to_string()
+    } else if gb < 0.1 {
+        "<0.1 GB".to_string()
+    } else {
+        format!("~{gb:.1} GB")
+    }
+}
+
 fn list_command() -> Result<()> {
     let models = hub::list_cached_models()?;
     if models.is_empty() {
@@ -770,16 +852,24 @@ fn list_command() -> Result<()> {
         .iter()
         .map(|alias| {
             let meta = catalog.iter().find(|m| m.alias == alias);
+            // Actual on-disk size for downloaded models.
+            let bytes = hub::cached_model_size(alias);
+            let disk = if bytes > 0 {
+                format!("{:.1} GB", bytes as f64 / 1e9)
+            } else {
+                "—".to_string()
+            };
             vec![
                 alias.clone(),
                 meta.map(|m| m.family.to_string()).unwrap_or_default(),
                 meta.map(|m| m.params.to_string()).unwrap_or_default(),
+                disk,
             ]
         })
         .collect();
 
     println!("\nDownloaded models ({})\n", models.len());
-    ui::print_table(&["MODEL", "FAMILY", "SIZE"], &rows);
+    ui::print_table(&["MODEL", "FAMILY", "SIZE", "ON DISK"], &rows);
     println!();
     Ok(())
 }
@@ -798,17 +888,25 @@ fn models_command() -> Result<()> {
             } else {
                 "—".to_string()
             };
+            // Show the real on-disk size if downloaded, else an estimate.
+            let cached_bytes = hub::cached_model_size(m.alias);
+            let download = if cached_bytes > 0 {
+                format!("{:.1} GB", cached_bytes as f64 / 1e9)
+            } else {
+                fmt_gb(estimate_download_gb(m.params))
+            };
             vec![
                 m.alias.to_string(),
                 m.family.to_string(),
                 m.params.to_string(),
+                download,
                 status,
             ]
         })
         .collect();
 
     println!("\nSupported models ({})\n", catalog.len());
-    ui::print_table(&["MODEL", "FAMILY", "SIZE", "STATUS"], &rows);
+    ui::print_table(&["MODEL", "FAMILY", "SIZE", "DOWNLOAD", "STATUS"], &rows);
     println!();
     ui::hint("run any of these with:  sapient chat <model>");
     Ok(())

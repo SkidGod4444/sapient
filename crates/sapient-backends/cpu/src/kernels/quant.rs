@@ -296,18 +296,36 @@ unsafe fn dot_q8_0_block_neon(block: &[u8], x: &[f32]) -> f32 {
 // Accuracy: quantizing x to i8 (same resolution as Q8_0 weights) introduces
 // ≈ max|x| / (127 × √K) RMS error — indistinguishable from Q8_0 weight noise.
 
-/// Quantize a row of f32 activations to i8 (symmetric Q8_0 style).
-/// Returns (quantized_bytes, scale) where scale = max_abs / 127.
-/// The caller multiplies each block's weight scale by this scale to recover f32.
-pub fn quantize_row_to_i8(x: &[f32]) -> (Vec<i8>, f32) {
-    let max_abs = x.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
-    let scale = if max_abs > 0.0 { max_abs / 127.0 } else { 1.0 };
-    let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
-    let q = x
-        .iter()
-        .map(|v| (v * inv).round().clamp(-127.0, 127.0) as i8)
-        .collect();
-    (q, scale)
+/// Quantize a row of f32 activations to i8 with **per-block** scales — one scale
+/// per `QK` (32) element block, matching the Q8_0 weight block layout.
+///
+/// Returns `(quantized_i8, per_block_scales)` where `scales[b] = max_abs(block b)
+/// / 127`. The caller multiplies each weight block's scale by the matching
+/// activation block scale to recover f32.
+///
+/// ## Why per-block, not per-row
+/// LLM activations contain a handful of *outlier channels* whose magnitude is
+/// 10–100× the rest (a well-documented property of transformer residual streams).
+/// A single per-row int8 scale is set by that outlier, so every normal-magnitude
+/// value rounds to 0 or ±1 — destroying the signal and producing incoherent
+/// "token-salad" output. Scoping the scale to a 32-element block confines the
+/// outlier's damage to its own block, which is exactly how llama.cpp quantizes
+/// activations for its Q8_0 × Q8_0 kernels. `x.len()` must be a multiple of `QK`.
+pub fn quantize_row_to_i8_blocks(x: &[f32]) -> (Vec<i8>, Vec<f32>) {
+    debug_assert_eq!(x.len() % QK, 0);
+    let nblocks = x.len() / QK;
+    let mut q = vec![0i8; x.len()];
+    let mut scales = vec![0.0f32; nblocks];
+    for (b, blk) in x.chunks_exact(QK).enumerate() {
+        let max_abs = blk.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let scale = if max_abs > 0.0 { max_abs / 127.0 } else { 1.0 };
+        let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
+        for (i, &v) in blk.iter().enumerate() {
+            q[b * QK + i] = (v * inv).round().clamp(-127.0, 127.0) as i8;
+        }
+        scales[b] = scale;
+    }
+    (q, scales)
 }
 
 /// Q8_0 block dot product against a pre-quantized i8 activation slice.
@@ -355,21 +373,23 @@ unsafe fn dot_q8_0_block_sdot(block: &[u8], x_i8: &[i8]) -> i32 {
 }
 
 /// Full Q8_0 row dot product with pre-quantized i8 activations.
-/// Called by matmul_nt_q8_0 after quantize_row_to_i8 when dotprod is available.
+/// Called by matmul_nt_q8_0 after [`quantize_row_to_i8_blocks`] when dotprod is
+/// available. `x_scales` holds one scale per `QK`-element activation block.
 ///
 /// # Safety
 /// Caller must verify `is_aarch64_feature_detected!("dotprod")` before calling.
 /// `row_blocks` must be a valid slice of packed Q8_0 blocks; `x_i8` must have
-/// length equal to the number of elements covered by those blocks.
+/// length equal to the number of elements covered by those blocks, and
+/// `x_scales.len()` must equal the block count.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon,dotprod")]
-pub unsafe fn dot_q8_0_row_sdot(row_blocks: &[u8], x_i8: &[i8], x_scale: f32) -> f32 {
+pub unsafe fn dot_q8_0_row_sdot(row_blocks: &[u8], x_i8: &[i8], x_scales: &[f32]) -> f32 {
     let mut acc = 0.0f32;
     let mut x_off = 0usize;
-    for block in row_blocks.chunks_exact(Q8_0_BLOCK_BYTES) {
+    for (bi, block) in row_blocks.chunks_exact(Q8_0_BLOCK_BYTES).enumerate() {
         let w_scale = half::f16::from_le_bytes([block[0], block[1]]).to_f32();
         let dot = dot_q8_0_block_sdot(block, &x_i8[x_off..x_off + QK]);
-        acc += w_scale * x_scale * dot as f32;
+        acc += w_scale * x_scales[bi] * dot as f32;
         x_off += QK;
     }
     acc
@@ -377,11 +397,12 @@ pub unsafe fn dot_q8_0_row_sdot(row_blocks: &[u8], x_i8: &[i8], x_scale: f32) ->
 
 /// Scalar fallback for dot_q8_0_row_sdot (non-dotprod aarch64 or other platforms).
 /// Uses i32 integer arithmetic — no widening chain, still faster than the f32 path
-/// for targets without AVX2, and correct everywhere.
-pub fn dot_q8_0_row_i8_scalar(row_blocks: &[u8], x_i8: &[i8], x_scale: f32) -> f32 {
+/// for targets without AVX2, and correct everywhere. `x_scales` holds one scale
+/// per `QK`-element activation block (see [`quantize_row_to_i8_blocks`]).
+pub fn dot_q8_0_row_i8_scalar(row_blocks: &[u8], x_i8: &[i8], x_scales: &[f32]) -> f32 {
     let mut acc = 0.0f32;
     let mut x_off = 0usize;
-    for block in row_blocks.chunks_exact(Q8_0_BLOCK_BYTES) {
+    for (bi, block) in row_blocks.chunks_exact(Q8_0_BLOCK_BYTES).enumerate() {
         let w_scale = half::f16::from_le_bytes([block[0], block[1]]).to_f32();
         let w = &block[2..];
         let dot: i32 = w[..QK]
@@ -389,7 +410,7 @@ pub fn dot_q8_0_row_i8_scalar(row_blocks: &[u8], x_i8: &[i8], x_scale: f32) -> f
             .zip(&x_i8[x_off..x_off + QK])
             .map(|(&wi, &xi)| wi as i8 as i32 * xi as i32)
             .sum();
-        acc += w_scale * x_scale * dot as f32;
+        acc += w_scale * x_scales[bi] * dot as f32;
         x_off += QK;
     }
     acc
@@ -679,9 +700,15 @@ pub fn dot_q6_k_row_f32(row_data: &[u8], x: &[f32]) -> f32 {
         let d = f16::from_le_bytes([block[208], block[209]]).to_f32();
         let mut ql_off = 0usize;
         let mut qh_off = 0usize;
-        let mut ib = 0usize;
+        // Q6_K has 16 i8 scales per super-block (one per 16-element group). Within
+        // each 128-element half the 4 sub-groups use scales at offsets +0/+2/+4/+6
+        // and the scale splits again at l==16 (`is = l/16`); the base advances by 8
+        // per 128-block. (Matches ggml dequantize_row_q6_K — using one scale per
+        // 32-group, as the old code did, decodes Q6_K weights incorrectly.)
+        let mut sc_base = 0usize;
         for _ in 0..(QK_K / 128) {
             for l in 0..32 {
+                let is = l / 16;
                 let q1 =
                     (((ql[ql_off + l] & 0x0F) | ((qh[qh_off + l] & 3) << 4)) as i32 - 32) as f32;
                 let q2 = (((ql[ql_off + l + 32] & 0x0F) | (((qh[qh_off + l] >> 2) & 3) << 4))
@@ -691,15 +718,15 @@ pub fn dot_q6_k_row_f32(row_data: &[u8], x: &[f32]) -> f32 {
                     as f32;
                 let q4 = (((ql[ql_off + l + 32] >> 4) | (((qh[qh_off + l] >> 6) & 3) << 4)) as i32
                     - 32) as f32;
-                acc += d * sc[ib] as i8 as f32 * q1 * x[x_off + l];
-                acc += d * sc[ib + 1] as i8 as f32 * q2 * x[x_off + l + 32];
-                acc += d * sc[ib + 2] as i8 as f32 * q3 * x[x_off + l + 64];
-                acc += d * sc[ib + 3] as i8 as f32 * q4 * x[x_off + l + 96];
+                acc += d * sc[sc_base + is] as i8 as f32 * q1 * x[x_off + l];
+                acc += d * sc[sc_base + is + 2] as i8 as f32 * q2 * x[x_off + l + 32];
+                acc += d * sc[sc_base + is + 4] as i8 as f32 * q3 * x[x_off + l + 64];
+                acc += d * sc[sc_base + is + 6] as i8 as f32 * q4 * x[x_off + l + 96];
             }
             x_off += 128;
             ql_off += 64;
             qh_off += 32;
-            ib += 4;
+            sc_base += 8;
         }
     }
     acc
@@ -708,6 +735,34 @@ pub fn dot_q6_k_row_f32(row_data: &[u8], x: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Q6_K must map weight i to scale i/16 (16 scales per 256-weight super-block),
+    // matching ggml dequantize_row_q6_K. Build a block where every 6-bit quant
+    // decodes to +1 (raw 33 = low-nibble 1 | (hi-bits 2 << 4)) and scales = 0..16,
+    // so output[i] = d·scale[i/16]·1. With x = 1 and d = 1 the dot is
+    // Σ_i scale[i/16] = 16·(0+1+…+15) = 1920. The old (wrong) per-32-group indexing
+    // only used scales 0..8 and would give 896.
+    #[test]
+    fn q6_k_scale_indexing_matches_ggml() {
+        let mut block = vec![0u8; Q6_K_BLOCK_BYTES];
+        for b in block.iter_mut().take(128) {
+            *b = 0x11; // every low nibble = 1
+        }
+        for b in block.iter_mut().take(192).skip(128) {
+            *b = 0xAA; // every 2-bit hi field = 0b10 = 2
+        }
+        for j in 0..16 {
+            block[192 + j] = j as i8 as u8; // scales 0..15
+        }
+        block[208..210].copy_from_slice(&half::f16::from_f32(1.0).to_le_bytes());
+
+        let x = vec![1.0f32; QK_K];
+        let got = dot_q6_k_row_f32(&block, &x);
+        assert!(
+            (got - 1920.0).abs() < 1e-3,
+            "Q6_K scale indexing wrong: got {got}, expected 1920 (old buggy code gives 896)"
+        );
+    }
 
     // Deterministic pseudo-random f32 in roughly [-1, 1] (no rand dependency).
     fn seq(n: usize) -> Vec<f32> {
@@ -720,6 +775,102 @@ mod tests {
                 ((s >> 40) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0
             })
             .collect()
+    }
+
+    // Helper: quantize an f32 row into packed Q8_0 weight blocks.
+    fn q8_0_weight_row(w: &[f32]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(w.len() / QK * Q8_0_BLOCK_BYTES);
+        for chunk in w.chunks_exact(QK) {
+            out.extend_from_slice(&quantize_q8_0_block(chunk));
+        }
+        out
+    }
+
+    // The Q8_0 SDOT path quantizes activations to int8. With a per-block scale it
+    // must stay close to the exact f32 path even when the activation row contains
+    // an outlier channel — a per-row scale (the old behavior) diverges wildly here
+    // and produced garbage LLM output. We assert both: blockwise is accurate, and
+    // a single per-row scale is demonstrably bad on the same data.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn sdot_q8_0_row_blockwise_survives_activation_outlier() {
+        if !std::arch::is_aarch64_feature_detected!("dotprod") {
+            eprintln!("dotprod not available — skipping SDOT row test");
+            return;
+        }
+        let k = 256;
+        let wf = seq(k);
+        let mut xf = seq(k);
+        xf[100] = 60.0; // outlier channel, ~60× the rest
+
+        let w_blocks = q8_0_weight_row(&wf);
+        // Exact reference: Q8_0 weights dequantized, dotted with f32 activations.
+        let reference = dot_q8_0_row_f32(&w_blocks, &xf);
+
+        // Fixed path: per-block activation scales.
+        let (x_i8, x_scales) = quantize_row_to_i8_blocks(&xf);
+        let blockwise = unsafe { dot_q8_0_row_sdot(&w_blocks, &x_i8, &x_scales) };
+        let rel = (blockwise - reference).abs() / reference.abs().max(1e-3);
+        assert!(
+            rel < 0.05,
+            "blockwise SDOT rel err {rel} too high (got {blockwise}, ref {reference})"
+        );
+
+        // Old path: a single per-row scale set by the outlier collapses the rest.
+        let max_abs = xf.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let row_scale = max_abs / 127.0;
+        let inv = 1.0 / row_scale;
+        let x_row_i8: Vec<i8> = xf
+            .iter()
+            .map(|v| (v * inv).round().clamp(-127.0, 127.0) as i8)
+            .collect();
+        let per_row_scales = vec![row_scale; k / QK];
+        let perrow = unsafe { dot_q8_0_row_sdot(&w_blocks, &x_row_i8, &per_row_scales) };
+        let perrow_rel = (perrow - reference).abs() / reference.abs().max(1e-3);
+        assert!(
+            perrow_rel > rel * 2.0,
+            "per-row scale should be clearly worse than blockwise (per-row rel \
+             {perrow_rel}, blockwise rel {rel})"
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn sdot_q8_0_block_matches_scalar_integer_dot() {
+        if !std::arch::is_aarch64_feature_detected!("dotprod") {
+            eprintln!("dotprod not available — skipping SDOT test");
+            return;
+        }
+        // Build a Q8_0 block (2-byte f16 scale + 32 i8 weights) and an i8 activation
+        // slice from deterministic pseudo-random data, then compare the integer dot
+        // produced by the `sdot` inline-asm kernel against a plain scalar reference.
+        let wf = seq(QK);
+        let xf = seq(QK);
+        let w_i8: Vec<i8> = wf
+            .iter()
+            .map(|v| (v * 100.0).round().clamp(-127.0, 127.0) as i8)
+            .collect();
+        let x_i8: Vec<i8> = xf
+            .iter()
+            .map(|v| (v * 100.0).round().clamp(-127.0, 127.0) as i8)
+            .collect();
+
+        let mut block = vec![0u8; Q8_0_BLOCK_BYTES];
+        block[0..2].copy_from_slice(&half::f16::from_f32(1.0).to_le_bytes());
+        for (i, &w) in w_i8.iter().enumerate() {
+            block[2 + i] = w as u8;
+        }
+
+        let reference: i32 = w_i8
+            .iter()
+            .zip(&x_i8)
+            .map(|(&w, &x)| w as i32 * x as i32)
+            .sum();
+        let got = unsafe { dot_q8_0_block_sdot(&block, &x_i8) };
+        assert_eq!(
+            got, reference,
+            "SDOT integer dot must match scalar reference"
+        );
     }
 
     #[test]

@@ -2,8 +2,7 @@
   <h1>⚡ SAPIENT</h1>
   <p><strong>A fast, pure-Rust edge inference engine for small language models — one command to install, one line to run</strong></p>
   <p>
-    <a href="https://crates.io/crates/sapient-generate"><img src="https://img.shields.io/crates/v/sapient-generate.svg" alt="Crates.io"/></a>
-    <a href="https://docs.rs/sapient-generate"><img src="https://docs.rs/sapient-generate/badge.svg" alt="docs.rs"/></a>
+    <a href="https://github.com/SkidGod4444/sapient/releases"><img src="https://img.shields.io/github/v/release/SkidGod4444/sapient" alt="Release"/></a>
     <a href="https://github.com/SkidGod4444/sapient/actions"><img src="https://github.com/SkidGod4444/sapient/workflows/CI/badge.svg" alt="CI"/></a>
     <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License"/>
     <img src="https://img.shields.io/badge/rust-1.82%2B-orange" alt="MSRV"/>
@@ -63,8 +62,11 @@ Grab a pre-built binary for your platform from the [**latest release**](https://
 # See every model SAPIENT supports (the registry catalog)
 sapient models
 
-# Interactive chat — streaming replies, modern UI
+# Interactive chat — streaming replies, modern UI, paste-safe line editing
+# Replies render as formatted Markdown live (headings, lists, **bold**, syntax-
+# highlighted code blocks). Use --raw for plain text; auto-disabled when piped.
 sapient chat openhorizon/phi-2
+sapient chat openhorizon/phi-2 --raw                    # plain Markdown text
 sapient chat openhorizon/qwen2.5-0.5b --backend auto   # auto | cpu | metal
 
 # Speculative decoding (faster generation with a draft model)
@@ -204,7 +206,7 @@ to see this list (and which models you've already downloaded) at any time.
 | `openhorizon/smollm2-360m` | Llama | 360M | |
 | `openhorizon/smollm2-1.7b` | Llama | 1.7B | |
 | `openhorizon/tinyllama-1.1b` | Llama | 1.1B | |
-| `openhorizon/llama-3.2-1b` | Llama | 1B | Gated — run `sapient login` |
+| `openhorizon/llama-3.2-1b` | Llama | 1B | |
 | `openhorizon/llama-3.2-3b` | Llama | 3B | Gated — run `sapient login` |
 | `openhorizon/mistral-7b` | Mistral | 7B | Gated — run `sapient login` |
 

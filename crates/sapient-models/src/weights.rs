@@ -97,7 +97,12 @@ pub fn resolve_lm_head<'a>(
     weights
         .get("lm_head.weight")
         .or_else(|| weights.get(&format!("{prefix}lm_head.weight")))
-        .with_context(|| "missing lm_head.weight")
+        // Tied embeddings: GGUF metadata has no `tie_word_embeddings` flag, so a
+        // model that ties its output projection to the input embedding (SmolLM2,
+        // Llama-3.2-1B/3B, Qwen small) simply omits `output.weight`. When no
+        // explicit head exists, fall back to the embedding matrix.
+        .or_else(|| weights.get(embed_key))
+        .with_context(|| format!("missing lm_head.weight (and no '{embed_key}' to tie to)"))
 }
 
 pub fn tie_word_embeddings_from_config(raw: &serde_json::Value) -> bool {

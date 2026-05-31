@@ -78,15 +78,14 @@ pub fn print_chat_help() {
     println!();
 }
 
-pub fn write_user_prompt() -> io::Result<()> {
-    // Modern "chip" badge for the role, then an inline prompt arrow.
-    write!(
-        io::stdout(),
+/// The styled "you" input prompt as a string (leading newline + badge + arrow).
+/// Used as the prompt for the line editor so bracketed-paste / cursor math line up.
+pub fn user_prompt_str() -> String {
+    format!(
         "\n{} {} ",
         style(" you ").black().on_green().bold(),
         style(ARROW).green().dim()
-    )?;
-    io::stdout().flush()
+    )
 }
 
 pub fn write_assistant_prompt() -> io::Result<()> {

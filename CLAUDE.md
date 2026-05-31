@@ -26,8 +26,9 @@ cargo build --release -p sapient-cli --features mlx
 # Then colocate the shader library so MLX can find it at runtime:
 cp $(find target/release -name 'mlx.metallib' | head -1) target/release/
 
-# Publish to crates.io (rate-limit-aware, resumes if interrupted)
-bash scripts/publish-all.sh
+# NOTE: SAPIENT is NOT published to crates.io. Releases are GitHub binaries only
+# (push a vX.Y.Z tag → .github/workflows/release.yml builds per-platform binaries).
+# The previously-published crates have been yanked; `scripts/yank-all.sh` manages that.
 
 # Opt into native-CPU LLVM auto-vectorisation locally (do NOT commit this)
 RUSTFLAGS="-C target-cpu=native" cargo build --release
@@ -77,6 +78,21 @@ Architecture builder files in `sapient-models/src/architectures/` (gemma, gpt2, 
 ### GGUF loading (Phase 4: mmap)
 Three loading paths in `sapient-io/src/gguf.rs`: `parse_metadata_only` (header KV only, zero tensor alloc), `load_tensors_with_metadata` (heap CpuBuffer), `load_tensors_mmap` (OS-managed paging via `MmapBuffer` — Q4_0/Q8_0 zero-copy, K-quants dequantized from mmap bytes). GGUF dims are ggml column-major `[in, out]`; `map_gguf_tensors_to_hf` flips to HF `[out, in]`. The pipeline auto-detects mmap when file > 80% of available RAM (`available_ram_bytes()` reads `/proc/meminfo` on Linux, `sysctl` on macOS). `--mmap` flag forces it; `Pipeline::is_mmap()` reports which path was taken.
 
+### GGUF q/k RoPE permutation (critical for llama-arch GGUF)
+llama.cpp's HF→GGUF converter **permutes the rows of `attn_q`/`attn_k`** for the `llama` architecture (Llama, Mistral, SmolLM, TinyLlama, …) because ggml uses NORM-style RoPE while HF/SAPIENT use NEOX-style (`rotate_half`). Loading those weights as-is makes RoPE scramble positions across each head → **incoherent token-salad output** (correct config, correct shapes, finite activations — just wrong). `gguf_weights::unpermute_llama_gguf_qk` (called from `ForwardEngine::from_gguf_weights` **only** for `ArchType::Llama`) inverts the permutation: HF row `h·D + a·(D/2) + b` ← GGUF row `h·D + b·2 + a`. It runs on any dtype (each output row is a contiguous `byte_count(in)` chunk). **Qwen2/Gemma GGUFs use NEOX RoPE — NOT permuted by the converter, so they must NOT be un-permuted** (the gate excludes them). Safetensors models are already HF layout. Regression test: `unpermute_qk_inverts_llama_cpp_permutation` in `gguf_weights.rs`.
+
+### Tied-embedding GGUF models
+GGUF metadata has no `tie_word_embeddings` flag, so models that tie the output projection to the input embedding (SmolLM2, Llama-3.2-1B/3B, small Qwen) simply omit `output.weight`. `resolve_lm_head` (in `weights.rs`) falls back to the embedding matrix when no explicit `lm_head`/`output` weight exists — otherwise those models fail to load with "missing lm_head.weight".
+
+### KV-cache context window cap (OOM guard)
+The KV cache is pre-allocated for `max_seq` positions up front. Modern models advertise huge contexts (Llama-3.1/DeepSeek-R1 = 131072) → ~9 GB of Q8_0 cache for an 8B model, OOM-killing a 16 GB device at **load** time. `common::kv_cache_ctx(model_max)` caps the allocation to `DEFAULT_KV_CACHE_CTX` (8192), overridable via the `SAPIENT_CTX` env var; longer conversations slide the window. Both `LlamaForward` and `PhiForward` cap `LayerCache.seq_len` to the allocated window so the sliding-window `update_kv_cache` never indexes past the cache.
+
+### GGUF quant-file selection & tokenizer fallback
+`sapient-hub/src/gguf.rs::gguf_preference_score` ranks GGUF files; **Q4_K_M is preferred over Q8_0** (edge sweet spot — ~40% smaller, near-lossless, uses the Q4_K matmul kernel; the old code picked Q8_0 and shipped an 8.5 GB file where a 4.9 GB one fits a 16 GB Pi). `tokenizer_fallback_model` resolves a HF tokenizer repo for GGUF-only models: it must point at **ungated** repos — `meta-llama/*` returns 401 without a token, so Llama-3/DeepSeek fall back to `unsloth/Meta-Llama-3.1-8B-Instruct` and `deepseek-ai/DeepSeek-R1-Distill-Llama-8B`.
+
+### Q6_K dequantization scale indexing (critical)
+Q6_K stores **16 int8 scales per 256-weight super-block** (one per 16-element group) + one fp16 super-scale. Dequant must map weight `i` to scale `i/16`: within each 128-element half the four sub-groups (offsets 0/32/64/96) use scale offsets **+0/+2/+4/+6** with a further split at `l==16` (`is = l/16`), and the scale base advances by **8** per 128-block (matching ggml `dequantize_row_q6_K`). The original code used one scale per 32-group (`sc[ib..ib+4]`, `ib += 4`) — it only ever touched scales 0–7 and decoded Q6_K **wrong**, corrupting any Q6_K tensor. This is fixed in **three** places that must stay in sync: `sapient-core` `Tensor::to_f32_vec` (embedding lookup / `to_f32_cow`), `sapient-backends-cpu` `dot_q6_k_row_f32` (matmul), and `sapient-io` `dequantize_q6_k`. Regression test: `q6_k_scale_indexing_matches_ggml` in `kernels/quant.rs`. This bug was why Q4_K_M models that use Q6_K for the output/embedding (Llama-3.x, DeepSeek-R1-Distill-Llama, Mistral Q4_K_M) emitted token-salad — especially catastrophic for **tied-embedding** models (Llama-3.2-1B/3B) where the Q6_K embedding is the model input. qwen models were unaffected (their embeddings are Q4_K; Q6_K appears only in v_proj, where the error was tolerable).
+
 ### Model registry (curated, not open)
 `sapient-hub/src/registry.rs` contains a hardcoded `CATALOG` of `SupportedModel` entries. Every model resolves through `resolve_model_alias` — unrecognised names error with the catalog list. Fuzzy matching (prefix + Levenshtein) handles near-miss typos. Add a model by: (1) verify its arch is supported in a forward engine, (2) add a `SupportedModel` row with `openhorizon/*` branding.
 
@@ -92,7 +108,7 @@ When `from_pretrained` downloads a GGUF-only repo (no `config.json`), the hub cl
 
 **Adaptive rayon chunking:** `gemv_chunk()` targets 4 tasks per core (not one task per output row). For a 151 936-row `lm_head` this avoids spawning 151 936 micro-tasks. `matmul_nt_q*` and `scaled_dot_product_attention` are parallelised with `rayon::par_iter_mut` / `par_chunks_mut` over the output dimension; `LlamaForward::forward_layer` uses `rayon::join` for parallel Q/K/V and gate/up projections.
 
-**SDOT Q8_0 (v0.3.x):** `dot_q8_0_block_sdot` uses `core::arch::asm!` inline assembly to emit the ARMv8.4A `sdot` instruction. Marked `#[target_feature(enable = "neon,dotprod")]` — the `dotprod` feature is required by the assembler even though the call site already gates on `is_aarch64_feature_detected!("dotprod")`. Net gain is ~3% because Q8_0 GEMV is memory-bandwidth-bound (not compute-bound) on M-series UMA.
+**SDOT Q8_0 (v0.3.x):** `dot_q8_0_block_sdot` uses `core::arch::asm!` inline assembly to emit the ARMv8.4A `sdot` instruction. Marked `#[target_feature(enable = "neon,dotprod")]` — the `dotprod` feature is required by the assembler even though the call site already gates on `is_aarch64_feature_detected!("dotprod")`. Net gain is ~3% because Q8_0 GEMV is memory-bandwidth-bound (not compute-bound) on M-series UMA. This is a W8A8 path (it quantizes the activation row to int8 too); activations are quantized **per 32-element block** (`quantize_row_to_i8_blocks`), matching the weight blocks. A single per-row activation scale (the old behavior) is set by outlier activation channels — common in LLMs — and collapses every normal-magnitude value to ~0, producing garbage; per-block scaling confines an outlier's damage to its own block (this is what llama.cpp does). Only Q8_0-*weight* models hit this path (online-quantized safetensors, or Q8_0 GGUFs); Q4_K GGUFs dequantize to F32 at load and never quantize activations. Tests: `sdot_q8_0_row_blockwise_survives_activation_outlier`, `matmul_nt_q8_0_matches_float`, `matmul_nt_q8_0_gguf_dimflip_matches_float`.
 
 **Do not** add `-C target-cpu=native` to `.cargo/config.toml` for the `aarch64-apple-darwin` target — it causes `ring`'s compile-time const assertions to fail on CI runners.
 
@@ -132,6 +148,16 @@ Helper functions (`linear_with_bias_bk`, `mlp_phi2_bk`, `mlp_phi3_bk`) take expl
 ### Metal SDPA head_dim compatibility
 `mlx_sdpa_supported_head_dim(head_dim)` returns true only for {32, 64, 96, 128, 256}. MLX pre-compiles Metal SDPA shaders for this fixed set; any other value (e.g. Phi-2's 80) panics at runtime. `LlmBackendDispatch::from_kind_with_head_dim()` checks this at init: Auto silently falls back to CPU; explicit `--backend metal` returns a user-readable error.
 
+### Chat input line editor (bracketed paste)
+The interactive `sapient chat` REPL reads input via `rustyline::DefaultEditor` (`read_chat_line` in `sapient-cli/src/main.rs`), **not** `stdin().read_line()`. Plain `read_line` returns the instant it sees a newline, so any pasted text containing or ending with `\n` was submitted before the user pressed Enter (the v0.3.x paste bug). rustyline enables bracketed-paste mode by default, so a paste is inserted into the edit buffer as literal text (newlines included) and only a real Enter submits. `read_chat_line` returns `Ok(None)` on EOF / Ctrl-C / Ctrl-D (caller breaks) and feeds non-empty lines to history. The prompt is passed to `readline()` as `ui::user_prompt_str()` (styled string, ANSI handled by rustyline's cursor math). Both `chat_command` and `chat_speculative_command` share this path; piped/non-TTY input still works via rustyline's line-by-line fallback.
+
+### Live Markdown rendering of replies (`markdown.rs`)
+`sapient-cli/src/markdown.rs` (`StreamRenderer`) renders the assistant's streamed Markdown **as it streams** — prose/headings/lists/tables/inline styling via `termimad`, fenced code blocks via `syntect` 24-bit syntax highlighting (dim `│` gutter per line). Both chat loops route every token through `renderer.push(&token)` instead of `print!`.
+
+**Commit-and-preview streaming.** Repainting the whole reply per token thrashes the screen and breaks once output scrolls past the viewport top (cursor can't move back up). Instead the renderer splits the reply into Markdown *blocks* (`complete_prefix_len`): **completed** blocks (separated by a blank line, or closed by a code fence) are rendered once and printed permanently; the **trailing incomplete** block is repainted in place each update via `\x1b[{n}A\r\x1b[0J` (move up over the preview, clear, reprint). `cursor_down_moves` computes the preview's row count *wrap-aware* (uses `console::measure_text_width`, which strips ANSI) so the cursor-up count is exact even when lines soft-wrap. A viewport guard commits the preview early if one in-progress block would exceed the screen height (rare, e.g. a huge unclosed code block). Repaints are throttled to ~30 fps unless a token contains `\n`.
+
+**Raw / non-TTY fallback.** Rich rendering is disabled — and tokens stream as plain text — when stdout is not a terminal, when `NO_COLOR` is set, or with the `sapient chat --raw` flag. This keeps `sapient chat | tee log.txt` clean. Unit tests in `markdown.rs` cover block-boundary detection, wrap-aware row counting, and that `render()` emits ANSI styling + the code gutter.
+
 ### Stop-sequence handling
 The streaming generator (`generate_stream`) buffers decoded text and withholds up to `max(stop_len)` bytes from the tail before emitting, preventing stop markers from leaking. Both EOS-by-token-id (multi-EOS, all candidates collected from the tokenizer vocab) and EOS-by-string are checked every step.
 
@@ -143,10 +169,9 @@ The streaming generator (`generate_stream`) buffers decoded text and withholds u
 
 ## Version and release
 
-- Version is set once in workspace `Cargo.toml` (`[workspace.package] version`); all crate `Cargo.toml` files inherit it via `.workspace = true`.
-- Internal workspace deps also carry `version = "x.y.z"` for crates.io publishing.
+- Version is set once in workspace `Cargo.toml` (`[workspace.package] version`); all crate `Cargo.toml` files inherit it via `.workspace = true`. Internal workspace deps still carry a matching `version = "x.y.z"` (kept in sync; required for path+version deps even though we don't publish).
 - Release is triggered by pushing a `vX.Y.Z` tag; the workflow in `.github/workflows/release.yml` builds all platform binaries including a `-metal` variant for Apple Silicon.
-- `scripts/publish-all.sh` publishes all 13 crates in dependency order, checking `static.crates.io` for the exact version before attempting each publish.
+- **SAPIENT is NOT published to crates.io.** Distribution is prebuilt GitHub release binaries (+ install script / Homebrew). The previously-published crates (0.1.11–0.3.1) have been yanked; `scripts/yank-all.sh` (idempotent, `--undo` to reverse) manages crates.io yanks. Do not re-introduce a publish step.
 
 
 ## Must follow

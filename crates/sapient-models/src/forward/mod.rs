@@ -128,9 +128,22 @@ impl ForwardEngine {
 
     fn from_gguf_weights(
         info: ModelInfo,
-        weights: std::collections::HashMap<String, sapient_core::Tensor>,
+        mut weights: std::collections::HashMap<String, sapient_core::Tensor>,
         backend: LlmBackendKind,
     ) -> Result<Self> {
+        // llama.cpp permutes q_proj/k_proj rows for ggml's NORM-style RoPE (the
+        // `llama` architecture: Llama, Mistral, SmolLM, TinyLlama). SAPIENT uses
+        // HF/NEOX-style RoPE, so we invert that permutation here — otherwise RoPE
+        // scrambles positions across heads and the model emits token-salad.
+        // Qwen2/Gemma GGUFs use NEOX RoPE (not permuted) and must be left as-is.
+        if matches!(info.arch, ArchType::Llama) {
+            crate::gguf_weights::unpermute_llama_gguf_qk(
+                &mut weights,
+                info.num_attention_heads,
+                info.num_key_value_heads,
+                info.head_dim,
+            )?;
+        }
         match info.arch {
             ArchType::Llama | ArchType::Qwen | ArchType::Gemma | ArchType::Mixtral => {
                 // Use the fully-native MLX engine when Metal is available and selected.

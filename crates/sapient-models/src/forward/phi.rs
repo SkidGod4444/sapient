@@ -188,7 +188,9 @@ impl PhiForward {
             "initialized Phi forward backend"
         );
 
-        let max_seq = info.max_position_embeddings;
+        // Cap the pre-allocated cache window (see common::kv_cache_ctx) so large
+        // context models don't OOM at load time; longer chats slide the window.
+        let max_seq = super::common::kv_cache_ctx(info.max_position_embeddings);
         let n_kv = info.num_key_value_heads;
         let cache_shape = vec![1, n_kv, max_seq, head_dim];
         let use_q8_cache = head_dim % 32 == 0;
@@ -416,8 +418,9 @@ impl PhiForward {
                 k = crate::forward::common::update_kv_cache(ck, current_seq, &k)?;
                 v = crate::forward::common::update_kv_cache(cv, current_seq, &v)?;
             }
-            self.cache[layer_idx].seq_len =
-                (current_seq + positions.len()).min(self.info.max_position_embeddings);
+            self.cache[layer_idx].seq_len = (current_seq + positions.len()).min(
+                super::common::kv_cache_ctx(self.info.max_position_embeddings),
+            );
         }
 
         // ── Phase 3: attention, output projection, FFN ────────────────────────────

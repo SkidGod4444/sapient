@@ -114,7 +114,7 @@ pub const CATALOG: &[SupportedModel] = &[
     // ── Llama 3.2 (Llama forward engine — Meta ungated these in late 2024) ──────
     SupportedModel {
         alias: "openhorizon/llama-3.2-1b",
-        repo_id: "meta-llama/Llama-3.2-1B-Instruct",
+        repo_id: "unsloth/Llama-3.2-1B-Instruct",
         family: "Llama",
         params: "1B",
         gated: false,

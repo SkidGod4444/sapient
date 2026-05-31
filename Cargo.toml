@@ -18,7 +18,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version       = "0.3.5"
+version       = "0.3.6"
 edition       = "2021"
 authors       = ["SAPIENT Contributors"]
 license       = "GPL-3.0-only"
@@ -34,19 +34,19 @@ rust-version  = "1.82"
 [workspace.dependencies]
 # Internal crates — version is required so they can be published to crates.io
 # (cargo uses the version for the registry dep and the path for local builds).
-sapient-core         = { path = "crates/sapient-core", version = "0.3.5" }
-sapient-ir           = { path = "crates/sapient-ir", version = "0.3.5" }
-sapient-backends-cpu = { path = "crates/sapient-backends/cpu", version = "0.3.5" }
-sapient-backends-metal = { path = "crates/sapient-backends/metal", version = "0.3.5" }
-sapient-backends-wgpu = { path = "crates/sapient-backends/wgpu", version = "0.3.5" }
-sapient-scheduler    = { path = "crates/sapient-scheduler", version = "0.3.5" }
-sapient-io           = { path = "crates/sapient-io", version = "0.3.5" }
-sapient-telemetry    = { path = "crates/sapient-telemetry", version = "0.3.5" }
-sapient-runtime      = { path = "crates/sapient-runtime", version = "0.3.5" }
-sapient-hub          = { path = "crates/sapient-hub", version = "0.3.5" }
-sapient-tokenizers   = { path = "crates/sapient-tokenizers", version = "0.3.5" }
-sapient-models       = { path = "crates/sapient-models", version = "0.3.5" }
-sapient-generate     = { path = "crates/sapient-generate", version = "0.3.5" }
+sapient-core         = { path = "crates/sapient-core", version = "0.3.6" }
+sapient-ir           = { path = "crates/sapient-ir", version = "0.3.6" }
+sapient-backends-cpu = { path = "crates/sapient-backends/cpu", version = "0.3.6" }
+sapient-backends-metal = { path = "crates/sapient-backends/metal", version = "0.3.6" }
+sapient-backends-wgpu = { path = "crates/sapient-backends/wgpu", version = "0.3.6" }
+sapient-scheduler    = { path = "crates/sapient-scheduler", version = "0.3.6" }
+sapient-io           = { path = "crates/sapient-io", version = "0.3.6" }
+sapient-telemetry    = { path = "crates/sapient-telemetry", version = "0.3.6" }
+sapient-runtime      = { path = "crates/sapient-runtime", version = "0.3.6" }
+sapient-hub          = { path = "crates/sapient-hub", version = "0.3.6" }
+sapient-tokenizers   = { path = "crates/sapient-tokenizers", version = "0.3.6" }
+sapient-models       = { path = "crates/sapient-models", version = "0.3.6" }
+sapient-generate     = { path = "crates/sapient-generate", version = "0.3.6" }
 
 # Core utilities
 thiserror      = "1.0"
@@ -90,6 +90,9 @@ minijinja  = "2.0"
 reqwest   = { version = "0.12", features = ["json", "stream", "native-tls"], default-features = false }
 indicatif = "0.17"
 console   = "0.15"
+rustyline = "14"
+termimad  = "0.31"
+syntect   = { version = "5.2", default-features = false, features = ["default-fancy"] }
 sha2      = "0.10"
 dirs      = "5.0"
 

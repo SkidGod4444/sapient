@@ -459,7 +459,9 @@ fn matmul_nt_q8_0(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
     if std::arch::is_aarch64_feature_detected!("dotprod") {
         for i in 0..m {
             let x_row = &x_data[i * k..(i + 1) * k];
-            let (x_i8, x_scale) = quant::quantize_row_to_i8(x_row);
+            // Per-block activation scales — a single per-row scale is destroyed by
+            // outlier activation channels and yields incoherent output.
+            let (x_i8, x_scales) = quant::quantize_row_to_i8_blocks(x_row);
             let chunk = gemv_chunk(n);
             // SAFETY: dot_q8_0_row_sdot requires neon (always true on aarch64)
             // and emits `sdot` (detected above via is_aarch64_feature_detected).
@@ -473,7 +475,7 @@ fn matmul_nt_q8_0(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
                             quant::dot_q8_0_row_sdot(
                                 &w_blocks[j * row_bytes..(j + 1) * row_bytes],
                                 &x_i8,
-                                x_scale,
+                                &x_scales,
                             )
                         };
                     }
@@ -707,6 +709,91 @@ mod tests {
             // dequantizes). Both paths start from the same blocks, so values match exactly.
             // Both paths use the same Q4_0 blocks; differences are accumulation order only.
             assert!((r - q).abs() < 5e-3, "row {i}: ref={r} quant={q}");
+        }
+    }
+
+    #[test]
+    fn matmul_nt_q8_0_matches_float() {
+        // Larger k so several 32-blocks per row exercise the SDOT/NEON path, and
+        // an activation outlier to stress per-block activation quantization.
+        let n_out = 8;
+        let k = 256;
+        let w_f32: Vec<f32> = (0..n_out * k)
+            .map(|i| ((i * 7 % 31) as f32 - 15.0) * 0.03)
+            .collect();
+        let mut x_f32: Vec<f32> = (0..k).map(|i| (i as f32 * 0.013).sin() * 0.4).collect();
+        x_f32[100] = 25.0; // outlier channel
+
+        // Quantize weights to Q8_0 blocks.
+        let w_blocks: Vec<u8> = w_f32
+            .chunks_exact(k)
+            .flat_map(|row| {
+                row.chunks_exact(32)
+                    .flat_map(super::quant::quantize_q8_0_block)
+                    .collect::<Vec<u8>>()
+            })
+            .collect();
+        let w_q = Tensor::from_quant_bytes(&w_blocks, vec![n_out, k], DType::Q8_0).unwrap();
+        let x_t = Tensor::from_f32(&x_f32, vec![1, k]).unwrap();
+
+        // Reference: dequantize the SAME Q8_0 weights to f32, then exact f32 matmul.
+        // (Comparing against the original f32 weights would conflate weight-quant
+        // error with the matmul; we only want to test the matmul path here.)
+        let w_deq = w_q.to_f32_cow().as_ref().to_vec();
+        let w_ref = Tensor::from_f32(&w_deq, vec![n_out, k]).unwrap();
+        let ref_data = matmul_nt(&x_t, &w_ref).unwrap().as_f32_slice().to_vec();
+
+        let quant_data = matmul_nt(&x_t, &w_q).unwrap().as_f32_slice().to_vec();
+        assert_eq!(ref_data.len(), quant_data.len());
+        for (i, (r, q)) in ref_data.iter().zip(&quant_data).enumerate() {
+            let tol = 0.02 * r.abs().max(1.0);
+            assert!((r - q).abs() < tol, "row {i}: ref={r} quant={q}");
+        }
+    }
+
+    // Replicates the GGUF load path for Q8_0 weights: the tensor is built with the
+    // ggml dim order [in, out] and then reshaped to HF [out, in] (exactly what
+    // map_gguf_tensors_to_hf does). This is the path real Q8_0 models take.
+    #[test]
+    fn matmul_nt_q8_0_gguf_dimflip_matches_float() {
+        let out_features = 64;
+        let in_features = 128;
+        // True weight W [out, in]; y[o] = Σ_i W[o,i] x[i].
+        let w_f32: Vec<f32> = (0..out_features * in_features)
+            .map(|i| ((i * 13 % 29) as f32 - 14.0) * 0.02)
+            .collect();
+        let x_f32: Vec<f32> = (0..in_features)
+            .map(|i| (i as f32 * 0.02).cos() * 0.5)
+            .collect();
+        let x_t = Tensor::from_f32(&x_f32, vec![1, in_features]).unwrap();
+
+        // ggml stores ne[0]=in contiguous, so its flat byte order == row-major
+        // [out, in] == w_f32. Quantize that flat array block-by-block.
+        let blocks: Vec<u8> = w_f32
+            .chunks_exact(32)
+            .flat_map(super::quant::quantize_q8_0_block)
+            .collect();
+        // Build with ggml dims [in, out], then flip to HF [out, in] like the loader.
+        let w_gguf =
+            Tensor::from_quant_bytes(&blocks, vec![in_features, out_features], DType::Q8_0)
+                .unwrap()
+                .reshape(vec![out_features, in_features])
+                .unwrap();
+
+        // Reference: dequantize those same blocks (the float path Q4_K models take).
+        let w_ref = Tensor::from_f32(
+            w_gguf.to_f32_cow().as_ref(),
+            vec![out_features, in_features],
+        )
+        .unwrap();
+        let ref_data = matmul_nt(&x_t, &w_ref).unwrap().as_f32_slice().to_vec();
+        let got = matmul_nt(&x_t, &w_gguf).unwrap().as_f32_slice().to_vec();
+
+        for (i, (r, q)) in ref_data.iter().zip(&got).enumerate() {
+            assert!(
+                (r - q).abs() < 0.02 * r.abs().max(1.0),
+                "out {i}: ref={r} quant={q}"
+            );
         }
     }
 

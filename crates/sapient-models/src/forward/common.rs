@@ -9,6 +9,30 @@ fn map_err<T>(result: std::result::Result<T, SapientError>) -> Result<T> {
     result.map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+// ── KV-cache context window ──────────────────────────────────────────────────
+
+/// Default cap on the KV-cache context window allocated at load time.
+///
+/// The KV cache is pre-allocated for `max_seq` positions up front. Modern models
+/// advertise enormous context windows (Llama-3.1 / DeepSeek-R1 = 131072), and at
+/// 8 KV heads × 128 head_dim × 32 layers that is ~9 GB of Q8_0 cache for an 8B
+/// model — enough to OOM-kill a 16 GB device during *load*, before a single token
+/// is generated. We cap the allocation to a sane chat window; longer
+/// conversations slide the window (see [`update_kv_cache`]).
+pub const DEFAULT_KV_CACHE_CTX: usize = 8192;
+
+/// Resolve the KV-cache context window: `min(model_max, cap)`, where `cap`
+/// defaults to [`DEFAULT_KV_CACHE_CTX`] and can be overridden (up to the model
+/// maximum) via the `SAPIENT_CTX` environment variable.
+pub fn kv_cache_ctx(model_max: usize) -> usize {
+    let cap = std::env::var("SAPIENT_CTX")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_KV_CACHE_CTX);
+    model_max.min(cap).max(1)
+}
+
 // ── Online F16 → Q8_0 quantization at load time ──────────────────────────────
 
 /// Returns true if a weight tensor should be quantized online to Q8_0.

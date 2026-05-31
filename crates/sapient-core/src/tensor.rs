@@ -463,9 +463,14 @@ impl Tensor {
                     let d = half::f16::from_le_bytes([block[208], block[209]]).to_f32();
                     let mut ql_off = 0usize;
                     let mut qh_off = 0usize;
-                    let mut ib = 0usize;
+                    // 16 i8 scales per super-block; within each 128-element half the
+                    // 4 sub-groups use scale offsets +0/+2/+4/+6 with a split at
+                    // l==16 (`is = l/16`), base advancing by 8 per 128-block. Matches
+                    // ggml dequantize_row_q6_K.
+                    let mut sc_base = 0usize;
                     for _ in 0..(K_QUANT_BLOCK_SIZE / 128) {
                         for l in 0..32usize {
+                            let is = l / 16;
                             let q1 = (((ql[ql_off + l] & 0x0F) | ((qh[qh_off + l] & 3) << 4))
                                 as i32
                                 - 32) as f32;
@@ -480,15 +485,15 @@ impl Tensor {
                                 | (((qh[qh_off + l] >> 6) & 3) << 4))
                                 as i32
                                 - 32) as f32;
-                            out[out_idx + l] = d * sc[ib] as i8 as f32 * q1;
-                            out[out_idx + l + 32] = d * sc[ib + 1] as i8 as f32 * q2;
-                            out[out_idx + l + 64] = d * sc[ib + 2] as i8 as f32 * q3;
-                            out[out_idx + l + 96] = d * sc[ib + 3] as i8 as f32 * q4;
+                            out[out_idx + l] = d * sc[sc_base + is] as i8 as f32 * q1;
+                            out[out_idx + l + 32] = d * sc[sc_base + is + 2] as i8 as f32 * q2;
+                            out[out_idx + l + 64] = d * sc[sc_base + is + 4] as i8 as f32 * q3;
+                            out[out_idx + l + 96] = d * sc[sc_base + is + 6] as i8 as f32 * q4;
                         }
                         out_idx += 128;
                         ql_off += 64;
                         qh_off += 32;
-                        ib += 4;
+                        sc_base += 8;
                     }
                 }
                 out
