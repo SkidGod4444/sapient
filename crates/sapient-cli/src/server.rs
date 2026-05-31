@@ -107,6 +107,23 @@ impl ServedModel {
             ServedModel::Speculative(p) => p.is_mmap(),
         }
     }
+
+    /// Token count of `text` per the model's tokenizer (for OpenAI `usage`).
+    fn count_tokens(&self, text: &str) -> usize {
+        let encoded = match self {
+            ServedModel::Plain(p) => p.tokenizer().encode(text),
+            ServedModel::Speculative(p) => p.tokenizer().encode(text),
+        };
+        encoded.map(|t| t.len()).unwrap_or(0)
+    }
+
+    /// Render the chat prompt string (used to count prompt tokens for `usage`).
+    fn format_chat_prompt(&self, messages: &[ChatMessage]) -> anyhow::Result<String> {
+        match self {
+            ServedModel::Plain(p) => p.format_chat_prompt(messages),
+            ServedModel::Speculative(p) => p.format_chat_prompt(messages),
+        }
+    }
 }
 
 // ── Multi-model LRU cache ─────────────────────────────────────────────────────
@@ -375,6 +392,9 @@ struct ChatCompletionChunk {
     created: u64,
     model: String,
     choices: Vec<DeltaChoice>,
+    /// Token usage — OpenAI sends this only on the final chunk of a stream.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<Usage>,
 }
 
 #[derive(Serialize)]
@@ -409,7 +429,7 @@ struct CompletionChoice {
     finish_reason: &'static str,
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone, Copy)]
 struct Usage {
     prompt_tokens: usize,
     completion_tokens: usize,
@@ -582,6 +602,13 @@ async fn handle_chat_completions(
         .collect();
     let cfg = build_config(req.max_tokens, req.temperature, parse_stop(req.stop));
 
+    // Prompt tokens for `usage` — the rendered chat prompt is what the model sees.
+    let prompt_tokens = model
+        .payload
+        .format_chat_prompt(&messages)
+        .map(|p| model.payload.count_tokens(&p))
+        .unwrap_or(0);
+
     if req.stream {
         let id = gen_id();
         let created = now_secs();
@@ -601,6 +628,7 @@ async fn handle_chat_completions(
                 },
                 finish_reason: None,
             }],
+            usage: None,
         })
         .unwrap();
         let _ = tx.send(Ok(sse::Event::default().data(role_json))).await;
@@ -611,8 +639,10 @@ async fn handle_chat_completions(
             // other models' requests run concurrently and the cache stays free.
             // `permit` is held for the stream's lifetime, released on completion.
             let _permit = permit;
+            let mut full = String::new();
             let mut stream = model.payload.chat_stream_with_config(&messages, &cfg).await;
             while let Some(token) = stream.next().await {
+                full.push_str(&token);
                 let chunk_json = serde_json::to_string(&ChatCompletionChunk {
                     id: id.clone(),
                     object: "chat.completion.chunk",
@@ -626,6 +656,7 @@ async fn handle_chat_completions(
                         },
                         finish_reason: None,
                     }],
+                    usage: None,
                 })
                 .unwrap();
                 if tx2
@@ -636,6 +667,8 @@ async fn handle_chat_completions(
                     return;
                 }
             }
+            // Final chunk carries token usage (OpenAI convention).
+            let completion_tokens = model.payload.count_tokens(&full);
             let stop_json = serde_json::to_string(&ChatCompletionChunk {
                 id: id.clone(),
                 object: "chat.completion.chunk",
@@ -646,6 +679,11 @@ async fn handle_chat_completions(
                     delta: Delta::default(),
                     finish_reason: Some("stop"),
                 }],
+                usage: Some(Usage {
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens: prompt_tokens + completion_tokens,
+                }),
             })
             .unwrap();
             let _ = tx2.send(Ok(sse::Event::default().data(stop_json))).await;
@@ -655,22 +693,29 @@ async fn handle_chat_completions(
         Sse::new(ReceiverStream::new(rx)).into_response()
     } else {
         match model.payload.chat_with_config(&messages, &cfg).await {
-            Ok(reply) => Json(ChatCompletionResponse {
-                id: gen_id(),
-                object: "chat.completion",
-                created: now_secs(),
-                model: model_id,
-                choices: vec![ChatChoice {
-                    index: 0,
-                    message: OAIMessage {
-                        role: "assistant".into(),
-                        content: reply,
+            Ok(reply) => {
+                let completion_tokens = model.payload.count_tokens(&reply);
+                Json(ChatCompletionResponse {
+                    id: gen_id(),
+                    object: "chat.completion",
+                    created: now_secs(),
+                    model: model_id,
+                    choices: vec![ChatChoice {
+                        index: 0,
+                        message: OAIMessage {
+                            role: "assistant".into(),
+                            content: reply,
+                        },
+                        finish_reason: "stop",
+                    }],
+                    usage: Usage {
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens: prompt_tokens + completion_tokens,
                     },
-                    finish_reason: "stop",
-                }],
-                usage: Usage::default(),
-            })
-            .into_response(),
+                })
+                .into_response()
+            }
             Err(e) => server_err(e),
         }
     }
@@ -697,6 +742,7 @@ async fn handle_completions(
 
     let cfg = build_config(req.max_tokens, req.temperature, parse_stop(req.stop));
     let prompt = req.prompt;
+    let prompt_tokens = model.payload.count_tokens(&prompt);
 
     if req.stream {
         let id = gen_id();
@@ -707,11 +753,13 @@ async fn handle_completions(
 
         tokio::task::spawn(async move {
             let _permit = permit;
+            let mut full = String::new();
             let mut stream = model
                 .payload
                 .generate_stream_with_config(&prompt, &cfg)
                 .await;
             while let Some(token) = stream.next().await {
+                full.push_str(&token);
                 let data = serde_json::to_string(&json!({
                     "id": id, "object": "text_completion", "created": created,
                     "model": model_clone,
@@ -726,25 +774,44 @@ async fn handle_completions(
                     return;
                 }
             }
+            // Final chunk carries token usage (OpenAI convention).
+            let completion_tokens = model.payload.count_tokens(&full);
+            let usage = json!({
+                "id": id, "object": "text_completion", "created": created,
+                "model": model_clone,
+                "choices": [{"text": "", "index": 0, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+                          "total_tokens": prompt_tokens + completion_tokens}
+            });
+            let _ = tx2
+                .send(Ok(sse::Event::default().data(usage.to_string())))
+                .await;
             let _ = tx2.send(Ok(sse::Event::default().data("[DONE]"))).await;
         });
 
         Sse::new(ReceiverStream::new(rx)).into_response()
     } else {
         match model.payload.generate_with_config(&prompt, &cfg).await {
-            Ok(text) => Json(CompletionResponse {
-                id: gen_id(),
-                object: "text_completion",
-                created: now_secs(),
-                model: model_id,
-                choices: vec![CompletionChoice {
-                    index: 0,
-                    text,
-                    finish_reason: "stop",
-                }],
-                usage: Usage::default(),
-            })
-            .into_response(),
+            Ok(text) => {
+                let completion_tokens = model.payload.count_tokens(&text);
+                Json(CompletionResponse {
+                    id: gen_id(),
+                    object: "text_completion",
+                    created: now_secs(),
+                    model: model_id,
+                    choices: vec![CompletionChoice {
+                        index: 0,
+                        text,
+                        finish_reason: "stop",
+                    }],
+                    usage: Usage {
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens: prompt_tokens + completion_tokens,
+                    },
+                })
+                .into_response()
+            }
             Err(e) => server_err(e),
         }
     }
