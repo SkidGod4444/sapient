@@ -82,12 +82,12 @@ memmap2 = "0.9"
 prost   = "0.12"
 
 # HuggingFace ecosystem
-hf-hub     = { version = "0.4.0", default-features = true, features = ["tokio", "native-tls"] }
+hf-hub     = { version = "0.4.0", default-features = false, features = ["tokio", "ureq", "rustls-tls"] }
 tokenizers = { version = "0.23", features = ["http"] }
 minijinja  = "2.0"
 
 # HTTP & Download
-reqwest   = { version = "0.12", features = ["json", "stream", "native-tls"], default-features = false }
+reqwest   = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
 indicatif = "0.17"
 console   = "0.15"
 rustyline = "14"
@@ -110,7 +110,7 @@ clap       = { version = "4.4", features = ["derive", "env"] }
 axum       = { version = "0.7", features = ["json"] }
 tower      = "0.4"
 tower-http = { version = "0.5", features = ["trace", "cors"] }
-ureq       = { version = "2.12", default-features = false, features = ["native-tls"] }
+ureq       = { version = "2.12", default-features = false, features = ["tls"] }
 flate2     = "1.0"
 tar        = "0.4"
 zip        = { version = "2.2", default-features = false, features = ["deflate"] }
