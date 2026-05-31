@@ -355,8 +355,8 @@ These are especially welcome:
 | **Model architectures** | `crates/sapient-models/src/forward/` | Llama, Phi — forward engines for live chat |
 | **CPU kernels** | `crates/sapient-backends-cpu/src/kernels/` | Attention (Flash-Edge), RoPE, matmul, quant dot-products |
 | **SIMD dispatch** | `kernels/quant.rs` | NEON (aarch64) + AVX2 (x86_64) + scalar fallback |
-| **Speculative decoding** | `crates/sapient-generate/src/speculative.rs` | Draft/target pipeline, `forward_all_logits` |
-| **HTTP server** | `crates/sapient-cli/src/server.rs` | OpenAI-compatible `/v1/chat/completions` |
+| **Speculative decoding** | `crates/sapient-generate/src/speculative.rs` | Draft/target pipeline, engine reuse, cache-aware verify (`forward_all_logits_cached` + `truncate_cache`) |
+| **HTTP server** | `crates/sapient-cli/src/server.rs` | OpenAI-compatible `/v1/chat/completions`; `ServedModel` (plain/speculative), LRU cache, `--speculative` |
 | **Metal / GPU backend** | `crates/sapient-backends-metal/` | Apple Silicon — WIP |
 | **Hub client** | `crates/sapient-hub/` | Downloads, caching, auth, registry |
 | **CLI UX** | `crates/sapient-cli/` | Commands, terminal UI |

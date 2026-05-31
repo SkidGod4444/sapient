@@ -31,8 +31,83 @@ use tokio_stream::wrappers::ReceiverStream;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
-use sapient_generate::{GenerationConfig, LoadOptions, Pipeline, SamplingStrategy};
+use sapient_generate::{
+    GenerationConfig, LoadOptions, Pipeline, SamplingStrategy, SpeculativePipeline,
+};
 use sapient_tokenizers::ChatMessage;
+
+// ── ServedModel ────────────────────────────────────────────────────────────────
+//
+// A resident model is either a plain `Pipeline` or a `SpeculativePipeline`
+// (target+draft). Both keep their forward engines loaded and reuse them across
+// requests, and both expose the same `*_with_config` inference surface — so the
+// cache, admission control, and route handlers treat them uniformly.
+
+enum ServedModel {
+    Plain(Box<Pipeline>),
+    Speculative(Box<SpeculativePipeline>),
+}
+
+impl ServedModel {
+    async fn chat_with_config(
+        &self,
+        messages: &[ChatMessage],
+        config: &GenerationConfig,
+    ) -> Result<String> {
+        match self {
+            ServedModel::Plain(p) => p.chat_with_config(messages, config).await,
+            ServedModel::Speculative(p) => p.chat_with_config(messages, config).await,
+        }
+    }
+
+    async fn chat_stream_with_config(
+        &self,
+        messages: &[ChatMessage],
+        config: &GenerationConfig,
+    ) -> ReceiverStream<String> {
+        match self {
+            ServedModel::Plain(p) => p.chat_stream_with_config(messages, config).await,
+            ServedModel::Speculative(p) => p.chat_stream_with_config(messages, config).await,
+        }
+    }
+
+    async fn generate_with_config(
+        &self,
+        prompt: &str,
+        config: &GenerationConfig,
+    ) -> Result<String> {
+        match self {
+            ServedModel::Plain(p) => p.generate_with_config(prompt, config).await,
+            ServedModel::Speculative(p) => p.generate_with_config(prompt, config).await,
+        }
+    }
+
+    async fn generate_stream_with_config(
+        &self,
+        prompt: &str,
+        config: &GenerationConfig,
+    ) -> ReceiverStream<String> {
+        match self {
+            ServedModel::Plain(p) => p.generate_stream_with_config(prompt, config).await,
+            ServedModel::Speculative(p) => p.generate_stream_with_config(prompt, config).await,
+        }
+    }
+
+    /// Architecture label for the startup banner.
+    fn arch_label(&self) -> String {
+        match self {
+            ServedModel::Plain(p) => format!("{:?}", p.arch()),
+            ServedModel::Speculative(p) => format!("{:?} +draft", p.arch()),
+        }
+    }
+
+    fn is_mmap(&self) -> bool {
+        match self {
+            ServedModel::Plain(p) => p.is_mmap(),
+            ServedModel::Speculative(p) => p.is_mmap(),
+        }
+    }
+}
 
 // ── Multi-model LRU cache ─────────────────────────────────────────────────────
 //
@@ -112,7 +187,7 @@ impl<P> ModelCache<P> {
 
 #[derive(Clone)]
 struct ServeState {
-    cache: Arc<Mutex<ModelCache<Pipeline>>>,
+    cache: Arc<Mutex<ModelCache<ServedModel>>>,
     /// Serializes model loads so two concurrent first-requests for the same model
     /// don't both download/load it, and loads don't thrash each other.
     load_lock: Arc<Mutex<()>>,
@@ -122,13 +197,18 @@ struct ServeState {
     inference_sem: Arc<tokio::sync::Semaphore>,
     backend: String,
     force_mmap: bool,
+    /// Serve every model with speculative decoding (target = requested model,
+    /// draft = `draft_model` or an auto-selected small model).
+    speculative: bool,
+    /// Explicit draft model for speculative decoding (else auto-selected).
+    draft_model: Option<String>,
 }
 
 impl ServeState {
     /// Return the resident model for `model_id`, loading (and LRU-evicting) it if
     /// needed. The cache lock is NOT held during the (slow) load or during
     /// inference, so cache hits and other models' requests aren't blocked.
-    async fn get_or_load(&self, model_id: &str) -> Result<Arc<CachedModel<Pipeline>>> {
+    async fn get_or_load(&self, model_id: &str) -> Result<Arc<CachedModel<ServedModel>>> {
         // Fast path: already resident.
         if let Some(m) = self.cache.lock().await.touch(model_id) {
             return Ok(m);
@@ -141,24 +221,46 @@ impl ServeState {
             return Ok(m);
         }
 
-        info!("loading model '{model_id}'…");
         let backend_kind = crate::parse_generation_backend(&self.backend)?;
         let opts = LoadOptions {
             backend: backend_kind,
             force_mmap: self.force_mmap,
             ..LoadOptions::default()
         };
-        let mut pipeline = Pipeline::from_pretrained_with_opts(model_id, opts)
-            .await
-            .with_context(|| format!("failed to load model '{model_id}'"))?;
-        // Reuse the KV cache across requests sharing a prompt prefix (multi-turn
-        // chat, shared system prompts) — skips re-prefilling the whole history.
-        pipeline.enable_prefix_cache();
 
-        let bytes = estimate_model_bytes(model_id);
+        let payload = if self.speculative {
+            info!("loading model '{model_id}' (speculative target)…");
+            let spec = match &self.draft_model {
+                Some(draft) => SpeculativePipeline::new_with_opts(model_id, draft, 5, opts).await,
+                None => SpeculativePipeline::with_auto_draft_with_opts(model_id, 5, opts).await,
+            }
+            .with_context(|| format!("failed to load speculative pipeline for '{model_id}'"))?;
+            ServedModel::Speculative(Box::new(spec))
+        } else {
+            info!("loading model '{model_id}'…");
+            let mut pipeline = Pipeline::from_pretrained_with_opts(model_id, opts)
+                .await
+                .with_context(|| format!("failed to load model '{model_id}'"))?;
+            // Reuse the KV cache across requests sharing a prompt prefix (multi-turn
+            // chat, shared system prompts) — skips re-prefilling the whole history.
+            pipeline.enable_prefix_cache();
+            ServedModel::Plain(Box::new(pipeline))
+        };
+
+        // Speculative residency also holds a draft model in memory; add a rough
+        // draft overhead so the byte budget isn't underestimated.
+        let bytes = estimate_model_bytes(model_id)
+            + if self.speculative {
+                self.draft_model
+                    .as_deref()
+                    .map(estimate_model_bytes)
+                    .unwrap_or(512 * 1024 * 1024)
+            } else {
+                0
+            };
         let entry = Arc::new(CachedModel {
             model_id: model_id.to_string(),
-            payload: pipeline,
+            payload,
             bytes,
         });
 
@@ -391,7 +493,7 @@ fn server_err(msg: impl std::fmt::Display) -> Response {
 /// 3. Return a 400 if neither is available.
 async fn resolve_model(
     requested: Option<&str>,
-    cache: &Mutex<ModelCache<Pipeline>>,
+    cache: &Mutex<ModelCache<ServedModel>>,
 ) -> std::result::Result<String, Response> {
     if let Some(m) = requested.filter(|s| !s.is_empty()) {
         return Ok(m.to_string());
@@ -650,6 +752,7 @@ async fn handle_completions(
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_llm(
     preload_model: Option<&str>,
     port: u16,
@@ -658,6 +761,8 @@ pub async fn serve_llm(
     max_models: usize,
     cache_gb: f64,
     max_concurrency: usize,
+    speculative: bool,
+    draft_model: Option<&str>,
 ) -> Result<()> {
     // Concurrency limit: explicit flag, else number of CPUs (capped) — inference
     // is compute-bound, so oversubscribing hurts. At least 1.
@@ -688,8 +793,14 @@ pub async fn serve_llm(
     );
 
     info!("inference concurrency limit: {concurrency}");
+    if speculative {
+        match draft_model {
+            Some(d) => info!("speculative decoding enabled (draft model: {d})"),
+            None => info!("speculative decoding enabled (auto-selected draft model)"),
+        }
+    }
     let state = ServeState {
-        cache: Arc::new(Mutex::new(ModelCache::<Pipeline>::new(
+        cache: Arc::new(Mutex::new(ModelCache::<ServedModel>::new(
             max_models,
             budget_bytes,
         ))),
@@ -697,13 +808,15 @@ pub async fn serve_llm(
         inference_sem: Arc::new(tokio::sync::Semaphore::new(concurrency)),
         backend: backend.to_string(),
         force_mmap: mmap,
+        speculative,
+        draft_model: draft_model.map(str::to_string),
     };
 
     if let Some(model_id) = preload_model {
         let spinner = crate::ui::spinner(format!("loading {model_id}…"));
         let entry = state.get_or_load(model_id).await?;
         spinner.finish_and_clear();
-        let arch = format!("{:?}", entry.payload.arch());
+        let arch = entry.payload.arch_label();
         let mmap_label = if entry.payload.is_mmap() {
             " · mmap"
         } else {

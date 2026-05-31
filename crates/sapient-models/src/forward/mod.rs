@@ -215,6 +215,20 @@ impl ForwardEngine {
         }
     }
 
+    /// Logits for ALL positions, **appending** `input_ids` to the KV cache
+    /// (positions continue from the current cache length). Speculative decoding
+    /// uses this to verify drafts with prompt context, then rolls back rejected
+    /// tokens via `truncate_cache`. MLX has no incremental cache rollback, so it
+    /// falls back to the non-cached path (correct only for single-shot use).
+    pub fn forward_all_logits_cached(&mut self, input_ids: &[u32]) -> Result<Vec<Vec<f32>>> {
+        match self {
+            Self::Llama(f) => f.forward_all_logits_cached(input_ids),
+            Self::Phi(f) => f.forward_all_logits_cached(input_ids),
+            #[cfg(all(target_os = "macos", feature = "mlx"))]
+            Self::MlxLlama(f) => f.forward_all_logits(input_ids),
+        }
+    }
+
     pub fn embed(&mut self, input_ids: &[u32]) -> Result<Vec<f32>> {
         match self {
             Self::Llama(f) => f.embed(input_ids),

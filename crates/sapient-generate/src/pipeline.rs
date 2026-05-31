@@ -841,6 +841,15 @@ impl Pipeline {
         &self.weight_paths
     }
 
+    /// An `Arc` clone of the already-loaded forward engine, for reuse inside a
+    /// `spawn_blocking` closure (e.g. `SpeculativePipeline`). Locking it inside
+    /// the blocking task reuses the loaded+quantized weights instead of rebuilding
+    /// the engine per request. Callers must hold the lock for an entire generation
+    /// (the KV cache is single-sequence) and serialize concurrent calls.
+    pub fn engine_arc(&self) -> Arc<Mutex<ForwardEngine>> {
+        Arc::clone(&self.engine)
+    }
+
     /// All EOS token IDs recognised by this pipeline.
     pub fn eos_token_ids_pub(&self) -> Vec<u32> {
         self.eos_token_ids()

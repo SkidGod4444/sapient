@@ -296,6 +296,15 @@ impl LlamaForward {
         self.backend.all_logits_from_hidden(&hidden, &self.lm_head)
     }
 
+    /// Returns logits for ALL positions while **appending** `input_ids` to the
+    /// KV cache (positions continue from the current cache length). Used by
+    /// speculative decoding to verify draft tokens *with* prompt context; the
+    /// caller rolls back rejected tokens via `truncate_cache`.
+    pub fn forward_all_logits_cached(&mut self, input_ids: &[u32]) -> Result<Vec<Vec<f32>>> {
+        let hidden = self.forward_hidden(input_ids, true)?;
+        self.backend.all_logits_from_hidden(&hidden, &self.lm_head)
+    }
+
     /// Mean-pooled hidden states for embedding models.
     pub fn embed(&mut self, input_ids: &[u32]) -> Result<Vec<f32>> {
         self.reset_cache();
