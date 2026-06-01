@@ -37,6 +37,8 @@
 
 mod context;
 mod matmul;
+mod resident;
 
 pub use context::{WgpuContext, WgpuError};
 pub use matmul::quantize_q8_0_rows;
+pub use resident::GpuBuffer;

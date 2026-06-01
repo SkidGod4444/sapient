@@ -3712,6 +3712,7 @@ dependencies = [
  "parking_lot",
  "rayon",
  "sapient-backends-cpu",
+ "sapient-backends-wgpu",
  "sapient-core",
  "sapient-hub",
  "sapient-io",
