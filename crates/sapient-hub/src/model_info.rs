@@ -313,7 +313,8 @@ impl ArchType {
     pub fn from_model_type(model_type: &str) -> Self {
         match model_type {
             "llama" | "mistral" => Self::Llama,
-            "phi" => Self::Phi,
+            // GGUF arch strings: "phi2" (Phi-1/1.5/2), "phi3" (Phi-3/3.5/4-mini).
+            "phi" | "phi2" | "phi3" => Self::Phi,
             "gemma" | "gemma2" => Self::Gemma,
             "gpt2" => Self::Gpt2,
             "bert" | "roberta" => Self::Bert,

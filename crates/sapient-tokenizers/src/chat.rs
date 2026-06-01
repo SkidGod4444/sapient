@@ -141,6 +141,15 @@ pub mod builtin {
         "{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}",
     );
 
+    /// Phi-3 / Phi-4 instruct format: `<|role|>\n{content}<|end|>\n` per turn,
+    /// then `<|assistant|>\n`. Turn terminator is `<|end|>`.
+    pub const PHI3: &str = concat!(
+        "{% for message in messages %}",
+        "<|{{ message['role'] }}|>\n{{ message['content'] }}<|end|>\n",
+        "{% endfor %}",
+        "{% if add_generation_prompt %}<|assistant|>\n{% endif %}",
+    );
+
     /// Llama 3 Instruct format.
     pub const LLAMA3: &str = concat!(
         "<|begin_of_text|>",

@@ -981,6 +981,23 @@ fn builtin_template_for(
             ChatTemplate::from_template(builtin::GEMMA),
             vec!["<end_of_turn>".to_string()],
         ),
+        // Phi-3/Phi-4 use the <|user|>…<|end|><|assistant|> format (GGUF arch
+        // "phi3"); Phi-1/1.5/2 are base/ChatML. The id may be the GGUF general.name
+        // ("Phi 4 Mini Instruct") so match spaces too.
+        ArchType::Phi
+            if mt == "phi3"
+                || id.contains("phi-3")
+                || id.contains("phi3")
+                || id.contains("phi 3")
+                || id.contains("phi-4")
+                || id.contains("phi4")
+                || id.contains("phi 4") =>
+        {
+            (
+                ChatTemplate::from_template(builtin::PHI3),
+                vec!["<|end|>".to_string()],
+            )
+        }
         ArchType::Phi | ArchType::Qwen => chatml(),
         _ => chatml(),
     }
