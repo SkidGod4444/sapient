@@ -97,6 +97,33 @@ impl WgpuContext {
         Ok(out)
     }
 
+    /// GPU→GPU copy of `len` f32 elements from `src[src_off..]` into `dst[dst_off..]`.
+    /// No shader / no readback — a pure encoder copy. This is the KV-cache append
+    /// primitive: write a freshly-computed K/V head slice into its slot in a
+    /// pre-allocated `[n_kv_heads, max_seq, head_dim]` cache without leaving the GPU.
+    pub fn copy_range(
+        &self,
+        dst: &GpuBuffer,
+        dst_off: usize,
+        src: &GpuBuffer,
+        src_off: usize,
+        len: usize,
+    ) {
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("copy_range"),
+            });
+        enc.copy_buffer_to_buffer(
+            &src.buf,
+            (src_off * 4) as u64,
+            &dst.buf,
+            (dst_off * 4) as u64,
+            (len * 4) as u64,
+        );
+        self.queue.submit(Some(enc.finish()));
+    }
+
     /// Small uniform buffer from a `#[repr(C)]` Pod struct (kernel params).
     pub(crate) fn uniform<T: bytemuck::Pod>(&self, value: &T, label: &str) -> wgpu::Buffer {
         self.device
@@ -201,7 +228,14 @@ impl WgpuContext {
 
     /// Resident linear projection `out[m,n] = x[m,k] @ w[n,k]^T` (w in HF `[n,k]`),
     /// GEMV-style cooperative reduction, f32 accumulation.
-    pub fn matmul_nt(&self, x: &GpuBuffer, w: &GpuBuffer, m: usize, k: usize, n: usize) -> GpuBuffer {
+    pub fn matmul_nt(
+        &self,
+        x: &GpuBuffer,
+        w: &GpuBuffer,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> GpuBuffer {
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         struct P {
@@ -272,8 +306,139 @@ impl WgpuContext {
         self.ewise(gate, up, 1)
     }
 
+    /// Apply RoPE in-place to `x` laid out as `[batch*n_heads*seq_len, head_dim]`
+    /// (rows ordered so `row % seq_len` is the sequence-position index — i.e. the
+    /// `[batch, n_heads, seq_len, head_dim]` tensor flattened). NEOX rotate_half
+    /// over the first `rotary_dim` channels (pass `head_dim` for full rotation);
+    /// matches the CPU `apply_rope_partial`. `positions[s]` is the absolute position
+    /// of sequence slot `s`. Mutates `x.buf` directly — no new allocation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rope(
+        &self,
+        x: &GpuBuffer,
+        positions: &[u32],
+        n_heads: usize,
+        seq_len: usize,
+        head_dim: usize,
+        rotary_dim: usize,
+        base: f32,
+    ) {
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct P {
+            rows: u32,
+            head_dim: u32,
+            rotary_dim: u32,
+            half: u32,
+            seq_len: u32,
+            base: f32,
+            _p0: u32,
+            _p1: u32,
+        }
+        let rows = x.len / head_dim; // = batch*n_heads*seq_len
+        debug_assert_eq!(
+            rows % seq_len,
+            0,
+            "rope: rows must be a multiple of seq_len"
+        );
+        debug_assert_eq!(rows / seq_len % n_heads, 0, "rope: row layout mismatch");
+        let half = rotary_dim / 2;
+        let pos_buf = self.upload_u32(positions, "rope.positions");
+        let params = self.uniform(
+            &P {
+                rows: rows as u32,
+                head_dim: head_dim as u32,
+                rotary_dim: rotary_dim as u32,
+                half: half as u32,
+                seq_len: seq_len as u32,
+                base,
+                _p0: 0,
+                _p1: 0,
+            },
+            "rope.params",
+        );
+        self.dispatch(
+            "rope",
+            include_str!("shaders/rope.wgsl"),
+            &[&x.buf, &pos_buf.buf],
+            &params,
+            ((rows * half) as u32).div_ceil(256),
+        );
+    }
+
+    /// Causal grouped-query flash attention. `q` is `[batch, n_heads, seq_q, head_dim]`,
+    /// `k`/`v` are `[batch, n_kv_heads, kv_stride, head_dim]` of which the first `seq_k`
+    /// positions are valid (cached prefix = `seq_k - seq_q`); `kv_stride` is the allocated
+    /// capacity per kv-head (pass `seq_k` for a tightly-packed buffer, or the cache's
+    /// `max_seq` for a pre-allocated KV cache). Returns `[batch, n_heads, seq_q, head_dim]`.
+    /// Online softmax, f32 accumulation; matches the CPU `scaled_dot_product_attention`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attention(
+        &self,
+        q: &GpuBuffer,
+        k: &GpuBuffer,
+        v: &GpuBuffer,
+        batch: usize,
+        n_heads: usize,
+        n_kv_heads: usize,
+        seq_q: usize,
+        seq_k: usize,
+        kv_stride: usize,
+        head_dim: usize,
+        scale: f32,
+    ) -> GpuBuffer {
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct P {
+            batch: u32,
+            n_heads: u32,
+            n_kv_heads: u32,
+            seq_q: u32,
+            seq_k: u32,
+            head_dim: u32,
+            kv_offset: u32,
+            jcount: u32,
+            kv_stride: u32,
+            scale: f32,
+            _p0: u32,
+            _p1: u32,
+        }
+        let out = self.alloc_f32(batch * n_heads * seq_q * head_dim, "attn.out");
+        let params = self.uniform(
+            &P {
+                batch: batch as u32,
+                n_heads: n_heads as u32,
+                n_kv_heads: n_kv_heads as u32,
+                seq_q: seq_q as u32,
+                seq_k: seq_k as u32,
+                head_dim: head_dim as u32,
+                kv_offset: (seq_k - seq_q) as u32,
+                jcount: (head_dim as u32).div_ceil(128),
+                kv_stride: kv_stride as u32,
+                scale,
+                _p0: 0,
+                _p1: 0,
+            },
+            "attn.params",
+        );
+        self.dispatch(
+            "attention",
+            include_str!("shaders/attention.wgsl"),
+            &[&q.buf, &k.buf, &v.buf, &out.buf],
+            &params,
+            (batch * n_heads * seq_q) as u32,
+        );
+        out
+    }
+
     /// Embedding gather: `out[t,:] = table[ids[t], :]`. Returns `[n_tokens, dim]`.
-    pub fn embed(&self, ids: &GpuBuffer, table: &GpuBuffer, n_tokens: usize, dim: usize) -> GpuBuffer {
+    pub fn embed(
+        &self,
+        ids: &GpuBuffer,
+        table: &GpuBuffer,
+        n_tokens: usize,
+        dim: usize,
+    ) -> GpuBuffer {
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         struct P {
