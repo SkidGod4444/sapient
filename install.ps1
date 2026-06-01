@@ -46,6 +46,33 @@ function Get-Platform {
     }
 }
 
+# ── Detect a usable GPU ─────────────────────────────────────────────────────────
+# Returns "-gpu" when this x86_64 box has a hardware graphics adapter (DX12 ships
+# with Windows 10+), otherwise "" (CPU build). Override with $env:SAPIENT_VARIANT.
+function Get-Variant {
+    param($Platform)
+    if ($Platform -ne "x86_64-pc-windows-msvc") { return "" }   # only x86_64 has a -gpu build
+
+    switch ($env:SAPIENT_VARIANT) {
+        "gpu" { return "-gpu" }
+        "cpu" { return "" }
+    }
+
+    try {
+        $gpus = Get-CimInstance Win32_VideoController -ErrorAction Stop |
+            Select-Object -ExpandProperty Name
+        $real = $gpus | Where-Object { $_ -and $_ -notmatch 'Basic Display|Remote Display' }
+        if ($real) {
+            Write-Step "GPU detected ($($real -join ', ')) — selecting the GPU build."
+            return "-gpu"
+        }
+        return ""
+    } catch {
+        # Couldn't query — DX12 is near-universal on supported Windows, so use the GPU build.
+        return "-gpu"
+    }
+}
+
 # ── Get latest release ────────────────────────────────────────────────────────
 function Get-LatestVersion {
     try {
@@ -66,9 +93,9 @@ function Get-LatestVersion {
 
 # ── Download ──────────────────────────────────────────────────────────────────
 function Download-Binary {
-    param($Platform, $Ver)
+    param($Platform, $Ver, $Variant = "")
 
-    $Filename = "sapient-$Platform.zip"
+    $Filename = "sapient-$Platform$Variant.zip"
     $Url = "https://github.com/$Repo/releases/download/$Ver/$Filename"
     $TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString())
     New-Item -ItemType Directory -Path $TmpDir | Out-Null
@@ -176,10 +203,12 @@ Write-Banner
 $Platform = Get-Platform
 Write-Step "Detected platform: $Platform"
 
+$Variant = Get-Variant -Platform $Platform
+
 $Ver = if ($Version) { $Version } else { Get-LatestVersion }
 Write-Step "Version: $Ver"
 
-$Binary = Download-Binary -Platform $Platform -Ver $Ver
+$Binary = Download-Binary -Platform $Platform -Ver $Ver -Variant $Variant
 Install-Binary -BinaryPath $Binary -Dir $InstallDir
 
 Write-PostInstall -Ver $Ver

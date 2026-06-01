@@ -285,10 +285,14 @@ enum Commands {
         force: bool,
 
         /// Install the Apple Silicon Metal (GPU) build.
-        #[arg(long, conflicts_with = "cpu")]
+        #[arg(long, conflicts_with_all = ["cpu", "gpu"])]
         metal: bool,
 
-        /// Install the CPU build (skip Metal even on Apple Silicon).
+        /// Install the cross-platform GPU build (wgpu: Vulkan/DX12 — Intel/AMD/Nvidia).
+        #[arg(long, conflicts_with = "cpu")]
+        gpu: bool,
+
+        /// Install the CPU build (skip any GPU build).
         #[arg(long)]
         cpu: bool,
     },
@@ -411,9 +415,16 @@ async fn dispatch(cli: Cli) -> Result<()> {
             )
             .await
         }
-        Commands::Update { force, metal, cpu } => {
+        Commands::Update {
+            force,
+            metal,
+            gpu,
+            cpu,
+        } => {
             let variant = if metal {
                 Some(update::Variant::Metal)
+            } else if gpu {
+                Some(update::Variant::Gpu)
             } else if cpu {
                 Some(update::Variant::Cpu)
             } else {

@@ -35,10 +35,30 @@ is_interactive() {
   [ -t 0 ] && [ -t 1 ]
 }
 
+# ── Detect a usable GPU (Linux x86_64) ─────────────────────────────────────────
+# A DRM render node (/dev/dri/renderD*) exists exactly when the kernel has a GPU
+# driver bound — the cleanest "this box has a usable GPU" signal. vulkaninfo, if
+# present, is an even stronger check.
+linux_has_gpu() {
+  if command -v vulkaninfo > /dev/null 2>&1; then
+    if vulkaninfo --summary 2>/dev/null | grep -qiE 'deviceType.*(INTEGRATED|DISCRETE)_GPU'; then
+      return 0
+    fi
+  fi
+  for node in /dev/dri/renderD*; do
+    [ -e "$node" ] && return 0
+  done
+  return 1
+}
+
 # ── Detect OS and arch ───────────────────────────────────────────────────────
+# Sets PLATFORM, EXT, and VARIANT ("" for CPU, "-gpu" for the wgpu GPU build).
+# We publish a -gpu build only for x86_64 Linux (Vulkan); pick it automatically
+# when a GPU is present. Override with SAPIENT_VARIANT=cpu|gpu.
 detect_platform() {
   OS="$(uname -s)"
   ARCH="$(uname -m)"
+  VARIANT=""
 
   case "$OS" in
     Darwin)
@@ -51,7 +71,15 @@ detect_platform() {
       ;;
     Linux)
       case "$ARCH" in
-        x86_64)  PLATFORM="x86_64-unknown-linux-gnu" ;;
+        x86_64)
+          PLATFORM="x86_64-unknown-linux-gnu"
+          # Auto-select the GPU build when a GPU is detected (overridable).
+          case "${SAPIENT_VARIANT:-auto}" in
+            gpu) VARIANT="-gpu" ;;
+            cpu) VARIANT="" ;;
+            *)   if linux_has_gpu; then VARIANT="-gpu"; fi ;;
+          esac
+          ;;
         aarch64) PLATFORM="aarch64-unknown-linux-gnu" ;;
         armv7l)
           error "32-bit ARM (e.g. Raspberry Pi 3) is not supported. Use 64-bit Raspberry Pi OS on Pi 4 or Pi 5." ;;
@@ -66,6 +94,10 @@ detect_platform() {
       error "Unsupported OS: $OS"
       ;;
   esac
+
+  if [ -n "$VARIANT" ]; then
+    info "GPU detected — selecting the GPU build (set SAPIENT_VARIANT=cpu to override)."
+  fi
 }
 
 # ── Get latest release version ───────────────────────────────────────────────
@@ -109,12 +141,12 @@ hash_file() {
 
 # ── Download ─────────────────────────────────────────────────────────────────
 download() {
-  FILENAME="${BINARY_NAME}-${PLATFORM}.${EXT}"
+  FILENAME="${BINARY_NAME}-${PLATFORM}${VARIANT}.${EXT}"
   URL="https://github.com/${REPO}/releases/download/${VERSION}/${FILENAME}"
   TMPDIR="$(mktemp -d)"
   TMPFILE="${TMPDIR}/${FILENAME}"
 
-  info "Downloading ${BINARY_NAME} ${VERSION} for ${PLATFORM}..."
+  info "Downloading ${BINARY_NAME} ${VERSION} for ${PLATFORM}${VARIANT:+ (GPU build)}..."
 
   if command -v curl > /dev/null 2>&1; then
     curl -fsSL --progress-bar "$URL" -o "$TMPFILE" || error "Download failed. URL: $URL"

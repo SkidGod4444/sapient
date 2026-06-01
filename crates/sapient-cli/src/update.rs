@@ -27,15 +27,19 @@ struct PlatformAsset {
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum Variant {
     Cpu,
+    /// Apple Silicon Metal (MLX) build — `-metal` artifact.
     Metal,
+    /// Cross-platform GPU build (wgpu: Vulkan on Linux, DX12 on Windows) — `-gpu` artifact.
+    Gpu,
 }
 
 impl Variant {
-    /// Filename suffix on the release archive (`-metal` for the GPU build).
+    /// Filename suffix on the release archive.
     fn suffix(self) -> &'static str {
         match self {
             Variant::Cpu => "",
             Variant::Metal => "-metal",
+            Variant::Gpu => "-gpu",
         }
     }
 
@@ -43,15 +47,18 @@ impl Variant {
         match self {
             Variant::Cpu => "CPU",
             Variant::Metal => "Metal (GPU)",
+            Variant::Gpu => "GPU (wgpu)",
         }
     }
 }
 
-/// The variant this binary was compiled as. A binary built with the `mlx`
-/// feature is the Apple Silicon Metal build; everything else is CPU.
+/// The variant this binary was compiled as. `mlx` = Apple Silicon Metal build,
+/// `wgpu` = cross-platform GPU build, otherwise CPU.
 const fn current_variant() -> Variant {
     if cfg!(feature = "mlx") {
         Variant::Metal
+    } else if cfg!(feature = "wgpu") {
+        Variant::Gpu
     } else {
         Variant::Cpu
     }
@@ -61,6 +68,56 @@ const fn current_variant() -> Variant {
 /// the only platform we publish a `-metal` artifact for.
 fn metal_capable() -> bool {
     std::env::consts::OS == "macos" && std::env::consts::ARCH == "aarch64"
+}
+
+/// Whether this machine can run the cross-platform GPU (`-gpu`) build: we publish it
+/// only for x86_64 Linux (Vulkan) and x86_64 Windows (DX12), and only offer it when an
+/// actual GPU is present (so CPU-only boxes are never nudged toward a GPU build).
+fn gpu_capable() -> bool {
+    if std::env::consts::ARCH != "x86_64" {
+        return false;
+    }
+    match std::env::consts::OS {
+        "linux" => linux_has_gpu(),
+        "windows" => windows_has_gpu(),
+        _ => false,
+    }
+}
+
+/// A DRM render node (`/dev/dri/renderD*`) exists exactly when the kernel has a GPU
+/// driver bound — the cleanest "this box has a usable GPU" signal on Linux.
+fn linux_has_gpu() -> bool {
+    fs::read_dir("/dev/dri")
+        .map(|rd| {
+            rd.flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with("renderD"))
+        })
+        .unwrap_or(false)
+}
+
+/// Query the display adapters via PowerShell; any non-software adapter means a real GPU.
+/// If the query can't run we assume a GPU is present (Windows 10+ ships DX12).
+fn windows_has_gpu() -> bool {
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name",
+        ])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let names = String::from_utf8_lossy(&o.stdout).to_lowercase();
+            names
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .any(|l| !l.contains("basic display") && !l.contains("remote display"))
+        }
+        // Couldn't query — DX12 is near-universal on supported Windows, so offer GPU.
+        _ => true,
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -339,45 +396,71 @@ fn replace_current_binary(staged: &Staged) -> Result<()> {
     Ok(())
 }
 
-/// Decide which build variant to install.
-///
-/// Order of precedence: explicit `--metal`/`--cpu` flag → interactive prompt on
-/// Apple Silicon → the variant this binary was built as. On machines without a
-/// Metal artifact, always CPU (and reject an explicit `--metal`).
-fn resolve_variant(explicit: Option<Variant>) -> Result<Variant> {
-    if !metal_capable() {
-        if explicit == Some(Variant::Metal) {
-            bail!("the Metal build is only available on Apple Silicon (macOS arm64)");
-        }
-        return Ok(Variant::Cpu);
-    }
-
-    if let Some(v) = explicit {
-        return Ok(v);
-    }
-
-    // Apple Silicon, no explicit choice: ask if we're attached to a terminal,
-    // otherwise keep whatever this binary already is.
-    if std::io::stdin().is_terminal() {
-        Ok(prompt_variant(current_variant()))
+/// The GPU build available on this machine, if any: Metal on Apple Silicon,
+/// the cross-platform wgpu build on an x86_64 Linux/Windows box that has a GPU.
+fn available_accel() -> Option<Variant> {
+    if metal_capable() {
+        Some(Variant::Metal)
+    } else if gpu_capable() {
+        Some(Variant::Gpu)
     } else {
-        Ok(current_variant())
+        None
     }
 }
 
-/// Ask the user which build to install, defaulting to `default` on empty input.
-fn prompt_variant(default: Variant) -> Variant {
+/// Decide which build variant to install.
+///
+/// Order of precedence: explicit `--metal`/`--gpu`/`--cpu` flag → interactive prompt
+/// when this machine has a GPU (and both builds are available) → the variant this
+/// binary was built as. On machines with no GPU build, always CPU.
+fn resolve_variant(explicit: Option<Variant>) -> Result<Variant> {
+    let accel = available_accel();
+
+    if let Some(v) = explicit {
+        match v {
+            Variant::Cpu => return Ok(Variant::Cpu), // always available
+            Variant::Metal if !metal_capable() => {
+                bail!("the Metal build is only available on Apple Silicon (macOS arm64)")
+            }
+            Variant::Gpu if !gpu_capable() => bail!(
+                "the GPU build is only available on x86_64 Linux/Windows with a GPU \
+                 (no GPU detected on this machine)"
+            ),
+            v => return Ok(v),
+        }
+    }
+
+    // No explicit choice. If this box has a GPU, offer CPU vs GPU interactively;
+    // otherwise keep whatever this binary already is (CPU on a GPU-less machine).
+    match accel {
+        Some(accel) if std::io::stdin().is_terminal() => {
+            // Default to the accelerated build unless the user already runs CPU.
+            let default = if current_variant() == Variant::Cpu {
+                Variant::Cpu
+            } else {
+                accel
+            };
+            Ok(prompt_variant(default, accel))
+        }
+        _ => Ok(current_variant()),
+    }
+}
+
+/// Ask the user to pick the accelerated build (`accel`: Metal or GPU) or CPU,
+/// defaulting to `default` on empty input.
+fn prompt_variant(default: Variant, accel: Variant) -> Variant {
     use std::io::Write;
-    println!("You're on Apple Silicon — choose a build to install:");
-    println!("  1) Metal (GPU) — faster on Apple Silicon");
-    println!("  2) CPU         — maximum compatibility");
-    let default_num = match default {
-        Variant::Metal => 1,
-        Variant::Cpu => 2,
+    let why = match accel {
+        Variant::Metal => "faster on Apple Silicon",
+        _ => "uses your graphics card",
     };
+    println!("This machine has a GPU — choose a build to install:");
+    println!("  1) {} — {why}", accel.label());
+    println!("  2) CPU — maximum compatibility");
+    let default_num = if default == Variant::Cpu { 2 } else { 1 };
     print!(
         "Build [1/2] (default {default_num}, currently {}): ",
-        default.label()
+        current_variant().label()
     );
     let _ = std::io::stdout().flush();
 
@@ -386,7 +469,7 @@ fn prompt_variant(default: Variant) -> Variant {
         return default;
     }
     match buf.trim() {
-        "1" => Variant::Metal,
+        "1" => accel,
         "2" => Variant::Cpu,
         _ => default,
     }

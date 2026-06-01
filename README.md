@@ -32,6 +32,13 @@ curl -fsSL https://github.com/SkidGod4444/sapient/releases/latest/download/insta
 irm https://github.com/SkidGod4444/sapient/releases/latest/download/install.ps1 | iex
 ```
 
+> **Automatic GPU detection.** On x86_64 Linux/Windows the installer detects whether you
+> have a graphics card and pulls the **GPU build** (`-gpu`, wgpu — Intel/AMD/Nvidia) when
+> one is present, or the CPU build otherwise. Force a choice with `SAPIENT_VARIANT=cpu`
+> (or `gpu`) on the `sh` install, or `$env:SAPIENT_VARIANT="cpu"` on Windows. Later,
+> `sapient update` will ask which build you want whenever your machine has a GPU
+> (or pass `--gpu` / `--cpu` / `--metal`).
+
 ### Homebrew (macOS)
 
 ```bash
