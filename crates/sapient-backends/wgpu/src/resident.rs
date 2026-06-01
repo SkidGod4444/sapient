@@ -123,7 +123,7 @@ impl WgpuContext {
         uniform: &wgpu::Buffer,
         groups: u32,
     ) {
-        let gx = groups.min(65535).max(1);
+        let gx = groups.clamp(1, 65535);
         let gy = groups.div_ceil(gx);
         let pipeline = self.pipeline(label, wgsl);
         let layout = pipeline.get_bind_group_layout(0);
