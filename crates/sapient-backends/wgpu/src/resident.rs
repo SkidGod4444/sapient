@@ -36,6 +36,23 @@ impl WgpuContext {
         }
     }
 
+    /// Upload a u32 slice (e.g. token ids) into a GPU storage buffer.
+    pub fn upload_u32(&self, data: &[u32], label: &str) -> GpuBuffer {
+        let buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: bytemuck::cast_slice(data),
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+            });
+        GpuBuffer {
+            buf,
+            len: data.len(),
+        }
+    }
+
     /// Allocate an uninitialized (zeroed) GPU storage buffer of `len` f32 elements.
     pub fn alloc_f32(&self, len: usize, label: &str) -> GpuBuffer {
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -93,6 +110,11 @@ impl WgpuContext {
     /// Bind buffers `0..n` (storage) + a trailing uniform, dispatch `groups`
     /// workgroups of the cached `label`/`wgsl` pipeline. `storages` are bound at
     /// 0..k, the uniform at index k.
+    ///
+    /// `groups` is the logical 1-D workgroup count; it's tiled into 2-D
+    /// `(gx, gy)` so counts above the 65535 per-dimension limit (e.g. lm_head with
+    /// vocab≈152k rows) still dispatch. Kernels recover the linear index as
+    /// `wg.x + wg.y * num_workgroups.x` and bounds-check against the true count.
     pub(crate) fn dispatch(
         &self,
         label: &str,
@@ -101,6 +123,8 @@ impl WgpuContext {
         uniform: &wgpu::Buffer,
         groups: u32,
     ) {
+        let gx = groups.min(65535).max(1);
+        let gy = groups.div_ceil(gx);
         let pipeline = self.pipeline(label, wgsl);
         let layout = pipeline.get_bind_group_layout(0);
         let mut entries: Vec<wgpu::BindGroupEntry> = storages
@@ -130,7 +154,7 @@ impl WgpuContext {
             });
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(groups, 1, 1);
+            pass.dispatch_workgroups(gx, gy, 1);
         }
         self.queue.submit(Some(enc.finish()));
     }
@@ -171,6 +195,109 @@ impl WgpuContext {
             &[&x.buf, &weight.buf, &out.buf],
             &params,
             rows as u32,
+        );
+        out
+    }
+
+    /// Resident linear projection `out[m,n] = x[m,k] @ w[n,k]^T` (w in HF `[n,k]`),
+    /// GEMV-style cooperative reduction, f32 accumulation.
+    pub fn matmul_nt(&self, x: &GpuBuffer, w: &GpuBuffer, m: usize, k: usize, n: usize) -> GpuBuffer {
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct P {
+            m: u32,
+            k: u32,
+            n: u32,
+            _pad: u32,
+        }
+        let out = self.alloc_f32(m * n, "matmul.out");
+        let params = self.uniform(
+            &P {
+                m: m as u32,
+                k: k as u32,
+                n: n as u32,
+                _pad: 0,
+            },
+            "matmul.params",
+        );
+        self.dispatch(
+            "matmul_nt",
+            include_str!("shaders/matmul_nt.wgsl"),
+            &[&x.buf, &w.buf, &out.buf],
+            &params,
+            (m * n) as u32,
+        );
+        out
+    }
+
+    /// Element-wise op over `n` elements. `op`: 0 = `a+b` (residual), 1 = SwiGLU
+    /// `silu(a)*b`. Returns a new buffer of length `n`.
+    fn ewise(&self, a: &GpuBuffer, b: &GpuBuffer, op: u32) -> GpuBuffer {
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct P {
+            n: u32,
+            op: u32,
+            _b: u32,
+            _c: u32,
+        }
+        let n = a.len;
+        let out = self.alloc_f32(n, "ewise.out");
+        let params = self.uniform(
+            &P {
+                n: n as u32,
+                op,
+                _b: 0,
+                _c: 0,
+            },
+            "ewise.params",
+        );
+        self.dispatch(
+            "elementwise",
+            include_str!("shaders/elementwise.wgsl"),
+            &[&a.buf, &b.buf, &out.buf],
+            &params,
+            (n as u32).div_ceil(256),
+        );
+        out
+    }
+
+    /// Residual add: `out = a + b`.
+    pub fn add(&self, a: &GpuBuffer, b: &GpuBuffer) -> GpuBuffer {
+        self.ewise(a, b, 0)
+    }
+
+    /// SwiGLU: `out = silu(gate) * up` (element-wise).
+    pub fn swiglu(&self, gate: &GpuBuffer, up: &GpuBuffer) -> GpuBuffer {
+        self.ewise(gate, up, 1)
+    }
+
+    /// Embedding gather: `out[t,:] = table[ids[t], :]`. Returns `[n_tokens, dim]`.
+    pub fn embed(&self, ids: &GpuBuffer, table: &GpuBuffer, n_tokens: usize, dim: usize) -> GpuBuffer {
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct P {
+            n_tokens: u32,
+            dim: u32,
+            _b: u32,
+            _c: u32,
+        }
+        let out = self.alloc_f32(n_tokens * dim, "embed.out");
+        let params = self.uniform(
+            &P {
+                n_tokens: n_tokens as u32,
+                dim: dim as u32,
+                _b: 0,
+                _c: 0,
+            },
+            "embed.params",
+        );
+        self.dispatch(
+            "embed",
+            include_str!("shaders/embed.wgsl"),
+            &[&ids.buf, &table.buf, &out.buf],
+            &params,
+            n_tokens as u32,
         );
         out
     }
