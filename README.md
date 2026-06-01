@@ -67,7 +67,7 @@ sapient models
 # highlighted code blocks). Use --raw for plain text; auto-disabled when piped.
 sapient chat openhorizon/phi-2
 sapient chat openhorizon/phi-2 --raw                    # plain Markdown text
-sapient chat openhorizon/qwen2.5-0.5b --backend auto   # auto | cpu | metal
+sapient chat openhorizon/qwen2.5-0.5b --backend auto   # auto | cpu | metal | wgpu
 
 # Speculative decoding (faster generation with a draft model)
 sapient chat openhorizon/qwen2.5-1.5b --speculative
@@ -245,6 +245,8 @@ datacenter-GPU engine and doesn't run on this edge box. Charts + method:
 Key improvements:
 - **`MlxForwardEngine`** — all activations stay as `mlx_rs::Array`; one `eval()` per
   decode step; MLX fused SDPA for attention. Auto-selected for Llama/Qwen GGUF models on `--backend metal`.
+- **`WgpuForwardEngine`** — cross-platform GPU (Vulkan/DX12/Metal) for Intel/AMD/Nvidia/Apple;
+  GPU-resident weights + KV cache, on-device decode. `--backend wgpu` (build `--features wgpu`).
 - **Engine reuse** — the pipeline holds the loaded engine in an `Arc<Mutex<…>>`; the
   streaming path no longer rebuilds it per call (TTFT dropped 30–44×, 1.5B: 3 s → 70 ms).
 - **Flash-Edge attention** (CPU) — online-softmax, O(head_dim) memory, NEON `vfmaq_f32`.
@@ -253,15 +255,25 @@ Key improvements:
 - **NEON GEMV kernels** — native F16 (`vcvt_f32_f16`), Q4_K nibble-unpacking + FMA, SDOT Q8_0.
 - **`sapient devices`** — detect CPU/GPU, estimate tok/s, recommend backend before loading a model.
 
-### Cross-platform GPU (Intel / AMD / Nvidia) — in progress
+### Cross-platform GPU (Intel / AMD / Nvidia)
 
 Metal acceleration is Apple-only. To reach Intel Arc, AMD Radeon, and Nvidia GPUs on
-Linux and Windows, SAPIENT is growing a portable GPU backend
-(`crates/sapient-backends/wgpu`) built on [`wgpu`](https://wgpu.rs) — the same WGSL
-compute shaders run on Vulkan, DX12, and Metal. The **foundation** has landed: GPU
-device acquisition plus validated F32 and Q8_0 quantized matmul kernels. The full
-forward-pass integration (`WgpuForwardEngine`) is tracked in
-[ROADMAP Phase 3b](docs/ROADMAP.md).
+Linux and Windows, SAPIENT has a portable GPU backend (`crates/sapient-backends/wgpu`)
+built on [`wgpu`](https://wgpu.rs) — the **same WGSL compute shaders** run on Vulkan,
+DX12, and Metal. The full forward pass (`WgpuForwardEngine`) is wired in: weights are
+uploaded to the GPU once, the KV cache lives on-device, and each decode step runs
+entirely on the GPU (RMSNorm, GEMV, RoPE, causal GQA FlashDecoding attention, SwiGLU)
+with only the logits read back. Logits are validated to match the CPU engine.
+
+```bash
+# Build with the wgpu feature, then select the backend (Llama/Qwen/Mistral):
+cargo build --release -p sapient-cli --features wgpu
+./target/release/sapient chat openhorizon/qwen2.5-0.5b --backend wgpu
+```
+
+First cut: Llama-family models, f32 weights/KV cache, one token per submission.
+In-shader Q4_K/Q8_0 dequant, an f16/quantized KV cache, kernel fusion, and batched
+prefill are tracked in [ROADMAP Phase 3b](docs/ROADMAP.md).
 
 ---
 

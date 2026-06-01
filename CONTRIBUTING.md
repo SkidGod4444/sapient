@@ -98,7 +98,8 @@ crates/
 ├── sapient-ir/             # Computation graph IR and passes
 ├── sapient-io/             # Safetensors, GGUF, ONNX loaders
 ├── sapient-backends/cpu/   # CPU inference kernels
-├── sapient-backends/metal/ # Apple GPU backend (WIP)
+├── sapient-backends/metal/ # Apple GPU backend (MLX)
+├── sapient-backends/wgpu/  # Cross-platform GPU (Vulkan/DX12/Metal via wgpu)
 ├── sapient-scheduler/      # Request scheduling and batching
 ├── sapient-telemetry/      # Tracing and metrics
 ├── sapient-runtime/        # InferenceSession, Model
@@ -357,7 +358,8 @@ These are especially welcome:
 | **SIMD dispatch** | `kernels/quant.rs` | NEON (aarch64) + AVX2 (x86_64) + scalar fallback |
 | **Speculative decoding** | `crates/sapient-generate/src/speculative.rs` | Draft/target pipeline, engine reuse, cache-aware verify (`forward_all_logits_cached` + `truncate_cache`) |
 | **HTTP server** | `crates/sapient-cli/src/server.rs` | OpenAI-compatible `/v1/chat/completions`; `ServedModel` (plain/speculative), LRU cache, `--speculative` |
-| **Metal / GPU backend** | `crates/sapient-backends-metal/` | Apple Silicon — WIP |
+| **Metal / GPU backend** | `crates/sapient-backends-metal/` | Apple Silicon (MLX); `MlxForwardEngine` |
+| **Cross-platform GPU** | `crates/sapient-backends/wgpu/` | wgpu/WGSL (Vulkan/DX12/Metal); `WgpuForwardEngine` (`--features wgpu`, `--backend wgpu`). Kernels in `resident.rs` + `shaders/*.wgsl`, validated vs CPU in `tests/resident.rs` + `sapient-models/tests/wgpu_coherence.rs` |
 | **Hub client** | `crates/sapient-hub/` | Downloads, caching, auth, registry |
 | **CLI UX** | `crates/sapient-cli/` | Commands, terminal UI |
 | **Tokenizers / chat templates** | `crates/sapient-tokenizers/` | HF tokenizer edge cases |

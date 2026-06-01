@@ -240,6 +240,11 @@ The real generation math: how to run a Phi or Llama-style model layer by layer.
     lazy graph — every activation stays on the GPU, `eval()` runs once per token.
     Auto-selected for GGUF Llama/Qwen models when the Metal backend is active.
     ~168 tok/s on Qwen2.5-0.5B Q4 (8.6× the CPU path). See `docs/BENCHMARKS.md`.
+  - `forward/wgpu_engine.rs` — the **cross-platform GPU engine** (`WgpuForwardEngine`,
+    `--features wgpu`, `--backend wgpu`). The same idea as the MLX engine but portable
+    via wgpu/WGSL (Vulkan/DX12/Metal) so it runs on Intel/AMD/Nvidia too. Weights upload
+    once, the KV cache stays on the GPU, each token decodes on-device; only logits read
+    back. Llama-family, f32 first cut — see the wgpu invariants in `CLAUDE.md`.
 - `architectures/` — graph **builders** for many model types (used by the IR/graph path).
   Note: only Phi and Llama are wired into live chat today; the rest are scaffolding.
   - `llama.rs`, `phi.rs`, `qwen.rs`, `gemma.rs`, `gpt2.rs`, `bert.rs`, `mixtral.rs`, `mod.rs`.
@@ -304,6 +309,21 @@ The hook for running on a Mac's GPU via Apple's **MLX**. Enabled when built with
 `--features mlx`; otherwise the engine falls back to the CPU kernels.
 - `lib.rs` — front door.
 - `backend.rs` — Metal/MLX backend detection and integration point.
+
+### 🎮 `sapient-backends/wgpu` — cross-platform GPU (Intel / AMD / Nvidia / Apple)
+The portable GPU path for the machines MLX can't reach (Linux/Windows, any vendor),
+built on **wgpu** — the same **WGSL** compute shaders run on Vulkan, DX12, and Metal.
+Enabled with `--features wgpu` and selected via `--backend wgpu`.
+- `context.rs` — `WgpuContext`: picks a GPU adapter, raises buffer-binding limits past
+  the default 128 MiB, enables `SHADER_F16` when present, caches compiled pipelines.
+- `resident.rs` + `shaders/*.wgsl` — GPU-resident buffers (`GpuBuffer`) and the kernels
+  the forward pass needs: RMSNorm, GEMV matmul, RoPE, causal grouped-query FlashDecoding
+  attention, SwiGLU/add, embedding gather, and a KV-cache append copy. Every kernel has a
+  CPU-reference test (`tests/resident.rs`).
+- The engine that drives them lives in `sapient-models` as `WgpuForwardEngine`
+  (`forward/wgpu_engine.rs`): weights upload once, the KV cache stays on the GPU, each
+  token decodes fully on-device, and only the logits are read back. Its output is
+  checked against the CPU engine in `sapient-models/tests/wgpu_coherence.rs`.
 
 ### 🖥️ `sapient-cli` — the app you actually run
 The `sapient` command-line program: parses commands, shows the modern UI, and calls the

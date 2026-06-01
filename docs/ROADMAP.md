@@ -89,14 +89,21 @@ SDOT integer arithmetic (ARMv8.4A — all M-series, Raspberry Pi 5):
 Bring GPU acceleration to the machines Metal can't reach, via a portable compute API
 (`wgpu` → Vulkan / DX12 / Metal). The **same WGSL kernels** run on Intel Arc, AMD
 Radeon, Nvidia, and Apple — and are dev-tested on Apple Silicon (Metal under wgpu).
-- ✅ **Foundation** (`crates/sapient-backends/wgpu`): `WgpuContext` device acquisition +
+- ✅ **Foundation** (`crates/sapient-backends/wgpu`): `WgpuContext` device acquisition
+  (adapter-max limits past the 128 MiB binding cap, `SHADER_F16`, pipeline cache) +
   `matmul_nt_f32` / `matmul_nt_q8_0` kernels, validated on GPU against a host reference.
-- [ ] Remaining kernels: RMSNorm, RoPE, SwiGLU, softmax/SDPA attention, embedding gather.
-- [ ] Q4_K / Q4_0 dequant kernels (parity with the CPU K-quant paths).
-- [ ] `WgpuForwardEngine` in `sapient-models` — cached pipelines, persistent buffers,
-  GPU-resident KV cache, one submission per token (mirrors `MlxForwardEngine`).
-- [ ] Wire into `ForwardEngine` + `sapient devices` (auto-select on non-Apple GPUs).
-- [ ] Tiled kernels + perf tuning toward native Vulkan throughput.
+- ✅ **Resident kernels** (`resident.rs` + `shaders/*.wgsl`): GPU-resident `GpuBuffer`,
+  RMSNorm, GEMV `matmul_nt`, RoPE (NEOX partial-rotary), SwiGLU, residual add, embedding
+  gather, causal GQA **FlashDecoding attention** (online softmax, `kv_stride`), and a
+  `copy_range` KV-cache append — each validated bit-close to a CPU reference.
+- ✅ **`WgpuForwardEngine`** in `sapient-models` (`--features wgpu`): weights upload once
+  (dequant→f32), GPU-resident KV cache, decode runs fully on-device, only logits read
+  back. Wired into `ForwardEngine::Wgpu` + `LlmBackendKind::Wgpu` (`--backend wgpu`) for
+  Llama/Qwen/Mistral (GGUF + safetensors). **Coherence proven**: logits match the CPU
+  `LlamaForward` on a synthetic model (prompt + incremental decode, argmax + max_err<5e-3).
+- [ ] **P5**: in-shader Q4_K/Q8_0 dequant (flat-u32 buffers, no f32 expansion at upload),
+  f16 / quantized KV cache, kernel fusion (cut per-token dispatches), batched prefill
+  (`seq_q>1`), discrete-adapter pick, `sapient devices` listing, Linux/Windows CI.
 - **Success metric:** a Q4 model on an Intel Arc / AMD Radeon card decoding several×
   faster than that machine's CPU path, from the same single binary.
 
