@@ -3581,6 +3581,7 @@ dependencies = [
  "flate2",
  "futures",
  "indicatif 0.17.11",
+ "libc",
  "reqwest",
  "rustyline",
  "sapient-backends-cpu",

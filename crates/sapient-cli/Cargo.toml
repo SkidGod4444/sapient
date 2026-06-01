@@ -54,3 +54,7 @@ mlx = ["sapient-generate/mlx"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 sapient-backends-metal = { workspace = true }
+
+# Process-liveness check for the `sapient serve` single-instance lock (kill(pid, 0)).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
