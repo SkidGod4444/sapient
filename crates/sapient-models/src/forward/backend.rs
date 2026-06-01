@@ -9,6 +9,8 @@ use super::common;
 pub enum LlmBackendKind {
     Cpu,
     Metal,
+    /// Cross-platform GPU via wgpu/WGSL (Vulkan/DX12/Metal — Intel/AMD/Nvidia/Apple).
+    Wgpu,
     #[default]
     Auto,
 }
@@ -31,6 +33,7 @@ impl std::str::FromStr for LlmBackendKind {
         match value.to_ascii_lowercase().as_str() {
             "cpu" => Ok(Self::Cpu),
             "metal" => Ok(Self::Metal),
+            "wgpu" | "vulkan" | "dx12" | "gpu" => Ok(Self::Wgpu),
             "auto" => Ok(Self::Auto),
             other => anyhow::bail!("unsupported generation backend '{other}'"),
         }
@@ -42,6 +45,7 @@ impl std::fmt::Display for LlmBackendKind {
         match self {
             Self::Cpu => write!(f, "cpu"),
             Self::Metal => write!(f, "metal"),
+            Self::Wgpu => write!(f, "wgpu"),
             Self::Auto => write!(f, "auto"),
         }
     }
@@ -910,7 +914,8 @@ impl LlmBackendDispatch {
                     );
                     return Ok(Self::Cpu(CpuLlmBackend));
                 }
-                LlmBackendKind::Cpu => {}
+                // Wgpu uses its own engine (not this per-op dispatch); treat as CPU here.
+                LlmBackendKind::Cpu | LlmBackendKind::Wgpu => {}
             }
         }
         Self::from_kind(kind)
@@ -924,7 +929,8 @@ impl LlmBackendDispatch {
     /// swapping GPU memory which kills throughput.
     pub fn from_kind_with_model_bytes(kind: LlmBackendKind, model_bytes: u64) -> Result<Self> {
         match kind {
-            LlmBackendKind::Cpu => Ok(Self::Cpu(CpuLlmBackend)),
+            // Wgpu uses its own engine (not this per-op dispatch); CPU fallback here.
+            LlmBackendKind::Cpu | LlmBackendKind::Wgpu => Ok(Self::Cpu(CpuLlmBackend)),
             LlmBackendKind::Auto if MetalLlmBackend::is_available() => {
                 let fits = metal_memory_fits(model_bytes);
                 if fits {

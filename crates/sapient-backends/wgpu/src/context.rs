@@ -1,5 +1,8 @@
 //! GPU device acquisition and lifetime management.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use thiserror::Error;
 
 /// Errors raised while bringing up or running the wgpu backend.
@@ -26,6 +29,15 @@ pub struct WgpuContext {
     pub(crate) queue: wgpu::Queue,
     adapter_name: String,
     backend: wgpu::Backend,
+    /// Whether the device has the `shader-f16` feature (f16 storage in WGSL).
+    /// Weights are stored f16 when true (half the VRAM), still f32-accumulated.
+    pub(crate) has_f16: bool,
+    /// Max single storage-buffer binding the adapter allows (wgpu default is only
+    /// 128 MiB — too small for an lm_head/embedding tensor, so we raise it).
+    pub(crate) max_binding_bytes: u64,
+    /// Compiled compute pipelines, keyed by a stable label, so each WGSL kernel is
+    /// compiled once and reused across every decode step.
+    pipelines: Mutex<HashMap<String, Arc<wgpu::ComputePipeline>>>,
 }
 
 impl WgpuContext {
@@ -56,25 +68,87 @@ impl WgpuContext {
         let adapter_name = info.name.clone();
         let backend = info.backend;
 
+        // Raise limits toward what the adapter actually supports. wgpu's defaults
+        // cap a single storage binding at 128 MiB, which is smaller than one
+        // lm_head/embedding tensor — use the adapter's real maxima so big weight
+        // buffers bind. f16 halves weight VRAM (still f32-accumulated in shaders).
+        let adapter_limits = adapter.limits();
+        let has_f16 = adapter.features().contains(wgpu::Features::SHADER_F16);
+        let required_features = if has_f16 {
+            wgpu::Features::SHADER_F16
+        } else {
+            wgpu::Features::empty()
+        };
+        let max_binding_bytes = adapter_limits.max_storage_buffer_binding_size as u64;
+
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("sapient-wgpu-device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::downlevel_defaults(),
+                    required_features,
+                    required_limits: adapter_limits,
                     memory_hints: wgpu::MemoryHints::Performance,
                 },
                 None,
             )
             .await?;
 
-        tracing::info!(adapter = %adapter_name, backend = ?backend, "wgpu GPU device ready");
+        tracing::info!(
+            adapter = %adapter_name, backend = ?backend, has_f16,
+            max_binding_mib = max_binding_bytes / (1 << 20),
+            "wgpu GPU device ready"
+        );
         Ok(Self {
             device,
             queue,
             adapter_name,
             backend,
+            has_f16,
+            max_binding_bytes,
+            pipelines: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Get-or-compile a compute pipeline for `label` from `wgsl` source (entry
+    /// point `cs_main`). Compiled once per label, then cached — every decode step
+    /// reuses the same pipeline (no per-call shader compilation).
+    pub(crate) fn pipeline(&self, label: &str, wgsl: &str) -> Arc<wgpu::ComputePipeline> {
+        if let Some(p) = self.pipelines.lock().unwrap().get(label) {
+            return Arc::clone(p);
+        }
+        let module = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+            });
+        let pipeline = self
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(label),
+                layout: None,
+                module: &module,
+                entry_point: "cs_main",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let pipeline = Arc::new(pipeline);
+        self.pipelines
+            .lock()
+            .unwrap()
+            .insert(label.to_string(), Arc::clone(&pipeline));
+        pipeline
+    }
+
+    /// True when the device supports f16 storage (`shader-f16`).
+    pub fn has_f16(&self) -> bool {
+        self.has_f16
+    }
+
+    /// Max single storage-buffer binding (bytes) the device allows. The engine
+    /// uses this to decide when a weight tensor must be chunked across bindings.
+    pub fn max_binding_bytes(&self) -> u64 {
+        self.max_binding_bytes
     }
 
     /// Human-readable adapter description, e.g. "AMD Radeon RX 7600 (Vulkan)".

@@ -51,6 +51,9 @@ zip         = { workspace = true }
 [features]
 default = []
 mlx = ["sapient-generate/mlx"]
+# Cross-platform GPU inference (Vulkan/DX12/Metal via wgpu) — Intel/AMD/Nvidia/Apple.
+# Build: cargo build --release -p sapient-cli --features wgpu; then `--backend wgpu`.
+wgpu = ["sapient-generate/wgpu"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 sapient-backends-metal = { workspace = true }

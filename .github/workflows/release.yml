@@ -43,6 +43,13 @@ jobs:
             os: ubuntu-22.04
             archive: tar.gz
 
+          # Linux — x86_64, cross-platform GPU build (wgpu: Vulkan — Intel/AMD/Nvidia)
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            archive: tar.gz
+            features: wgpu
+            suffix: -gpu
+
           # Linux — ARM64 (native ARM runner — Pi 4/5 64-bit, cloud ARM; avoids cross-rs)
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
@@ -53,6 +60,14 @@ jobs:
             os: windows-latest
             archive: zip
             ext: .exe
+
+          # Windows — x86_64, cross-platform GPU build (wgpu: DX12 — Intel/AMD/Nvidia)
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+            ext: .exe
+            features: wgpu
+            suffix: -gpu
 
           # Windows — ARM64 (Surface Pro X, modern Windows ARM)
           - target: aarch64-pc-windows-msvc
@@ -113,7 +128,12 @@ jobs:
       - name: Build (native — Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: cargo build --release --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }}
+        run: |
+          if ("${{ matrix.features }}") {
+            cargo build --release -p sapient-cli --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }} --features "${{ matrix.features }}"
+          } else {
+            cargo build --release -p sapient-cli --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }}
+          }
 
       - name: Build (native — Linux/macOS)
         if: runner.os != 'Windows'
@@ -145,7 +165,8 @@ jobs:
 
           # The Metal build needs MLX's compiled shader library at runtime; MLX
           # loads it from next to the executable, so ship it inside the archive.
-          if [ -n "${{ matrix.features }}" ]; then
+          # (Only the mlx feature produces a metallib; wgpu compiles its WGSL at runtime.)
+          if [ "${{ matrix.features }}" = "mlx" ]; then
             METALLIB="$(find "target/${{ matrix.target }}/release" -name 'mlx.metallib' | head -n1)"
             if [ -z "$METALLIB" ]; then
               echo "::error::Metal build produced no mlx.metallib"
@@ -164,7 +185,7 @@ jobs:
         shell: pwsh
         run: |
           $binary = "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}.exe"
-          $archive = "${{ env.BINARY_NAME }}-${{ matrix.target }}.zip"
+          $archive = "${{ env.BINARY_NAME }}-${{ matrix.target }}${{ matrix.suffix }}.zip"
           Compress-Archive -Path $binary -DestinationPath $archive
           "ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8NoBOM
 

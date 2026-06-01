@@ -14,6 +14,9 @@ sapient-ir           = { workspace = true }
 sapient-hub          = { workspace = true }
 sapient-io           = { workspace = true }
 sapient-backends-cpu = { workspace = true }
+# Cross-platform GPU backend (Vulkan/DX12/Metal via wgpu) — pulled in behind the
+# `wgpu` feature; powers WgpuForwardEngine for Linux/Windows Intel/AMD/Nvidia GPUs.
+sapient-backends-wgpu = { workspace = true, optional = true }
 thiserror    = { workspace = true }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
@@ -27,6 +30,8 @@ half         = { workspace = true }
 [features]
 default = []
 mlx = ["dep:mlx-rs"]
+# Cross-platform GPU inference via wgpu/WGSL (Linux/Windows/Mac, any GPU vendor).
+wgpu = ["dep:sapient-backends-wgpu"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mlx-rs = { version = "0.25.3", default-features = true, optional = true }
