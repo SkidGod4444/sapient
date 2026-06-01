@@ -50,10 +50,14 @@ jobs:
             features: wgpu
             suffix: -gpu
 
-          # Linux — ARM64 (native ARM runner — Pi 4/5 64-bit, cloud ARM; avoids cross-rs)
+          # Linux — ARM64 (Pi 4/5 64-bit, cloud ARM). Cross-compiled from x86_64 with
+          # cargo-zigbuild on the stable runner — the native ubuntu-*-arm pool was
+          # preemptible and kept killing release builds mid-link (SIGTERM/143). rustls
+          # (no openssl-sys) makes this clean; same path as the documented Pi build.
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
+            os: ubuntu-22.04
             archive: tar.gz
+            zigbuild: true
 
           # Windows — x86_64
           - target: x86_64-pc-windows-msvc
@@ -91,10 +95,22 @@ jobs:
 
       # ── macOS universal binary setup ───────────────────────────────────────
       - name: Install OpenSSL (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && !matrix.zigbuild
         run: |
           sudo apt-get update -q
           sudo apt-get install -y pkg-config libssl-dev
+
+      # Cross-compile aarch64-linux from the x86_64 runner via cargo-zigbuild (zig is
+      # the C cross-linker). Avoids the flaky native ARM runner pool. rustls means no
+      # openssl-sys to cross-build. cargo-zigbuild auto-detects the ziglang pip module
+      # (`python3 -m ziglang`), so no PATH setup is needed.
+      - name: Install zigbuild toolchain (cross aarch64-linux)
+        if: matrix.zigbuild
+        run: |
+          set -euo pipefail
+          rustup target add ${{ matrix.target }}
+          pip3 install ziglang==0.13.0
+          cargo install --locked cargo-zigbuild
 
       # MLX (the Metal GPU backend) is built from source by mlx-rs and needs CMake.
       - name: Install MLX build deps (macOS Metal)
@@ -136,7 +152,7 @@ jobs:
           }
 
       - name: Build (native — Linux/macOS)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && !matrix.zigbuild
         shell: bash
         run: |
           FEATURES="${{ matrix.features }}"
@@ -146,11 +162,23 @@ jobs:
             cargo build --release -p sapient-cli --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }}
           fi
 
+      - name: Build (zigbuild — cross aarch64-linux)
+        if: matrix.zigbuild
+        shell: bash
+        run: cargo zigbuild --release -p sapient-cli --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }}
+
       # ── Strip binary (reduces size ~50-70%) ───────────────────────────────
+      # Use llvm-strip (ships with the zig toolchain via cargo-zigbuild's clang) for the
+      # cross-compiled aarch64 binary — the host `strip` can't handle a foreign arch.
       - name: Strip binary (Linux/macOS)
         if: runner.os != 'Windows'
         run: |
-          strip target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}${{ matrix.ext || '' }} || true
+          BIN="target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}${{ matrix.ext || '' }}"
+          if [ "${{ matrix.zigbuild }}" = "true" ]; then
+            llvm-strip "$BIN" 2>/dev/null || aarch64-linux-gnu-strip "$BIN" 2>/dev/null || true
+          else
+            strip "$BIN" || true
+          fi
 
       # ── Package ───────────────────────────────────────────────────────────
       - name: Package (tar.gz)
