@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use sapient_core::Tensor;
+use sapient_core::{DType, Tensor};
 
 const HF_PREFIX: &str = "model.";
 
@@ -123,6 +123,111 @@ pub fn unpermute_qk_rows(t: &Tensor, n_head: usize, head_dim: usize) -> Result<T
     }
 }
 
+/// Slice `nrows` rows starting at `start_row` from a 1-D or 2-D tensor, preserving
+/// dtype via per-row byte copies (quantized rows align to block boundaries because
+/// `in` is a multiple of the block size). Used to split fused Phi tensors.
+fn slice_rows(t: &Tensor, start_row: usize, nrows: usize) -> Result<Tensor> {
+    let dims = t.shape().dims().to_vec();
+    let (total_rows, in_dim, two_d) = match dims.len() {
+        2 => (dims[0], dims[1], true),
+        1 => (dims[0], 1, false),
+        _ => bail!("slice_rows: expected 1-D or 2-D tensor, got {dims:?}"),
+    };
+    if start_row + nrows > total_rows {
+        bail!("slice_rows out of range: {start_row}+{nrows} > {total_rows}");
+    }
+    let row_bytes = t.dtype().byte_count(in_dim);
+    let src = t.as_bytes();
+    let (off, end) = (start_row * row_bytes, (start_row + nrows) * row_bytes);
+    if end > src.len() {
+        bail!("slice_rows: buffer too small ({} < {end})", src.len());
+    }
+    let bytes = &src[off..end];
+    let new_dims = if two_d {
+        vec![nrows, in_dim]
+    } else {
+        vec![nrows]
+    };
+    match t.dtype() {
+        DType::F32 => {
+            let f: Vec<f32> = bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            Tensor::from_f32(&f, new_dims).map_err(|e| anyhow::anyhow!("{e}"))
+        }
+        DType::F16 => Tensor::from_f16_bytes(bytes, new_dims).map_err(|e| anyhow::anyhow!("{e}")),
+        d if d.is_quantized() => {
+            Tensor::from_quant_bytes(bytes, new_dims, d).map_err(|e| anyhow::anyhow!("{e}"))
+        }
+        other => bail!("slice_rows: unsupported dtype {other:?}"),
+    }
+}
+
+/// Prepare Phi-family GGUF weights for `PhiForward`. Phi GGUFs fuse Q/K/V into one
+/// `attn_qkv` tensor (mapped to `self_attn.qkv_proj`) which we split into separate
+/// q/k/v by GQA dims; Phi-3/4 additionally fuse gate+up into `ffn_up` (mapped to
+/// `mlp.up_proj`) which `PhiForward` expects as `mlp.gate_up_proj`. Phi-1/1.5/2 use
+/// `mlp.fc1`/`fc2` (GELU). Splits weights and (for Phi-2) biases.
+pub fn split_phi_gguf_fused(
+    weights: &mut HashMap<String, Tensor>,
+    n_heads: usize,
+    n_kv: usize,
+    head_dim: usize,
+    is_phi3: bool,
+) -> Result<()> {
+    let q_rows = n_heads * head_dim;
+    let k_rows = n_kv * head_dim;
+    let v_rows = n_kv * head_dim;
+    let total = q_rows + k_rows + v_rows;
+
+    let qkv_keys: Vec<String> = weights
+        .keys()
+        .filter(|k| k.contains("self_attn.qkv_proj."))
+        .cloned()
+        .collect();
+    for key in qkv_keys {
+        let (base, suffix) = key.split_once("qkv_proj.").unwrap();
+        let (base, suffix) = (base.to_string(), suffix.to_string()); // "weight" | "bias"
+        let t = weights.remove(&key).unwrap();
+        let actual = t.shape().dims()[0];
+        if actual != total {
+            bail!(
+                "Phi qkv split for '{key}': expected {total} rows \
+                 (q {q_rows} + k {k_rows} + v {v_rows}) but tensor has {actual} — \
+                 check head_count/head_count_kv/head_dim"
+            );
+        }
+        weights.insert(format!("{base}q_proj.{suffix}"), slice_rows(&t, 0, q_rows)?);
+        weights.insert(
+            format!("{base}k_proj.{suffix}"),
+            slice_rows(&t, q_rows, k_rows)?,
+        );
+        weights.insert(
+            format!("{base}v_proj.{suffix}"),
+            slice_rows(&t, q_rows + k_rows, v_rows)?,
+        );
+    }
+
+    // Rename the generically-mapped FFN tensors to what PhiForward expects.
+    let rename = |w: &mut HashMap<String, Tensor>, from: &str, to: &str| {
+        let keys: Vec<String> = w.keys().filter(|k| k.contains(from)).cloned().collect();
+        for k in keys {
+            let nk = k.replace(from, to);
+            let t = w.remove(&k).unwrap();
+            w.insert(nk, t);
+        }
+    };
+    if is_phi3 {
+        // ggml's phi3 `ffn_up` is the FUSED gate_up (generically mapped to up_proj).
+        rename(weights, "mlp.up_proj.", "mlp.gate_up_proj.");
+    } else {
+        rename(weights, "mlp.up_proj.", "mlp.fc1.");
+        rename(weights, "mlp.down_proj.", "mlp.fc2.");
+    }
+    Ok(())
+}
+
 /// Apply [`unpermute_qk_rows`] to every `self_attn.q_proj`/`k_proj` weight in a
 /// freshly-loaded llama-family GGUF weight map. `n_head`/`n_kv_head` come from the
 /// model config; `head_dim` is `hidden / n_head`.
@@ -186,6 +291,9 @@ fn map_blk_tensor(key: &str) -> Option<String> {
         "attn_q" => format!("layers.{layer}.self_attn.q_proj"),
         "attn_k" => format!("layers.{layer}.self_attn.k_proj"),
         "attn_v" => format!("layers.{layer}.self_attn.v_proj"),
+        // Phi (and some others) fuse Q/K/V into one tensor; preserve it so the Phi
+        // GGUF loader can split it into q/k/v by GQA dims (`split_phi_gguf_fused`).
+        "attn_qkv" => format!("layers.{layer}.self_attn.qkv_proj"),
         "attn_output" => format!("layers.{layer}.self_attn.o_proj"),
         "ffn_norm" => format!("layers.{layer}.post_attention_layernorm"),
         "ffn_gate" => format!("layers.{layer}.mlp.gate_proj"),

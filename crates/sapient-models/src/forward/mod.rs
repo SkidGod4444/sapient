@@ -163,7 +163,19 @@ impl ForwardEngine {
                 )?))
             }
             ArchType::Phi => {
-                bail!("GGUF Phi models are not yet supported — use safetensors weights")
+                // Phi GGUFs fuse Q/K/V (and, for Phi-3/4, gate+up). Split them into
+                // the separate / renamed tensors PhiForward expects before loading.
+                let is_phi3 = info.model_type == "phi3";
+                crate::gguf_weights::split_phi_gguf_fused(
+                    &mut weights,
+                    info.num_attention_heads,
+                    info.num_key_value_heads,
+                    info.head_dim,
+                    is_phi3,
+                )?;
+                Ok(Self::Phi(PhiForward::from_weights_with_backend(
+                    info, weights, backend,
+                )?))
             }
             other => bail!(
                 "architecture {other:?} does not yet support GGUF loading — \

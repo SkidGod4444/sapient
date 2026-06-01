@@ -356,8 +356,15 @@ impl PhiForward {
                 resolve_bias(&self.weights, &self.prefix, "norm"),
             ),
         };
-        self.backend
-            .layer_norm(&x, norm_w, norm_b, self.info.rms_norm_eps as f32)
+        let is_phi2 = matches!(self.info.model_type.as_str(), "phi" | "phi2");
+        apply_norm(
+            &self.backend,
+            &x,
+            norm_w,
+            norm_b,
+            self.info.rms_norm_eps as f32,
+            !is_phi2,
+        )
     }
 
     fn forward_layer(
@@ -373,11 +380,15 @@ impl PhiForward {
         let pfx = format!("layers.{layer_idx}");
         let eps = self.info.rms_norm_eps as f32;
         let n_heads = self.info.num_attention_heads;
+        let n_kv = self.info.num_key_value_heads;
         let head_dim = self.info.head_dim;
         let rotary_dim = ((self.info.partial_rotary_factor * head_dim as f64).round() as usize)
             .clamp(2, head_dim);
         let theta = self.info.rope_theta as f32;
-        let is_phi2 = self.info.model_type == "phi";
+        // Phi-1/1.5/2 use the parallel block + LayerNorm + fc1/fc2 GELU MLP; Phi-3/4
+        // use the sequential block + RMSNorm + fused gate_up SwiGLU. GGUF reports
+        // "phi"/"phi2" for the former, "phi3" for the latter.
+        let is_phi2 = matches!(self.info.model_type.as_str(), "phi" | "phi2");
 
         // ── Phase 1: norm, QKV, RoPE (and parallel MLP for Phi-2) ────────────────
         // The backend reference is held only within this inner scope; it is dropped
@@ -394,7 +405,7 @@ impl PhiForward {
             let in_ln = format!("{pfx}.input_layernorm");
             let norm_w = resolve_weight(weights, prefix, &in_ln)?;
             let norm_b = resolve_bias(weights, prefix, &in_ln);
-            let h = bk.layer_norm(&x, norm_w, norm_b, eps)?;
+            let h = apply_norm(bk, &x, norm_w, norm_b, eps, !is_phi2)?;
 
             let q = linear_with_bias_bk(
                 bk,
@@ -421,9 +432,10 @@ impl PhiForward {
                 None,
             )?;
 
+            // GQA: k/v have n_kv heads (== n_heads for Phi-1/2; < for Phi-3/4).
             let q = split_heads(&q, n_heads, head_dim)?;
-            let k = split_heads(&k, n_heads, head_dim)?;
-            let v = split_heads(&v, n_heads, head_dim)?;
+            let k = split_heads(&k, n_kv, head_dim)?;
+            let v = split_heads(&v, n_kv, head_dim)?;
 
             let q = bk.apply_rope_partial(&q, positions, theta, rotary_dim)?;
             let k = bk.apply_rope_partial(&k, positions, theta, rotary_dim)?;
@@ -460,7 +472,7 @@ impl PhiForward {
         let weights = &self.weights;
         let prefix = &self.prefix;
 
-        let attn = bk.gqa_attention(&q, &k, &v, n_heads, true)?;
+        let attn = bk.gqa_attention(&q, &k, &v, n_kv, true)?;
         let attn = merge_heads(&attn)?;
         let o = linear_with_bias_bk(
             bk,
@@ -480,7 +492,7 @@ impl PhiForward {
             let post_ln = format!("{pfx}.post_attention_layernorm");
             let pn_w = resolve_weight(weights, prefix, &post_ln)?;
             let pn_b = resolve_bias(weights, prefix, &post_ln);
-            let hn = bk.layer_norm(&x, pn_w, pn_b, eps)?;
+            let hn = apply_norm(bk, &x, pn_w, pn_b, eps, !is_phi2)?;
             let ff = mlp_phi3_bk(bk, weights, prefix, &hn, &pfx)?;
             bk.add(&x, &ff)
         }
@@ -488,6 +500,23 @@ impl PhiForward {
 }
 
 // ── Free helper functions (explicit backend + weights refs, borrow-checker safe) ──
+
+/// Apply the block's normalization: RMSNorm for Phi-3/4 (`rms = true`), LayerNorm
+/// (with optional bias) for Phi-1/1.5/2. Phi-3 switched from LayerNorm to RMSNorm.
+fn apply_norm(
+    bk: &LlmBackendDispatch,
+    x: &Tensor,
+    weight: &Tensor,
+    bias: Option<&Tensor>,
+    eps: f32,
+    rms: bool,
+) -> Result<Tensor> {
+    if rms {
+        bk.rms_norm(x, weight, eps)
+    } else {
+        bk.layer_norm(x, weight, bias, eps)
+    }
+}
 
 /// Linear projection with optional bias; resolves `name` (or `alt` fallback).
 fn linear_with_bias_bk(

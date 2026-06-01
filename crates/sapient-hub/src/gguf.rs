@@ -133,9 +133,12 @@ pub fn tokenizer_fallback_model(model_id: &str) -> Option<&'static str> {
     if id.contains("codellama") || id.contains("code-llama") {
         return Some("codellama/CodeLlama-7b-hf");
     }
-    // Phi-4 uses the same tokenizer as Phi-3
-    if id.contains("phi-4") || id.contains("phi4") {
-        return Some("microsoft/Phi-3-mini-4k-instruct");
+    // Phi-4-mini uses a GPT-2/tiktoken BPE tokenizer (~200k vocab) — completely
+    // different from Phi-3's 32k SentencePiece. The GGUF general.name is "Phi 4
+    // Mini Instruct" (spaces), so match those too. Loading the Phi-3 tokenizer here
+    // mis-encodes every prompt → repeated/garbage output.
+    if id.contains("phi-4") || id.contains("phi4") || id.contains("phi 4") {
+        return Some("microsoft/Phi-4-mini-instruct");
     }
     if id.contains("phi-3") || id.contains("phi3") {
         return Some("microsoft/Phi-3-mini-4k-instruct");
