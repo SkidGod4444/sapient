@@ -6,6 +6,8 @@ mod llama;
 #[cfg(all(target_os = "macos", feature = "mlx"))]
 mod mlx_engine;
 mod phi;
+#[cfg(feature = "wgpu")]
+mod wgpu_engine;
 
 use std::path::{Path, PathBuf};
 
@@ -20,6 +22,8 @@ pub use llama::LlamaForward;
 #[cfg(all(target_os = "macos", feature = "mlx"))]
 pub use mlx_engine::MlxForwardEngine;
 pub use phi::PhiForward;
+#[cfg(feature = "wgpu")]
+pub use wgpu_engine::WgpuForwardEngine;
 
 /// Architecture-specific inference engine with KV-cache support.
 pub enum ForwardEngine {
@@ -30,6 +34,11 @@ pub enum ForwardEngine {
     /// Enabled when `--backend metal` (or `auto` on Apple Silicon) for Llama/Qwen/Mistral.
     #[cfg(all(target_os = "macos", feature = "mlx"))]
     MlxLlama(MlxForwardEngine),
+    /// Cross-platform GPU engine (wgpu/WGSL — Vulkan/DX12/Metal). Selected by
+    /// `--backend wgpu` for Llama-family models; weights are GPU-resident.
+    /// Boxed: the engine struct is large relative to the other variants.
+    #[cfg(feature = "wgpu")]
+    Wgpu(Box<WgpuForwardEngine>),
 }
 
 fn weight_format_from_paths(weight_paths: &[PathBuf]) -> WeightFormat {
@@ -83,6 +92,9 @@ impl ForwardEngine {
             }
             WeightFormat::Safetensors | WeightFormat::PyTorchBin => match info.arch {
                 ArchType::Llama | ArchType::Qwen | ArchType::Gemma | ArchType::Mixtral => {
+                    if matches!(backend, LlmBackendKind::Wgpu) {
+                        return Self::build_wgpu(info, weight_paths);
+                    }
                     Ok(Self::Llama(LlamaForward::from_files_with_backend(
                         info,
                         weight_paths,
@@ -146,6 +158,10 @@ impl ForwardEngine {
         }
         match info.arch {
             ArchType::Llama | ArchType::Qwen | ArchType::Gemma | ArchType::Mixtral => {
+                // Cross-platform GPU path (Vulkan/DX12/Metal) when explicitly requested.
+                if matches!(backend, LlmBackendKind::Wgpu) {
+                    return Self::build_wgpu_from_weights(info, weights);
+                }
                 // Use the fully-native MLX engine when Metal is available and selected.
                 if use_mlx_engine(backend) {
                     #[cfg(all(target_os = "macos", feature = "mlx"))]
@@ -184,12 +200,46 @@ impl ForwardEngine {
         }
     }
 
+    /// Build the wgpu GPU engine from already-loaded weights (GGUF path).
+    fn build_wgpu_from_weights(
+        info: ModelInfo,
+        weights: std::collections::HashMap<String, sapient_core::Tensor>,
+    ) -> Result<Self> {
+        #[cfg(feature = "wgpu")]
+        {
+            Ok(Self::Wgpu(Box::new(
+                wgpu_engine::WgpuForwardEngine::from_weights(info, weights)?,
+            )))
+        }
+        #[cfg(not(feature = "wgpu"))]
+        {
+            let _ = (info, weights);
+            bail!("wgpu backend not compiled in — rebuild with `--features wgpu`")
+        }
+    }
+
+    /// Build the wgpu GPU engine from weight files (safetensors path).
+    #[cfg_attr(not(feature = "wgpu"), allow(unused_variables))]
+    fn build_wgpu(info: ModelInfo, weight_paths: &[PathBuf]) -> Result<Self> {
+        #[cfg(feature = "wgpu")]
+        {
+            let weights = crate::weights::load_hf_weights(weight_paths)?;
+            Self::build_wgpu_from_weights(info, weights)
+        }
+        #[cfg(not(feature = "wgpu"))]
+        {
+            bail!("wgpu backend not compiled in — rebuild with `--features wgpu`")
+        }
+    }
+
     pub fn reset_cache(&mut self) {
         match self {
             Self::Llama(f) => f.reset_cache(),
             Self::Phi(f) => f.reset_cache(),
             #[cfg(all(target_os = "macos", feature = "mlx"))]
             Self::MlxLlama(f) => f.reset_cache(),
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(f) => f.reset_cache(),
         }
     }
 
@@ -206,6 +256,8 @@ impl ForwardEngine {
                 f.reset_cache();
                 0
             }
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(f) => f.truncate_cache(n),
         }
     }
 
@@ -215,6 +267,8 @@ impl ForwardEngine {
             Self::Phi(f) => f.forward_logits(input_ids, use_cache),
             #[cfg(all(target_os = "macos", feature = "mlx"))]
             Self::MlxLlama(f) => f.forward_logits(input_ids, use_cache),
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(f) => f.forward_logits(input_ids, use_cache),
         }
     }
 
@@ -224,6 +278,8 @@ impl ForwardEngine {
             Self::Phi(f) => f.forward_all_logits(input_ids),
             #[cfg(all(target_os = "macos", feature = "mlx"))]
             Self::MlxLlama(f) => f.forward_all_logits(input_ids),
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(f) => f.forward_all_logits(input_ids),
         }
     }
 
@@ -238,6 +294,8 @@ impl ForwardEngine {
             Self::Phi(f) => f.forward_all_logits_cached(input_ids),
             #[cfg(all(target_os = "macos", feature = "mlx"))]
             Self::MlxLlama(f) => f.forward_all_logits(input_ids),
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(f) => f.forward_all_logits_cached(input_ids),
         }
     }
 
@@ -250,6 +308,11 @@ impl ForwardEngine {
                 let _ = input_ids;
                 bail!("embed() not yet implemented for MlxForwardEngine")
             }
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(_) => {
+                let _ = input_ids;
+                bail!("embed() not yet implemented for WgpuForwardEngine")
+            }
         }
     }
 
@@ -260,6 +323,8 @@ impl ForwardEngine {
             Self::Phi(f) => f.is_hybrid(),
             #[cfg(all(target_os = "macos", feature = "mlx"))]
             Self::MlxLlama(_) => false,
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(f) => f.is_hybrid(),
         }
     }
 
@@ -270,6 +335,8 @@ impl ForwardEngine {
             Self::Phi(f) => f.backend_label(),
             #[cfg(all(target_os = "macos", feature = "mlx"))]
             Self::MlxLlama(_) => "metal (MLX native graph)".to_string(),
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(f) => f.backend_label(),
         }
     }
 }

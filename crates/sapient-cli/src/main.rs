@@ -56,7 +56,7 @@ enum Commands {
         /// HuggingFace model ID (e.g. `microsoft/phi-2`).
         model: String,
 
-        /// Generation backend: auto | cpu | metal.
+        /// Generation backend: auto | cpu | metal | wgpu.
         #[arg(short, long, default_value = "auto")]
         backend: String,
 
@@ -157,7 +157,7 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
 
-        /// Backend: auto | cpu | metal | vulkan.
+        /// Backend: auto | cpu | metal | wgpu.
         #[arg(short, long, default_value = "auto")]
         backend: String,
 
@@ -212,7 +212,7 @@ enum Commands {
         #[arg(long)]
         mmap: bool,
 
-        /// Generation backend: auto | cpu | metal.
+        /// Generation backend: auto | cpu | metal | wgpu.
         #[arg(short, long, default_value = "auto")]
         backend: String,
 
@@ -246,7 +246,7 @@ enum Commands {
         #[arg(short, long, default_value = "11435")]
         port: u16,
 
-        /// Generation backend: auto | cpu | metal.
+        /// Generation backend: auto | cpu | metal | wgpu.
         #[arg(short, long, default_value = "auto")]
         backend: String,
 

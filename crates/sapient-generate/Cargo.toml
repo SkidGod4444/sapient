@@ -31,6 +31,8 @@ async-trait = { workspace = true }
 [features]
 default = []
 mlx = ["sapient-models/mlx"]
+# Cross-platform GPU inference (Vulkan/DX12/Metal via wgpu) — Intel/AMD/Nvidia/Apple.
+wgpu = ["sapient-models/wgpu"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
