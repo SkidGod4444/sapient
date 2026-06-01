@@ -808,6 +808,8 @@ impl Pipeline {
                 ForwardEngine::Phi(_) => {}
                 #[cfg(all(target_os = "macos", feature = "mlx"))]
                 ForwardEngine::MlxLlama(_) => return "metal (MLX native graph)".to_string(),
+                #[cfg(feature = "wgpu")]
+                ForwardEngine::Wgpu(f) => return f.backend_label(),
             }
         }
         self.backend.to_string()
