@@ -817,6 +817,81 @@ async fn handle_completions(
     }
 }
 
+// ── Single-instance lock ───────────────────────────────────────────────────────
+//
+// Only one `sapient serve` should run per machine — two instances (even on
+// different ports) double the resident-model RAM and confuse which one a tunnel
+// targets. A pidfile guards this: startup refuses if a live serve already holds
+// it; the file is removed on clean exit. A stale file (previous crash) is taken
+// over. Override with SAPIENT_ALLOW_MULTIPLE=1.
+
+/// RAII pidfile lock for the serve process. Removed on drop.
+struct ServeLock {
+    path: std::path::PathBuf,
+}
+
+impl ServeLock {
+    fn acquire() -> Result<Option<Self>> {
+        if std::env::var("SAPIENT_ALLOW_MULTIPLE").is_ok() {
+            return Ok(None);
+        }
+        let path = serve_lock_path();
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            if let Ok(pid) = contents.trim().parse::<i32>() {
+                if pid != std::process::id() as i32 && pid_alive(pid) {
+                    anyhow::bail!(
+                        "another `sapient serve` is already running (PID {pid}).\n\
+                         Stop it first (e.g. `kill {pid}`), or set SAPIENT_ALLOW_MULTIPLE=1 \
+                         to run a second instance. Lock: {}",
+                        path.display()
+                    );
+                }
+                // Stale pidfile (previous instance crashed) — take it over.
+            }
+        }
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&path, std::process::id().to_string())
+            .with_context(|| format!("failed to write serve lock {}", path.display()))?;
+        Ok(Some(Self { path }))
+    }
+}
+
+impl Drop for ServeLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn serve_lock_path() -> std::path::PathBuf {
+    dirs::runtime_dir()
+        .or_else(dirs::cache_dir)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("sapient")
+        .join("serve.lock")
+}
+
+/// True if a process with `pid` exists. `kill(pid, 0)` returns 0 when alive and
+/// `EPERM` when it exists but we can't signal it; only `ESRCH` means truly gone.
+#[cfg(unix)]
+fn pid_alive(pid: i32) -> bool {
+    let rc = unsafe { libc::kill(pid, 0) };
+    if rc == 0 {
+        true
+    } else {
+        // EPERM → exists but we can't signal it; ESRCH → truly gone.
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+}
+
+#[cfg(not(unix))]
+fn pid_alive(_pid: i32) -> bool {
+    // No portable liveness check; assume a present pidfile means a live instance
+    // (a stale one can be removed manually).
+    true
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -831,6 +906,10 @@ pub async fn serve_llm(
     speculative: bool,
     draft_model: Option<&str>,
 ) -> Result<()> {
+    // Refuse to start if another `sapient serve` is already running (single
+    // instance per machine). Held for the server's lifetime; removed on exit.
+    let _serve_lock = ServeLock::acquire()?;
+
     // Concurrency limit: explicit flag, else number of CPUs (capped) — inference
     // is compute-bound, so oversubscribing hurts. At least 1.
     let concurrency = if max_concurrency > 0 {
