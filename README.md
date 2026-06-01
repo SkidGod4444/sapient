@@ -48,10 +48,14 @@ Grab a pre-built binary for your platform from the [**latest release**](https://
 | macOS (Apple Silicon, Metal GPU) | `sapient-aarch64-apple-darwin-metal.tar.gz` |
 | macOS (Intel) | `sapient-x86_64-apple-darwin.tar.gz` |
 | Linux (x86_64) | `sapient-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux (x86_64, GPU — Intel/AMD/Nvidia via Vulkan) | `sapient-x86_64-unknown-linux-gnu-gpu.tar.gz` |
 | Linux (ARM64 — Pi 4/5 64-bit OS, cloud ARM) | `sapient-aarch64-unknown-linux-gnu.tar.gz` |
 | Windows (x86_64) | `sapient-x86_64-pc-windows-msvc.zip` |
+| Windows (x86_64, GPU — Intel/AMD/Nvidia via DX12) | `sapient-x86_64-pc-windows-msvc-gpu.zip` |
 
 > **Linux:** ARM64 binaries target 64-bit glibc systems (Pi 4/5 with Raspberry Pi OS 64-bit). 32-bit `armhf`/`armv7` is not built.
+>
+> **`-gpu` binaries** add the cross-platform wgpu GPU backend (`--backend wgpu`); use them on any Intel/AMD/Nvidia GPU. On Linux they need the Vulkan loader (`libvulkan1`) and your GPU driver installed. The plain binaries are CPU-only. On Apple Silicon use the `-metal` binary instead.
 
 
 ---
@@ -274,6 +278,16 @@ cargo build --release -p sapient-cli --features wgpu
 First cut: Llama-family models, f32 weights/KV cache, one token per submission.
 In-shader Q4_K/Q8_0 dequant, an f16/quantized KV cache, kernel fusion, and batched
 prefill are tracked in [ROADMAP Phase 3b](docs/ROADMAP.md).
+
+**Benchmark it on your machine.** `scripts/bench_wgpu.py` times TTFT and decode tok/s
+across backends so you can see what your GPU buys you — works on any OS/vendor, needs
+only Python's standard library:
+
+```bash
+python3 scripts/bench_wgpu.py                       # cpu vs wgpu (vs metal on a Mac)
+python3 scripts/bench_wgpu.py --model openhorizon/qwen2.5-1.5b --tokens 128
+python3 scripts/bench_wgpu.py --chart bench.png     # + a bar chart (needs matplotlib)
+```
 
 ---
 
