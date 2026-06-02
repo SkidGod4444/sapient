@@ -134,6 +134,12 @@ enum Commands {
         /// System prompt to seed the conversation.
         #[arg(long)]
         system: Option<String>,
+
+        /// Also speak the reply aloud via Orpheus TTS (slow on CPU — a 3B LM
+        /// decode runs per reply; keep replies short). Off by default; replies
+        /// stream as text either way.
+        #[arg(long)]
+        speak: bool,
     },
 
     /// Synthesise speech from text with an Orpheus TTS model (text-to-speech).
@@ -437,7 +443,18 @@ async fn dispatch(cli: Cli) -> Result<()> {
             backend,
             language,
             system,
-        } => converse_command(model.as_str(), stt.as_str(), &backend, language, system).await,
+            speak,
+        } => {
+            converse_command(
+                model.as_str(),
+                stt.as_str(),
+                &backend,
+                language,
+                system,
+                speak,
+            )
+            .await
+        }
         Commands::Speak {
             model,
             text,
@@ -1501,6 +1518,7 @@ async fn converse_command(
     _backend: &str,
     _language: Option<String>,
     _system: Option<String>,
+    _speak: bool,
 ) -> Result<()> {
     anyhow::bail!(
         "this build was compiled without live audio I/O. Rebuild with the \
@@ -1517,18 +1535,45 @@ async fn converse_command(
     backend: &str,
     language: Option<String>,
     system: Option<String>,
+    speak: bool,
 ) -> Result<()> {
+    use std::io::{IsTerminal, Write};
+
     use sapient_generate::{
-        ConversePipeline, EnergyVad, MicCapture, NoopTts, Pipeline, TranscribePipeline, VadConfig,
+        microphone_guidance, open_privacy_settings, request_microphone, ConversePipeline,
+        EnergyVad, MicCapture, MicPermission, NoopTts, Pipeline, SpeakPipeline, SpeakerPlayback,
+        TranscribePipeline, Tts, VadConfig,
     };
 
     let backend_kind = parse_generation_backend(backend)?;
+
+    // Ask the OS for microphone access up front (macOS shows the consent prompt;
+    // Windows/Linux have no per-app prompt → Unknown, handled by the level meter).
+    match tokio::task::block_in_place(request_microphone) {
+        MicPermission::Denied => {
+            eprintln!(
+                "⚠️  Microphone access is denied.\n   {}",
+                microphone_guidance()
+            );
+            open_privacy_settings();
+            return Ok(());
+        }
+        MicPermission::Granted | MicPermission::Unknown => {}
+    }
+
     let loading = ui::spinner(format!("loading {stt} + {model}…"));
     let stt_pipe = TranscribePipeline::from_pretrained_with_backend(stt, backend_kind).await?;
     let llm = Pipeline::from_pretrained(model).await?;
+    // Optional spoken replies via Orpheus TTS (a 3B LM — slow on CPU).
+    let tts: Box<dyn Tts> = if speak {
+        let sp = SpeakPipeline::from_pretrained_with_backend("orpheus-3b", backend_kind).await?;
+        Box::new(sp)
+    } else {
+        Box::new(NoopTts)
+    };
     drop(loading);
 
-    let mut converse = ConversePipeline::new(stt_pipe, llm, Box::new(NoopTts));
+    let mut converse = ConversePipeline::new(stt_pipe, llm, tts);
     if let Some(s) = system {
         converse = converse.with_system(s);
     }
@@ -1541,30 +1586,124 @@ async fn converse_command(
     let cap = MicCapture::default_input()?;
     let src_rate = cap.sample_rate();
     let frames = cap.frames();
+    // Speaker is opened only for --speak (and only if an output device exists).
+    let player = if speak {
+        match SpeakerPlayback::default_output() {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!("warning: no speaker output ({e}); replies will be text-only");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let frame_samples = (src_rate / 50).max(1) as usize; // 20 ms VAD frames at device rate
-    let mut vad = EnergyVad::new(VadConfig {
-        frame_samples,
-        ..VadConfig::default()
-    });
+    let new_vad = || {
+        EnergyVad::new(VadConfig {
+            frame_samples,
+            ..VadConfig::default()
+        })
+    };
+    let mut vad = new_vad();
     let mut buf: Vec<f32> = Vec::new();
 
-    println!("🎙️  listening — speak, then pause. Ctrl-C to stop.\n");
+    println!("🎧 input device @ {src_rate} Hz · STT {stt} · LLM {model}");
+    if speak {
+        println!("🔊 spoken replies on (Orpheus TTS — slow; replies stream as text first)");
+    }
+    println!("🎙️  listening — speak, then pause. Ctrl-C to stop.");
+
+    // Live mic meter + a one-time hint if the mic looks dead (e.g. the terminal
+    // lacks macOS microphone permission, so cpal delivers only silence).
+    let tty = std::io::stdout().is_terminal();
+    let mut peak = 0.0f32;
+    let mut meter_tick = 0u32;
+    let mut total_frames = 0u64;
+    let mut warned_silent = false;
+    let mut meter_shown = false;
+    let clear_meter = |shown: &mut bool| {
+        if *shown {
+            print!("\r\x1b[2K");
+            let _ = std::io::stdout().flush();
+            *shown = false;
+        }
+    };
+
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => { println!("\n👋 bye"); break; }
+            _ = tokio::signal::ctrl_c() => { clear_meter(&mut meter_shown); println!("\n👋 bye"); break; }
             chunk = frames.recv_async() => {
                 let Ok(chunk) = chunk else { break };
                 buf.extend_from_slice(&chunk);
                 while buf.len() >= frame_samples {
                     let frame: Vec<f32> = buf.drain(..frame_samples).collect();
+                    // Live input level (independent of the VAD) so the user can
+                    // see the mic is hot.
+                    let rms = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
+                    peak = peak.max(rms);
+                    total_frames += 1;
+                    meter_tick += 1;
+                    if tty && meter_tick % 5 == 0 {
+                        let bars = ((rms * 60.0).min(1.0) * 24.0) as usize;
+                        print!("\r\x1b[2K  mic [{}{}]", "#".repeat(bars), "·".repeat(24 - bars));
+                        let _ = std::io::stdout().flush();
+                        meter_shown = true;
+                    }
+                    // ~5 s in with no real signal → the mic is almost certainly muted/denied.
+                    if !warned_silent && total_frames > (src_rate as u64 / frame_samples as u64) * 5 && peak < 1e-3 {
+                        warned_silent = true;
+                        clear_meter(&mut meter_shown);
+                        eprintln!(
+                            "⚠️  no audio from the mic yet (peak ~0). On macOS, grant your \
+                             terminal Microphone access in System Settings ▸ Privacy & \
+                             Security ▸ Microphone, then restart converse."
+                        );
+                    }
+
                     if let Some(utt) = vad.push(&frame) {
+                        clear_meter(&mut meter_shown);
                         // Resample the finalized utterance (device rate → 16 kHz) for STT.
                         let utt16 = sapient_audio::io::resample(&utt, src_rate, 16_000)?;
-                        if let Some(turn) = converse.run_utterance(&utt16).await? {
-                            println!("🗣️  {}", turn.transcript);
-                            println!("🤖 {}\n", turn.reply);
-                            // (When a real TTS replaces NoopTts, play turn.audio here.)
+
+                        print!("🗣️  transcribing…\r");
+                        let _ = std::io::stdout().flush();
+                        let transcript = converse.transcribe_utterance(&utt16)?;
+                        print!("\x1b[2K");
+                        if transcript.is_empty() {
+                            println!("🗣️  (didn't catch that — try again)");
+                        } else {
+                            println!("🗣️  you: {transcript}");
+                            print!("🤖 ");
+                            let _ = std::io::stdout().flush();
+                            let turn = converse
+                                .respond_streaming(&transcript, |tok| {
+                                    print!("{tok}");
+                                    let _ = std::io::stdout().flush();
+                                })
+                                .await?;
+                            println!();
+                            if let Some(p) = &player {
+                                if !turn.audio.is_empty() {
+                                    println!("🔊 speaking…");
+                                    p.submit(&turn.audio, turn.audio_sample_rate)?;
+                                    let secs = turn.audio.len() as f32 / turn.audio_sample_rate as f32;
+                                    tokio::time::sleep(std::time::Duration::from_secs_f32(secs + 0.3)).await;
+                                }
+                            }
+                            println!();
                         }
+
+                        // Discard anything captured during STT/LLM/TTS (including
+                        // our own speaker output) so it isn't treated as the next
+                        // utterance, and reset the segmenter for a fresh turn.
+                        while frames.try_recv().is_ok() {}
+                        buf.clear();
+                        vad = new_vad();
+                        peak = 0.0;
+                        total_frames = 0;
+                        println!("🎙️  listening…");
                     }
                 }
             }

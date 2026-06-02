@@ -19,10 +19,25 @@ realfft      = { workspace = true }
 cpal  = { workspace = true, optional = true }
 flume = { workspace = true, optional = true }
 
+# macOS microphone-permission request (AVFoundation/TCC). Non-optional on macOS
+# (tiny, already in the tree via cpal/metal) and only *used* under `audio-io` +
+# `cfg(target_os = "macos")`; declaring them here avoids the per-target `dep:`
+# feature pitfall. No effect on Linux/Windows builds.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc  = { workspace = true }
+block = { workspace = true }
+
 [features]
-# Live microphone capture + speaker playback (cpal). Off by default so the core
-# build (and headless CI) needs no audio device libraries (ALSA dev headers on Linux).
+# Live microphone capture + speaker playback (cpal). Off by default in this crate
+# so the core build (and headless CI) needs no audio device libraries; the CLI
+# turns it on by default. On Linux it needs ALSA dev headers (libasound2-dev).
 audio-io = ["dep:cpal", "dep:flume"]
 
 [dev-dependencies]
 approx = { workspace = true }
+
+[lints.rust]
+# objc 0.2.7's `class!`/`msg_send!` macros (used in the macOS mic-permission
+# request) expand to a legacy `cfg(feature = "cargo-clippy")`, which newer rustc
+# flags via unexpected_cfgs. Declare it as a known cfg so `-D warnings` is happy.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }

@@ -100,7 +100,9 @@ sapient speak orpheus-3b "The quick brown fox." --voice leo -o fox.wav
 #   voices: tara | leah | jess | leo | dan | mia | zac | zoe
 
 # Voice conversation — mic → speech-to-text → LLM → reply (live mic; Linux needs libasound2-dev)
+# Live mic meter + streamed reply; macOS prompts for mic permission on first run.
 sapient converse openhorizon/qwen2.5-1.5b --stt whisper-base
+sapient converse openhorizon/qwen2.5-1.5b --speak   # also speak replies (Orpheus TTS; slow on CPU)
 
 # Download a model to local cache
 sapient pull openhorizon/phi-2

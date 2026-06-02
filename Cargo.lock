@@ -3804,8 +3804,10 @@ version = "0.4.3"
 dependencies = [
  "anyhow",
  "approx",
+ "block",
  "cpal",
  "flume",
+ "objc",
  "realfft",
  "rubato",
  "sapient-core",
