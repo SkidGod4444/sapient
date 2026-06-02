@@ -17,6 +17,10 @@ pub struct ModelFiles {
     /// Local path to `tokenizer_config.json` (chat template lives here).
     pub tokenizer_config_path: Option<PathBuf>,
 
+    /// Local path to `generation_config.json` (Whisper suppress-token lists,
+    /// forced decoder ids). Absent for most repos.
+    pub generation_config_path: Option<PathBuf>,
+
     /// Local paths to weight shards (GGUF, safetensors, or .bin).
     pub weight_paths: Vec<PathBuf>,
 }

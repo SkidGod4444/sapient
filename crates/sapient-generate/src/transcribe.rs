@@ -13,7 +13,7 @@ use anyhow::{anyhow, Context, Result};
 use sapient_audio::{load_audio, MelConfig, MelFrontend};
 use sapient_core::Tensor;
 use sapient_hub::client::LoadOptions;
-use sapient_hub::whisper_config::WhisperConfig;
+use sapient_hub::whisper_config::{WhisperConfig, WhisperGenConfig};
 use sapient_hub::HubClient;
 use sapient_models::forward::{AudioEngine, WhisperForward};
 use sapient_models::{weights, LlmBackendKind};
@@ -73,6 +73,7 @@ pub struct TranscribePipeline {
     tokenizer: Arc<WhisperTokenizer>,
     mel: MelFrontend,
     cfg: WhisperConfig,
+    gen_cfg: WhisperGenConfig,
     backend: LlmBackendKind,
 }
 
@@ -102,6 +103,14 @@ impl TranscribePipeline {
         let cfg = WhisperConfig::from_config_file(&files.config_path)
             .context("parsing Whisper config.json")?;
 
+        // Optional suppress-token lists; default empty (no suppression) when the
+        // repo ships no generation_config.json.
+        let gen_cfg = files
+            .generation_config_path
+            .as_deref()
+            .and_then(|p| WhisperGenConfig::from_config_file(p).ok())
+            .unwrap_or_default();
+
         let tokenizer = match &files.tokenizer_path {
             Some(p) => WhisperTokenizer::from_file(p)?,
             None => WhisperTokenizer::from_pretrained(model_id)?,
@@ -122,6 +131,7 @@ impl TranscribePipeline {
             tokenizer: Arc::new(tokenizer),
             mel,
             cfg,
+            gen_cfg,
             backend,
         })
     }
@@ -173,6 +183,7 @@ impl TranscribePipeline {
                 &samples[start..end],
                 opts,
                 &self.cfg,
+                &self.gen_cfg,
             )?;
             let text = text.trim();
             if !text.is_empty() {
@@ -188,6 +199,7 @@ impl TranscribePipeline {
 }
 
 /// Transcribe one ≤30 s chunk: log-mel → encode → forced-prompt greedy decode.
+#[allow(clippy::too_many_arguments)]
 fn transcribe_chunk(
     engine: &mut AudioEngine,
     tok: &WhisperTokenizer,
@@ -195,6 +207,7 @@ fn transcribe_chunk(
     chunk: &[f32],
     opts: &TranscribeOptions,
     cfg: &WhisperConfig,
+    gen_cfg: &WhisperGenConfig,
 ) -> Result<String> {
     let mel_t = mel.log_mel(chunk)?;
     engine.encode(&mel_t)?; // runs encoder + caches cross-attention K/V
@@ -215,6 +228,10 @@ fn transcribe_chunk(
     engine.reset_decoder();
     let prompt = tok.sot_sequence(lang.as_deref(), opts.translate, opts.timestamps);
     let mut logits = engine.decode_step(&prompt)?;
+    // First sampled step: mask both the always-suppressed set and the
+    // begin-only set (blank + eot). Subsequent steps mask only `suppress_tokens`.
+    apply_suppress(&mut logits, &gen_cfg.suppress_tokens);
+    apply_suppress(&mut logits, &gen_cfg.begin_suppress_tokens);
 
     let budget = opts
         .max_new_tokens
@@ -231,9 +248,19 @@ fn transcribe_chunk(
             out_tokens.push(next);
         }
         logits = engine.decode_step(&[next])?;
+        apply_suppress(&mut logits, &gen_cfg.suppress_tokens);
     }
 
     tok.decode(&out_tokens, true)
+}
+
+/// Mask the given token ids to -inf so they can never be sampled.
+fn apply_suppress(logits: &mut [f32], ids: &[u32]) {
+    for &id in ids {
+        if let Some(v) = logits.get_mut(id as usize) {
+            *v = f32::NEG_INFINITY;
+        }
+    }
 }
 
 /// Index of the maximum logit.

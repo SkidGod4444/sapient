@@ -179,10 +179,18 @@ impl HubClient {
     // ── Internals ──────────────────────────────────────────────────────────────
 
     async fn resolve_files(&self, repo: &ApiRepo, model_id: &str) -> Result<ModelFiles> {
-        let (config_result, tokenizer_path, tokenizer_config_path, weight_paths) = tokio::join!(
+        let (
+            config_result,
+            tokenizer_path,
+            tokenizer_config_path,
+            generation_config_path,
+            weight_paths,
+        ) = tokio::join!(
             async { repo.get("config.json").await.ok() },
             async { repo.get("tokenizer.json").await.ok() },
             async { repo.get("tokenizer_config.json").await.ok() },
+            // Optional: Whisper ships suppress-token lists here. Ignored if absent.
+            async { repo.get("generation_config.json").await.ok() },
             self.fetch_weights(repo, model_id),
         );
 
@@ -217,6 +225,7 @@ impl HubClient {
             config_path,
             tokenizer_path,
             tokenizer_config_path,
+            generation_config_path,
             weight_paths,
         })
     }

@@ -35,4 +35,4 @@ pub use gguf::{select_best_gguf, tokenizer_fallback_model};
 pub use model_info::{ArchType, ModelInfo};
 pub use registry::resolve_model_alias;
 pub use resolver::{ModelFiles, WeightFormat};
-pub use whisper_config::WhisperConfig;
+pub use whisper_config::{WhisperConfig, WhisperGenConfig};
