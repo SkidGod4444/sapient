@@ -248,9 +248,9 @@ impl WhisperWgpuEngine {
     /// CPU conv stem: mel `[1, n_mels, 3000]` → `[seq, d]` flat vec + seq len.
     fn conv_stem(&self, mel: &Tensor) -> Result<(Vec<f32>, usize)> {
         let mel = mel.to_f32_tensor().map_err(|e| anyhow!("{e}"))?;
-        let x = conv1d(&mel, &self.conv1_w, self.conv1_b.as_ref(), 1, 1)?;
+        let x = conv1d(&mel, &self.conv1_w, self.conv1_b.as_ref(), 1, 1, 1, 1)?;
         let x = cpu_gelu_erf(&x).map_err(|e| anyhow!("{e}"))?;
-        let x = conv1d(&x, &self.conv2_w, self.conv2_b.as_ref(), 1, 2)?;
+        let x = conv1d(&x, &self.conv2_w, self.conv2_b.as_ref(), 1, 2, 1, 1)?;
         let x = cpu_gelu_erf(&x).map_err(|e| anyhow!("{e}"))?;
         // [1, d, T] → [T, d].
         let d = self.cfg.d_model;

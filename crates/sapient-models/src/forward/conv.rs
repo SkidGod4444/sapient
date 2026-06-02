@@ -13,27 +13,31 @@ use anyhow::{anyhow, Result};
 use sapient_backends_cpu::kernels::conv2d::conv2d;
 use sapient_core::{Shape, Tensor};
 
-/// Conv1d: `x [1, C_in, L]`, `weight [C_out, C_in, K]`, optional `bias [C_out]`
-/// → `[1, C_out, L_out]`, with symmetric padding `pad` and stride `stride`.
+/// Conv1d: `x [1, C_in, L]`, `weight [C_out, C_in/groups, K]`, optional `bias
+/// [C_out]` → `[1, C_out, L_out]`, with symmetric padding `pad`, `stride`,
+/// `dilation`, and `groups` (groups = C_in for depthwise). Whisper uses
+/// `dilation=1, groups=1`; SNAC's codec decoder uses depthwise + dilated convs.
 pub fn conv1d(
     x: &Tensor,
     weight: &Tensor,
     bias: Option<&Tensor>,
     pad: usize,
     stride: usize,
+    dilation: usize,
+    groups: usize,
 ) -> Result<Tensor> {
     let xd = x.shape().dims();
     let wd = weight.shape().dims();
     if xd.len() != 3 || wd.len() != 3 {
-        anyhow::bail!("conv1d expects x [1,C_in,L] and weight [C_out,C_in,K]");
+        anyhow::bail!("conv1d expects x [1,C_in,L] and weight [C_out,C_in/groups,K]");
     }
     let (n, c_in, l) = (xd[0], xd[1], xd[2]);
-    let (c_out, c_in_w, k) = (wd[0], wd[1], wd[2]);
+    let (c_out, c_in_g, k) = (wd[0], wd[1], wd[2]);
 
-    // Reshape to height-1 images: x → [N, C_in, 1, L], w → [C_out, C_in, 1, K].
+    // Reshape to height-1 images: x → [N, C_in, 1, L], w → [C_out, C_in/g, 1, K].
     let x4 = x.reshape(vec![n, c_in, 1, l]).map_err(|e| anyhow!("{e}"))?;
     let w4 = weight
-        .reshape(vec![c_out, c_in_w, 1, k])
+        .reshape(vec![c_out, c_in_g, 1, k])
         .map_err(|e| anyhow!("{e}"))?;
 
     // pads = [top, left, bottom, right]; only the width (last) axis is padded.
@@ -44,8 +48,8 @@ pub fn conv1d(
         [1, k],
         [0, pad, 0, pad],
         [1, stride],
-        [1, 1],
-        1,
+        [1, dilation],
+        groups,
     )
     .map_err(|e| anyhow!("{e}"))?;
 
@@ -163,7 +167,7 @@ mod tests {
         let w = Tensor::from_f32(&w_data, vec![c_out, c_in, k]).unwrap();
         let b = Tensor::from_f32(&b_data, vec![c_out]).unwrap();
 
-        let y = conv1d(&x, &w, Some(&b), pad, stride).unwrap();
+        let y = conv1d(&x, &w, Some(&b), pad, stride, 1, 1).unwrap();
         let l_out = (l + 2 * pad - k) / stride + 1;
         assert_eq!(y.shape().dims(), &[1, c_out, l_out]);
         let y_data = y.as_f32_slice();

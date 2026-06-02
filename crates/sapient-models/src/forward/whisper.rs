@@ -137,11 +137,11 @@ impl WhisperForward {
         let mel = mel.to_f32_tensor().map_err(|e| anyhow!("{e}"))?;
         let c1w = self.get("encoder.conv1.weight")?.clone();
         let c1b = self.opt("encoder.conv1.bias").cloned();
-        let x = conv1d(&mel, &c1w, c1b.as_ref(), 1, 1)?;
+        let x = conv1d(&mel, &c1w, c1b.as_ref(), 1, 1, 1, 1)?;
         let x = gelu_erf(&x).map_err(|e| anyhow!("{e}"))?;
         let c2w = self.get("encoder.conv2.weight")?.clone();
         let c2b = self.opt("encoder.conv2.bias").cloned();
-        let x = conv1d(&x, &c2w, c2b.as_ref(), 1, 2)?;
+        let x = conv1d(&x, &c2w, c2b.as_ref(), 1, 2, 1, 1)?;
         let x = gelu_erf(&x).map_err(|e| anyhow!("{e}"))?;
 
         // [1, d, T] → [1, T, d], then add positional embedding.

@@ -30,6 +30,7 @@ pub use llama::LlamaForward;
 #[cfg(all(target_os = "macos", feature = "mlx"))]
 pub use mlx_engine::MlxForwardEngine;
 pub use phi::PhiForward;
+pub use snac::SnacDecoder;
 #[cfg(feature = "wgpu")]
 pub use wgpu_engine::WgpuForwardEngine;
 pub use whisper::{AudioEngine, WhisperForward};
