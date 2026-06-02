@@ -326,7 +326,7 @@ fn total_ram_bytes() -> u64 {
         if let Ok(s) = std::fs::read_to_string("/proc/meminfo") {
             for line in s.lines() {
                 if let Some(rest) = line.strip_prefix("MemTotal:") {
-                    if let Some(kb) = rest.trim().split_whitespace().next() {
+                    if let Some(kb) = rest.split_whitespace().next() {
                         if let Ok(v) = kb.parse::<u64>() {
                             return v * 1024;
                         }
