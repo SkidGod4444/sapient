@@ -44,6 +44,7 @@ pub mod device;
 pub mod kv_cache;
 pub mod pipeline;
 pub mod sampler;
+pub mod sentence;
 pub mod speculative;
 pub mod transcribe;
 
@@ -54,5 +55,6 @@ pub use kv_cache::KVCache;
 pub use pipeline::{GenerationConfig, LoadOptions, Pipeline};
 pub use sampler::{Sampler, SamplingStrategy};
 pub use sapient_models::{mac_gpu_support, LlmBackendKind as GenerationBackend, MacGpuSupport};
+pub use sentence::SentenceChunker;
 pub use speculative::SpeculativePipeline;
 pub use transcribe::{TranscribeOptions, TranscribePipeline};
