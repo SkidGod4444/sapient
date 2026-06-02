@@ -40,6 +40,7 @@
 //! }
 //! ```
 
+pub mod converse;
 pub mod device;
 pub mod kv_cache;
 pub mod pipeline;
@@ -48,6 +49,7 @@ pub mod sentence;
 pub mod speculative;
 pub mod transcribe;
 
+pub use converse::{ConversePipeline, NoopTts, Tts, Turn};
 pub use device::{
     detect as detect_devices, recommend as recommend_backend, BackendPlan, DeviceProfile,
 };
