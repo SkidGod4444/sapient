@@ -352,3 +352,98 @@ fn embed_gather_matches_cpu() {
         }
     }
 }
+
+/// CPU LayerNorm reference (f32) with weight + bias.
+fn cpu_layer_norm(
+    x: &[f32],
+    weight: &[f32],
+    bias: &[f32],
+    rows: usize,
+    dim: usize,
+    eps: f32,
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; rows * dim];
+    for r in 0..rows {
+        let row = &x[r * dim..(r + 1) * dim];
+        let mean: f32 = row.iter().sum::<f32>() / dim as f32;
+        let var: f32 = row.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / dim as f32;
+        let inv = 1.0 / (var + eps).sqrt();
+        for i in 0..dim {
+            out[r * dim + i] = (row[i] - mean) * inv * weight[i] + bias[i];
+        }
+    }
+    out
+}
+
+#[test]
+fn layer_norm_matches_cpu() {
+    let Some(ctx) = ctx() else {
+        eprintln!("no GPU adapter — skipping wgpu layer_norm test");
+        return;
+    };
+    // Non-power-of-two dim/rows to exercise the strided reduction tail.
+    let (rows, dim) = (7usize, 1536usize);
+    let mut next = lcg();
+    let x: Vec<f32> = (0..rows * dim).map(|_| next() * 3.0).collect();
+    let weight: Vec<f32> = (0..dim).map(|_| 0.5 + next().abs()).collect();
+    let bias: Vec<f32> = (0..dim).map(|_| next() * 0.1).collect();
+    let eps = 1e-5f32;
+
+    let xg = ctx.upload_f32(&x, "x");
+    let wg = ctx.upload_f32(&weight, "w");
+    let bg = ctx.upload_f32(&bias, "b");
+    let outg = ctx.layer_norm(&xg, &wg, &bg, rows, dim, eps);
+    let got = ctx.download_f32(&outg).expect("download");
+
+    let want = cpu_layer_norm(&x, &weight, &bias, rows, dim, eps);
+    let max_err = got
+        .iter()
+        .zip(&want)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(max_err < 1e-4, "wgpu layer_norm vs cpu max_err={max_err}");
+}
+
+/// CPU exact-erf GELU reference, matching the elementwise A&S erf approximation.
+fn cpu_gelu_erf(x: &[f32]) -> Vec<f32> {
+    // Constants mirror the WGSL `erf_approx` (A&S 7.1.26) verbatim for a faithful
+    // reference; allow the precision lints rather than re-rounding them apart.
+    #[allow(clippy::excessive_precision, clippy::unreadable_literal)]
+    fn erf_approx(x: f32) -> f32 {
+        let s = x.signum();
+        let ax = x.abs();
+        let t = 1.0 / (1.0 + 0.3275911 * ax);
+        let y = 1.0
+            - (0.254829592
+                + (-0.284496736 + (1.421413741 + (-1.453152027 + 1.061405429 * t) * t) * t) * t)
+                * t
+                * (-ax * ax).exp();
+        s * y
+    }
+    x.iter()
+        .map(|&v| 0.5 * v * (1.0 + erf_approx(v * std::f32::consts::FRAC_1_SQRT_2)))
+        .collect()
+}
+
+#[test]
+fn gelu_erf_matches_cpu() {
+    let Some(ctx) = ctx() else {
+        eprintln!("no GPU adapter — skipping wgpu gelu_erf test");
+        return;
+    };
+    let n = 4096usize + 37; // exercise the 2-D dispatch tail
+    let mut next = lcg();
+    let x: Vec<f32> = (0..n).map(|_| next() * 4.0).collect();
+
+    let xg = ctx.upload_f32(&x, "x");
+    let outg = ctx.gelu_erf(&xg);
+    let got = ctx.download_f32(&outg).expect("download");
+
+    let want = cpu_gelu_erf(&x);
+    let max_err = got
+        .iter()
+        .zip(&want)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(max_err < 1e-5, "wgpu gelu_erf vs cpu max_err={max_err}");
+}
