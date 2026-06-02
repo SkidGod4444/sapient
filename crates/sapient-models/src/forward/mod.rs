@@ -7,6 +7,10 @@ mod llama;
 #[cfg(all(target_os = "macos", feature = "mlx"))]
 mod mlx_engine;
 mod phi;
+/// SNAC codec-decoder building blocks (Phase 6d). Foundations land ahead of the
+/// full decoder forward, so the items are not all wired in yet.
+#[allow(dead_code)]
+mod snac;
 #[cfg(feature = "wgpu")]
 mod wgpu_engine;
 mod whisper;
