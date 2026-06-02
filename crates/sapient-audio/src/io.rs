@@ -1,0 +1,195 @@
+//! Audio file decoding and resampling.
+//!
+//! [`load_audio`] decodes any container/codec `symphonia` understands (WAV,
+//! FLAC, OGG/Vorbis, MP3, AAC/M4A, ALAC), downmixes to mono `f32` in `[-1, 1]`,
+//! and resamples to `target_sr` (16 kHz for Whisper) with `rubato`'s FFT
+//! resampler.
+
+use std::path::Path;
+
+use anyhow::{anyhow, Context, Result};
+use rubato::{FftFixedIn, Resampler};
+use symphonia::core::audio::SampleBuffer;
+use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::errors::Error as SymphoniaError;
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
+
+/// Decode `path` to mono `f32` samples resampled to `target_sr`.
+pub fn load_audio(path: impl AsRef<Path>, target_sr: u32) -> Result<Vec<f32>> {
+    let path = path.as_ref();
+    let (samples, src_sr) = decode_to_mono(path)?;
+    if src_sr == target_sr {
+        Ok(samples)
+    } else {
+        resample(&samples, src_sr, target_sr)
+    }
+}
+
+/// Decode `path` to mono `f32` at its native sample rate.
+///
+/// Returns `(samples, source_sample_rate)`. Multi-channel audio is averaged to
+/// mono.
+pub fn decode_to_mono(path: &Path) -> Result<(Vec<f32>, u32)> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("opening audio file {}", path.display()))?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .context("probing audio format (unsupported or corrupt file?)")?;
+    let mut format = probed.format;
+
+    let track = format
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+        .ok_or_else(|| anyhow!("no decodable audio track found"))?;
+    let track_id = track.id;
+    let src_sr = track
+        .codec_params
+        .sample_rate
+        .ok_or_else(|| anyhow!("audio track has no sample rate"))?;
+
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .context("no decoder for this codec")?;
+
+    let mut mono: Vec<f32> = Vec::new();
+    let mut sample_buf: Option<SampleBuffer<f32>> = None;
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            // Clean end-of-stream: symphonia surfaces EOF as an IoError.
+            Err(SymphoniaError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                break
+            }
+            Err(SymphoniaError::ResetRequired) => break,
+            Err(e) => return Err(anyhow!(e).context("reading audio packet")),
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            // Recoverable decode hiccups: skip the packet.
+            Err(SymphoniaError::DecodeError(_)) | Err(SymphoniaError::IoError(_)) => continue,
+            Err(e) => return Err(anyhow!(e).context("decoding audio packet")),
+        };
+
+        let spec = *decoded.spec();
+        let n_channels = spec.channels.count().max(1);
+
+        // (Re)allocate the interleaving buffer to match this frame's capacity.
+        if sample_buf.is_none() {
+            sample_buf = Some(SampleBuffer::<f32>::new(decoded.capacity() as u64, spec));
+        }
+        let sb = sample_buf.as_mut().unwrap();
+        sb.copy_interleaved_ref(decoded);
+        let interleaved = sb.samples();
+
+        // Downmix interleaved → mono by channel average.
+        if n_channels == 1 {
+            mono.extend_from_slice(interleaved);
+        } else {
+            mono.reserve(interleaved.len() / n_channels);
+            for frame in interleaved.chunks_exact(n_channels) {
+                let sum: f32 = frame.iter().sum();
+                mono.push(sum / n_channels as f32);
+            }
+        }
+    }
+
+    if mono.is_empty() {
+        return Err(anyhow!(
+            "decoded zero audio samples from {}",
+            path.display()
+        ));
+    }
+    Ok((mono, src_sr))
+}
+
+/// Resample mono `f32` audio from `from` Hz to `to` Hz with a high-quality FFT
+/// resampler. A no-op when the rates already match.
+pub fn resample(input: &[f32], from: u32, to: u32) -> Result<Vec<f32>> {
+    if from == to || input.is_empty() {
+        return Ok(input.to_vec());
+    }
+
+    const CHUNK: usize = 1024;
+    let mut resampler = FftFixedIn::<f32>::new(from as usize, to as usize, CHUNK, 2, 1)
+        .context("constructing resampler")?;
+
+    let est = input.len() * to as usize / from as usize + CHUNK;
+    let mut out: Vec<f32> = Vec::with_capacity(est);
+    let mut inbuf = [vec![0.0f32; CHUNK]];
+
+    let mut pos = 0;
+    while pos + CHUNK <= input.len() {
+        inbuf[0].copy_from_slice(&input[pos..pos + CHUNK]);
+        let res = resampler
+            .process(&inbuf, None)
+            .context("resampling chunk")?;
+        out.extend_from_slice(&res[0]);
+        pos += CHUNK;
+    }
+
+    // Final partial chunk: zero-pad to CHUNK, keep only the proportional output.
+    if pos < input.len() {
+        let rem = input.len() - pos;
+        for (i, slot) in inbuf[0].iter_mut().enumerate() {
+            *slot = if i < rem { input[pos + i] } else { 0.0 };
+        }
+        let res = resampler
+            .process(&inbuf, None)
+            .context("resampling final chunk")?;
+        let keep = (rem * to as usize / from as usize).min(res[0].len());
+        out.extend_from_slice(&res[0][..keep]);
+    }
+
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resample_is_noop_when_rates_match() {
+        let x: Vec<f32> = (0..1000).map(|i| i as f32).collect();
+        assert_eq!(resample(&x, 16_000, 16_000).unwrap(), x);
+    }
+
+    #[test]
+    fn resample_48k_to_16k_thirds_the_length() {
+        // 1 s of 440 Hz at 48 kHz → ~1 s at 16 kHz (length within a chunk).
+        let n = 48_000;
+        let tone: Vec<f32> = (0..n)
+            .map(|i| (std::f32::consts::TAU * 440.0 * i as f32 / 48_000.0).sin())
+            .collect();
+        let out = resample(&tone, 48_000, 16_000).unwrap();
+        let expected = n / 3;
+        let diff = (out.len() as i64 - expected as i64).unsigned_abs() as usize;
+        assert!(
+            diff <= 1024,
+            "resampled len {} not near {expected}",
+            out.len()
+        );
+        // Output must be finite and bounded (no resampler blow-up).
+        assert!(out.iter().all(|v| v.is_finite() && v.abs() < 4.0));
+    }
+}

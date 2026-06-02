@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use sapient_generate::{
     detect_devices, mac_gpu_support, recommend_backend, GenerationBackend, LoadOptions, Pipeline,
-    SpeculativePipeline,
+    SpeculativePipeline, TranscribeOptions, TranscribePipeline,
 };
 use sapient_hub::LoadOptions as HubLoadOptions;
 use sapient_runtime::{InferenceSession, Model, ModelConfig, SessionOptions};
@@ -80,6 +80,28 @@ enum Commands {
         /// terminal (rendering is on by default on interactive terminals).
         #[arg(long)]
         raw: bool,
+    },
+
+    /// Transcribe an audio file to text with a Whisper model (speech-to-text).
+    #[command(visible_aliases = ["stt", "asr"])]
+    Transcribe {
+        /// Whisper model alias or repo id (e.g. `whisper-base`, `openai/whisper-small`).
+        model: String,
+
+        /// Path to the audio file (WAV/FLAC/MP3/OGG/M4A).
+        audio: PathBuf,
+
+        /// Generation backend: auto | cpu | metal | wgpu.
+        #[arg(short, long, default_value = "cpu")]
+        backend: String,
+
+        /// Source language code (e.g. `en`, `fr`). Omit to auto-detect.
+        #[arg(long)]
+        language: Option<String>,
+
+        /// Translate to English instead of transcribing in the source language.
+        #[arg(long)]
+        translate: bool,
     },
 
     /// Download a model from HuggingFace Hub to the local cache.
@@ -335,6 +357,13 @@ async fn dispatch(cli: Cli) -> Result<()> {
             )
             .await
         }
+        Commands::Transcribe {
+            model,
+            audio,
+            backend,
+            language,
+            translate,
+        } => transcribe_command(model.as_str(), &audio, &backend, language, translate).await,
         Commands::Pull { model } => pull_command(model.as_str(), cli.verbose).await,
         Commands::List => list_command(),
         Commands::Models => models_command(),
@@ -1286,6 +1315,38 @@ fn parse_generation_backend(value: &str) -> Result<GenerationBackend> {
     value
         .parse()
         .with_context(|| format!("invalid backend '{value}'; expected auto, cpu, or metal"))
+}
+
+// ── transcribe (speech-to-text) ─────────────────────────────────────────────────
+
+async fn transcribe_command(
+    model: &str,
+    audio: &std::path::Path,
+    backend: &str,
+    language: Option<String>,
+    translate: bool,
+) -> Result<()> {
+    if !audio.exists() {
+        anyhow::bail!("audio file not found: {}", audio.display());
+    }
+    let backend_kind = parse_generation_backend(backend)?;
+
+    let loading = ui::spinner(format!("loading {model}…"));
+    let pipeline = TranscribePipeline::from_pretrained_with_backend(model, backend_kind).await?;
+    drop(loading);
+
+    let opts = TranscribeOptions {
+        language,
+        translate,
+        ..Default::default()
+    };
+
+    let working = ui::spinner(format!("transcribing {}…", audio.display()));
+    let text = pipeline.transcribe_with(audio, opts).await?;
+    drop(working);
+
+    println!("{}", text.trim());
+    Ok(())
 }
 
 // ── bench ─────────────────────────────────────────────────────────────────────

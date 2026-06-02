@@ -136,6 +136,50 @@ Most constrained, biggest "wow".
 
 ---
 
+## Phase 6 — On-device audio (STT → TTS → STS)  → **`v0.4.x`**
+Cross-platform pure-Rust speech, the answer mlx-audio (Apple-only) and the
+ONNX-wrapper crates (C++ dep) don't offer together.
+
+- **6a — Whisper STT** ✅ DONE (CPU):
+  - `sapient-audio` crate: decode/resample (`symphonia`+`rubato`) + Whisper log-mel
+    front-end (`realfft`, slaney filterbank — numerically aligned to OpenAI/librosa).
+  - `WhisperForward` engine + `AudioEngine` (encoder + decoder, growing self-attn KV
+    cache, cross-attn K/V cached once per chunk) reusing `LlmBackendDispatch` for
+    linear/layernorm/add. New kernels: `conv1d` (wraps `conv2d`), `gelu_erf` (exact
+    erf GELU). Attention uses the CPU flash kernel with **explicit masks** (all-zeros
+    for the non-causal encoder + cross-attn; causal for decoder self-attn).
+  - `WhisperTokenizer` (control tokens + forced-prompt protocol + language detection),
+    `TranscribePipeline`, `sapient transcribe <model> <audio>`, registry rows for
+    `whisper-{tiny,base,small}`. Verified end-to-end on the JFK clip with `whisper-tiny`.
+- **6b — GPU offload of the audio transformer body** ✅ DONE (`--features wgpu --backend wgpu`):
+  - New WGSL kernels: `layer_norm` (with bias), exact-erf `gelu` (elementwise op=2),
+    a broadcast `add_bias` (op=3), a `transpose_heads` (seq↔heads), and a `causal`
+    flag on `attention` (non-causal for the encoder + cross-attn). All validated
+    bit-close to CPU in `tests/resident.rs`.
+  - `WhisperWgpuEngine` (`forward/whisper_wgpu.rs`) mirrors `WhisperForward` on the
+    GPU: weights upload once as f32; encoder + decoder blocks (LayerNorm/matmul/
+    attention/GELU/residual) run on-device; self-attn KV cache + cross-attn K/V are
+    GPU-resident; only logits read back. mel/STFT/conv stay CPU (cheap, once/chunk).
+  - `AudioEngine::WhisperWgpu` + `TranscribePipeline` wiring; verified end-to-end —
+    `sapient transcribe whisper-tiny jfk.wav --backend wgpu` produces the identical
+    transcript to CPU. Coherence test: `tests/whisper_wgpu_coherence.rs`.
+  - **Perf note:** on small models / short clips the GPU path currently *trails* CPU
+    (tiny 3.1 s vs 1.3 s, base 5.7 s vs 1.8 s end-to-end on M-series/Metal) — per-process
+    GPU init + the one-token-at-a-time decoder with a logits read-back each step dominate
+    the tiny GPU compute. CPU is the `transcribe` default. **Batched prefill** (encode the
+    whole forced prompt in one pass) and keeping logits/argmax on-GPU are the optimizations
+    that make the GPU win on larger models / longer audio (tracked under 6c).
+- **6c — STT polish** (deferred): beam search, full `suppress_tokens`, timestamp
+  tokens + long-audio re-seeking, streaming token output, `serve` integration.
+- **6d — TTS** (deferred): Kokoro-82M (text encoder + vocoder/ISTFT; pure-Rust/MIT
+  G2P to avoid GPLv3 espeak-ng). New kernels: transposed conv, ISTFT.
+- **6e — STS** (deferred): cascade STT → existing LLM → TTS with `cpal` full-duplex
+  mic/speaker + VAD; later, end-to-end speech-LLMs (Moshi/Mimi).
+- **Success metric (6a):** `sapient transcribe whisper-base sample.wav` produces a
+  correct transcript on CPU across macOS/Linux/Windows.
+
+---
+
 ## Cross-cutting workstreams (continuous)
 - **Correctness harness:** golden-token tests per architecture; CI gate.
 - **Bench suite:** RAM + tok/s + time-to-first-token across targets; tracked over time.

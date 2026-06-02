@@ -255,6 +255,31 @@ pub const CATALOG: &[SupportedModel] = &[
         gated: false,
         extra_aliases: &["phi-4-mini", "phi4-mini"],
     },
+    // ── Whisper (speech-to-text — `sapient transcribe`) ──────────────────────
+    SupportedModel {
+        alias: "openhorizon/whisper-tiny",
+        repo_id: "openai/whisper-tiny",
+        family: "Whisper",
+        params: "39M",
+        gated: false,
+        extra_aliases: &["whisper-tiny"],
+    },
+    SupportedModel {
+        alias: "openhorizon/whisper-base",
+        repo_id: "openai/whisper-base",
+        family: "Whisper",
+        params: "74M",
+        gated: false,
+        extra_aliases: &["whisper-base"],
+    },
+    SupportedModel {
+        alias: "openhorizon/whisper-small",
+        repo_id: "openai/whisper-small",
+        family: "Whisper",
+        params: "244M",
+        gated: false,
+        extra_aliases: &["whisper-small"],
+    },
 ];
 
 /// All supported models, for display (e.g. `sapient list --available`).

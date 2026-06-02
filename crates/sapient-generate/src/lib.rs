@@ -45,6 +45,7 @@ pub mod kv_cache;
 pub mod pipeline;
 pub mod sampler;
 pub mod speculative;
+pub mod transcribe;
 
 pub use device::{
     detect as detect_devices, recommend as recommend_backend, BackendPlan, DeviceProfile,
@@ -54,3 +55,4 @@ pub use pipeline::{GenerationConfig, LoadOptions, Pipeline};
 pub use sampler::{Sampler, SamplingStrategy};
 pub use sapient_models::{mac_gpu_support, LlmBackendKind as GenerationBackend, MacGpuSupport};
 pub use speculative::SpeculativePipeline;
+pub use transcribe::{TranscribeOptions, TranscribePipeline};

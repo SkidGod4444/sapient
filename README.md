@@ -87,6 +87,11 @@ sapient chat openhorizon/qwen2.5-1.5b --speculative --draft-model openhorizon/qw
 # One-shot completion (Hub models need --prompt)
 sapient run openhorizon/phi-2 --prompt "Explain transformers in simple terms"
 
+# Speech-to-text — transcribe audio with Whisper (WAV/FLAC/MP3/OGG/M4A)
+sapient transcribe whisper-base recording.wav
+sapient transcribe whisper-small talk.mp3 --language en   # skip auto-detect
+sapient transcribe whisper-tiny clip.flac --translate     # → English
+
 # Download a model to local cache
 sapient pull openhorizon/phi-2
 
@@ -220,8 +225,17 @@ to see this list (and which models you've already downloaded) at any time.
 | `openhorizon/llama-3.2-1b` | Llama | 1B | |
 | `openhorizon/llama-3.2-3b` | Llama | 3B | Gated — run `sapient login` |
 | `openhorizon/mistral-7b` | Mistral | 7B | Gated — run `sapient login` |
+| `whisper-tiny` | Whisper | 39M | Speech-to-text — `sapient transcribe` |
+| `whisper-base` | Whisper | 74M | Speech-to-text — `sapient transcribe` |
+| `whisper-small` | Whisper | 244M | Speech-to-text — `sapient transcribe` |
 
-All models run on the **CPU** backend everywhere; on Apple Silicon, building with
+**Speech-to-text:** Whisper models power `sapient transcribe <model> <audio>` on all platforms.
+Audio is decoded + resampled to 16 kHz in pure Rust (`symphonia`/`rubato`), turned into a log-mel
+spectrogram, and run through a native Whisper encoder/decoder. Auto-detects the spoken language;
+`--language <code>` forces it and `--translate` outputs English. Runs on CPU by default, or on the
+cross-platform GPU with `--backend wgpu` (build `--features wgpu`).
+
+All text models run on the **CPU** backend everywhere; on Apple Silicon, building with
 `--features mlx` enables the **Metal** GPU backend. Weights are loaded from Safetensors
 (F16/BF16/F32). To request another model, open an issue — adding one means implementing
 and validating its architecture in `sapient-models`.
