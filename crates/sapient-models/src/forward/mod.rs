@@ -7,9 +7,7 @@ mod llama;
 #[cfg(all(target_os = "macos", feature = "mlx"))]
 mod mlx_engine;
 mod phi;
-/// SNAC codec-decoder building blocks (Phase 6d). Foundations land ahead of the
-/// full decoder forward, so the items are not all wired in yet.
-#[allow(dead_code)]
+/// SNAC codec-decoder (Phase 6d, LM-codec TTS) — drives `sapient speak`.
 mod snac;
 #[cfg(feature = "wgpu")]
 mod wgpu_engine;
@@ -30,7 +28,7 @@ pub use llama::LlamaForward;
 #[cfg(all(target_os = "macos", feature = "mlx"))]
 pub use mlx_engine::MlxForwardEngine;
 pub use phi::PhiForward;
-pub use snac::{orpheus_codes_to_snac, SnacDecoder};
+pub use snac::{normalize_snac_weights, orpheus_codes_to_snac, SnacDecoder};
 #[cfg(feature = "wgpu")]
 pub use wgpu_engine::WgpuForwardEngine;
 pub use whisper::{AudioEngine, WhisperForward};

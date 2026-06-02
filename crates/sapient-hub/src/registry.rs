@@ -280,6 +280,17 @@ pub const CATALOG: &[SupportedModel] = &[
         gated: false,
         extra_aliases: &["whisper-small"],
     },
+    // ── Orpheus TTS (text-to-speech — `sapient speak`) ───────────────────────
+    // Llama-3.2-3B fine-tune that emits SNAC audio-codec tokens; runs on the
+    // Llama forward engine. Ungated Q4_K_M GGUF; vocab 156940.
+    SupportedModel {
+        alias: "openhorizon/orpheus-3b",
+        repo_id: "isaiahbjork/orpheus-3b-0.1-ft-Q4_K_M-GGUF",
+        family: "Orpheus",
+        params: "3B",
+        gated: false,
+        extra_aliases: &["orpheus-3b", "orpheus", "orpheus-tts"],
+    },
 ];
 
 /// All supported models, for display (e.g. `sapient list --available`).

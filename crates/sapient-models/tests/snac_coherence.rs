@@ -17,7 +17,7 @@
 use std::path::PathBuf;
 
 use sapient_hub::snac_config::SnacConfig;
-use sapient_models::forward::SnacDecoder;
+use sapient_models::forward::{normalize_snac_weights, SnacDecoder};
 use sapient_models::weights;
 
 #[test]
@@ -29,7 +29,16 @@ fn snac_decode_matches_reference() {
     };
     let dir = PathBuf::from(dir);
     let cfg = SnacConfig::from_config_file(&dir.join("config.json")).expect("snac config");
-    let w = weights::load_hf_weights(&[dir.join("snac.safetensors")]).expect("snac weights");
+    // Accept either the converted torch weights (`snac.safetensors`) or the
+    // ungated `mlx-community/snac_24khz` mirror (`model.safetensors`);
+    // `normalize_snac_weights` adapts the layout of the latter.
+    let st = ["model.safetensors", "snac.safetensors"]
+        .iter()
+        .map(|f| dir.join(f))
+        .find(|p| p.exists())
+        .expect("a SNAC safetensors file in $SAPIENT_SNAC_DIR");
+    let raw = weights::load_hf_weights(&[st]).expect("snac weights");
+    let w = normalize_snac_weights(raw).expect("normalize snac weights");
     let dec = SnacDecoder::from_weights(cfg, w);
 
     let fx: serde_json::Value =

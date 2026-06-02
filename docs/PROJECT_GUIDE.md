@@ -263,8 +263,13 @@ The real generation math: how to run a Phi or Llama-style model layer by layer.
     back* to the audio at every step (cross-attention). Reuses the same linear/norm/
     attention building blocks as the text engines; runs on CPU today. Powers
     `sapient transcribe`.
-  - `forward/conv.rs` — a small **1-D convolution** (Whisper's audio "stem") built on top
-    of the existing 2-D conv kernel.
+  - `forward/conv.rs` — small **1-D convolution** primitives (`conv1d`, `conv_transpose1d`,
+    `snake`) — Whisper's audio "stem" and the SNAC codec decoder's upsampling stack.
+  - `forward/snac.rs` — the **SNAC neural-audio-codec decoder** (`SnacDecoder`): turns the
+    audio-codec tokens an Orpheus TTS model emits back into a 24 kHz waveform (codebook
+    lookup → conv stack with transposed-conv upsampling + Snake → tanh). Fully
+    convolutional, runs on CPU. Powers `sapient speak`. `normalize_snac_weights` adapts the
+    ungated `mlx-community/snac_24khz` safetensors layout.
 - `architectures/` — graph **builders** for many model types (used by the IR/graph path).
   Note: only Phi and Llama are wired into live chat today; the rest are scaffolding.
   - `llama.rs`, `phi.rs`, `qwen.rs`, `gemma.rs`, `gpt2.rs`, `bert.rs`, `mixtral.rs`, `mod.rs`.
@@ -284,6 +289,11 @@ tokens, streams text, and stops at the right time.
 - `transcribe.rs` — `TranscribePipeline`: the speech-to-text conductor. Loads a Whisper
   model, decodes the audio, slices it into 30-second windows, builds the log-mel, runs the
   encoder, then greedily decodes words (auto-detecting the language). Powers `sapient transcribe`.
+- `speak.rs` — `SpeakPipeline`: the text-to-speech conductor. Runs an **Orpheus-3B** model
+  (a Llama-3.2 fine-tune, on the normal text engine) to emit SNAC audio-codec **tokens**
+  (`Pipeline::generate_token_ids`), de-frames them (7 codes/frame → 3 RVQ levels), and
+  decodes them with `SnacDecoder` into a 24 kHz WAV. Powers `sapient speak`. Eight built-in
+  voices; SNAC weights auto-download (or `SAPIENT_SNAC_DIR`).
 - `sampler.rs` — **how to pick the next token**: greedy (highest score), temperature,
   top-k, top-p, and repetition penalty.
 - `kv_cache.rs` — the memory notebook (KV cache) helpers. As of v0.2.9 the cache is allocated

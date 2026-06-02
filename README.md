@@ -94,6 +94,11 @@ sapient transcribe whisper-tiny clip.flac --translate     # → English
 sapient transcribe whisper-base long.wav --timestamps     # long-audio re-seek
 sapient transcribe whisper-base clip.wav --beam-size 5    # beam search
 
+# Text-to-speech — synthesize a WAV with Orpheus (Llama-3.2 → SNAC codec)
+sapient speak orpheus-3b "Hello, this is sapient speaking." -o hello.wav
+sapient speak orpheus-3b "The quick brown fox." --voice leo -o fox.wav
+#   voices: tara | leah | jess | leo | dan | mia | zac | zoe
+
 # Voice conversation — mic → speech-to-text → LLM → reply (build with --features audio-io)
 sapient converse openhorizon/qwen2.5-1.5b --stt whisper-base
 
@@ -233,6 +238,7 @@ to see this list (and which models you've already downloaded) at any time.
 | `whisper-tiny` | Whisper | 39M | Speech-to-text — `sapient transcribe` |
 | `whisper-base` | Whisper | 74M | Speech-to-text — `sapient transcribe` |
 | `whisper-small` | Whisper | 244M | Speech-to-text — `sapient transcribe` |
+| `orpheus-3b` | Llama/Orpheus | 3B | Text-to-speech — `sapient speak` |
 
 **Speech-to-text:** Whisper models power `sapient transcribe <model> <audio>` on all platforms.
 Audio is decoded + resampled to 16 kHz in pure Rust (`symphonia`/`rubato`), turned into a log-mel

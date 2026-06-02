@@ -6,10 +6,10 @@
 //! → conv stack with `conv_transpose1d` upsampling + `snake` activations
 //! (see [`super::conv`]) → tanh → 24 kHz samples.
 //!
-//! This file currently provides the load-time helpers that are independently
-//! verifiable without the model weights; the full decoder forward is wired once
-//! the SNAC weights are converted to safetensors (the released checkpoint is a
-//! `.pth` pickle SAPIENT can't load directly).
+//! Weights load from safetensors: either the ungated `mlx-community/snac_24khz`
+//! mirror (`model.safetensors`, adapted by [`normalize_snac_weights`]) or the
+//! folded output of `scripts/convert_snac_to_safetensors.py`. The decode path is
+//! validated bit-close to a torch reference by the `snac_coherence` test.
 
 use std::collections::HashMap;
 
@@ -60,6 +60,74 @@ pub fn weight_norm_fold(v: &Tensor, g: &Tensor) -> Result<Tensor> {
     Tensor::from_f32(&w, v.shape().clone()).map_err(|e| anyhow!("{e}"))
 }
 
+/// Swap the last two axes of a 3-D tensor (`[d0, d1, d2]` → `[d0, d2, d1]`).
+fn transpose_last_two(t: &Tensor) -> Result<Tensor> {
+    let d = t.shape().dims().to_vec();
+    if d.len() != 3 {
+        anyhow::bail!("transpose_last_two expects a 3-D tensor, got {d:?}");
+    }
+    let (d0, d1, d2) = (d[0], d[1], d[2]);
+    let v = t.to_f32_vec();
+    let mut out = vec![0.0f32; v.len()];
+    for a in 0..d0 {
+        for b in 0..d1 {
+            for c in 0..d2 {
+                out[(a * d2 + c) * d1 + b] = v[(a * d1 + b) * d2 + c];
+            }
+        }
+    }
+    Tensor::from_f32(&out, Shape::new([d0, d2, d1])).map_err(|e| anyhow!("{e}"))
+}
+
+/// Normalize raw SNAC codec weights into the exact layout [`SnacDecoder`] reads.
+///
+/// The released codec is distributed two ways, and this accepts both:
+/// - **`mlx-community/snac_24khz`** (`model.safetensors`) stores un-folded
+///   `weight_norm` params (`*.weight_g` + `*.weight_v`), conv kernels in MLX
+///   channel-last layout (`[d0, K, d1]`), and a `…layers.N…` key prefix on
+///   every `nn.Sequential` index. This function folds the weight_norm, swaps
+///   each conv kernel's last two axes to PyTorch layout (`[d0, d1, K]`), strips
+///   the `.layers.` prefixes, and drops the encoder-only `in_proj.*` params.
+/// - **`convert_snac_to_safetensors.py`** output — already folded torch-layout
+///   weights — passes through unchanged (no `weight_v` keys present).
+pub fn normalize_snac_weights(raw: HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>> {
+    // Already-folded torch weights have no weight_norm params → nothing to do.
+    if !raw.keys().any(|k| k.ends_with(".weight_v")) {
+        return Ok(raw);
+    }
+    // MLX wraps each Sequential index as `…layers.N…`; the decoder addresses
+    // them as `…N…`. Stripping every `.layers.` segment maps both the outer
+    // `decoder.model.layers.2` and the nested `block.layers.3` form.
+    let rename = |k: &str| k.replace(".layers.", ".");
+
+    let mut out: HashMap<String, Tensor> = HashMap::new();
+    for (k, t) in &raw {
+        if k.contains("in_proj") {
+            continue; // encoder projection — unused on the decode path
+        }
+        if k.ends_with(".weight_g") {
+            continue; // consumed together with its weight_v sibling
+        }
+        if let Some(stem) = k.strip_suffix(".weight_v") {
+            let g = raw
+                .get(&format!("{stem}.weight_g"))
+                .ok_or_else(|| anyhow!("SNAC `{k}` has no matching weight_g"))?;
+            let folded = weight_norm_fold(t, g)?;
+            // weight_norm's per-output-channel norm is axis-0 in both layouts,
+            // so fold first (order-independent within a row), then transpose
+            // the MLX channel-last kernel to PyTorch kernel-last.
+            out.insert(
+                rename(&format!("{stem}.weight")),
+                transpose_last_two(&folded)?,
+            );
+        } else {
+            // bias / alpha / codebook.weight — copied verbatim (no transpose).
+            out.insert(rename(k), t.clone());
+        }
+    }
+    Ok(out)
+}
+
 /// SNAC codec decoder: codec token ids → waveform. Fully convolutional
 /// (no attention/LSTM/ISTFT). The learned noise block is **omitted** (it injects
 /// `randn` excitation, so it is stochastic); the deterministic path is what we
@@ -98,7 +166,14 @@ impl SnacDecoder {
             );
         }
         // ── Quantizer.from_codes: embed → out_proj (1×1) → repeat_interleave → sum.
-        let latent = self.cfg.latent_dim.unwrap_or(self.cfg.codebook_dim);
+        // The continuous latent width = the decoder conv-in's channel count. Some
+        // SNAC config.json variants (e.g. the `mlx-community` mirror) omit
+        // `latent_dim`, so derive it from the depthwise conv-in weight `[latent,
+        // 1, 7]` rather than mis-defaulting to `codebook_dim`.
+        let latent = match self.cfg.latent_dim {
+            Some(d) => d,
+            None => self.get("decoder.model.0.weight")?.shape().dims()[0],
+        };
         let base_t = codes[0].len() * self.cfg.vq_strides[0];
         let mut z = vec![0.0f32; latent * base_t]; // [latent, base_t]
 
@@ -358,6 +433,78 @@ mod tests {
         let two: Vec<u32> = frame.iter().chain(frame.iter()).copied().collect();
         let [a, b, c] = orpheus_codes_to_snac(&two).unwrap();
         assert_eq!((a.len(), b.len(), c.len()), (2, 4, 8));
+    }
+
+    #[test]
+    fn transpose_last_two_swaps_kernel_axis() {
+        // [d0=2, d1=3, d2=2] → [2, 2, 3]; element (a,b,c) → (a,c,b).
+        let v: Vec<f32> = (0..12).map(|i| i as f32).collect();
+        let t = Tensor::from_f32(&v, vec![2, 3, 2]).unwrap();
+        let r = transpose_last_two(&t).unwrap();
+        assert_eq!(r.shape().dims(), &[2, 2, 3]);
+        let rv = r.as_f32_slice();
+        for a in 0..2 {
+            for b in 0..3 {
+                for c in 0..2 {
+                    assert_eq!(rv[(a * 2 + c) * 3 + b], v[(a * 3 + b) * 2 + c]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn normalize_folds_renames_and_transposes_mlx_export() {
+        // Mimic one MLX-export conv: `decoder.model.layers.1.weight_{g,v}` in
+        // channel-last layout [out, K, in] = [2, 1, 3] (a 1×1 conv, in=3→out=2).
+        let mut raw: HashMap<String, Tensor> = HashMap::new();
+        let v = Tensor::from_f32(&[1.0, 2.0, 2.0, 0.0, 3.0, 4.0], vec![2, 1, 3]).unwrap();
+        let g = Tensor::from_f32(&[3.0, 5.0], vec![2, 1, 1]).unwrap();
+        raw.insert("decoder.model.layers.1.weight_v".into(), v);
+        raw.insert("decoder.model.layers.1.weight_g".into(), g);
+        raw.insert(
+            "decoder.model.layers.1.bias".into(),
+            Tensor::from_f32(&[0.5, -0.5], vec![2]).unwrap(),
+        );
+        // Encoder-only key must be dropped.
+        raw.insert(
+            "quantizer.quantizers.0.in_proj.weight_v".into(),
+            Tensor::from_f32(&[0.0], vec![1, 1, 1]).unwrap(),
+        );
+        raw.insert(
+            "quantizer.quantizers.0.in_proj.weight_g".into(),
+            Tensor::from_f32(&[1.0], vec![1, 1, 1]).unwrap(),
+        );
+
+        let out = normalize_snac_weights(raw).unwrap();
+        // Renamed (no `.layers.`) + folded weight present; bias renamed too.
+        let w = out.get("decoder.model.1.weight").expect("folded weight");
+        assert_eq!(w.shape().dims(), &[2, 3, 1]); // transposed to [out, in, K]
+        assert!(out.contains_key("decoder.model.1.bias"));
+        assert!(!out.keys().any(|k| k.contains("in_proj")));
+        assert!(!out
+            .keys()
+            .any(|k| k.contains(".layers.") || k.ends_with(".weight_v")));
+        // Row norms equal g (weight_norm invariant, preserved through transpose).
+        let wv = w.as_f32_slice();
+        for (o, &gg) in [3.0f32, 5.0].iter().enumerate() {
+            let n = (wv[o * 3] * wv[o * 3]
+                + wv[o * 3 + 1] * wv[o * 3 + 1]
+                + wv[o * 3 + 2] * wv[o * 3 + 2])
+                .sqrt();
+            assert!((n - gg).abs() < 1e-5, "row {o} norm {n} != {gg}");
+        }
+    }
+
+    #[test]
+    fn normalize_passes_through_already_folded() {
+        let mut raw: HashMap<String, Tensor> = HashMap::new();
+        raw.insert(
+            "decoder.model.1.weight".into(),
+            Tensor::from_f32(&[1.0, 2.0], vec![1, 2, 1]).unwrap(),
+        );
+        let out = normalize_snac_weights(raw.clone()).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(out.contains_key("decoder.model.1.weight"));
     }
 
     #[test]

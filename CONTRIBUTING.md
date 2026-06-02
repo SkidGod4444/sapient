@@ -106,8 +106,8 @@ crates/
 ├── sapient-hub/            # HuggingFace Hub client
 ├── sapient-tokenizers/     # Tokenizers + chat templates + WhisperTokenizer
 ├── sapient-audio/          # Audio front-end: decode/resample + log-mel STFT (Whisper)
-├── sapient-models/         # Forward engines (Llama, Phi, …) + AudioEngine (Whisper STT)
-├── sapient-generate/       # Pipeline API (from_pretrained, chat, stream) + TranscribePipeline
+├── sapient-models/         # Forward engines (Llama, Phi, …) + AudioEngine (Whisper STT) + SnacDecoder (TTS)
+├── sapient-generate/       # Pipeline API (from_pretrained, chat, stream) + TranscribePipeline + SpeakPipeline
 └── sapient-cli/            # `sapient` binary (chat REPL uses a rustyline line
                             #   editor + markdown.rs live Markdown/code rendering)
 
@@ -141,6 +141,17 @@ in `sapient-audio` (CPU log-mel via `realfft`). Two traps when editing it: the C
 cross-attention must pass an explicit all-zeros mask; and Whisper needs **exact erf GELU**
 (`gelu_erf`), not the tanh `gelu`. Verify with `tests/whisper_coherence.rs` (synthetic, exact) and
 the ignored `transcribe_e2e.rs` (real `whisper-tiny`).
+
+**Text-to-speech also reuses the text engine, not a new one.** `sapient speak` runs **Orpheus-3B**
+(a Llama-3.2 fine-tune) on the existing `LlamaForward`/GGUF path via `Pipeline::generate_token_ids`
+(a raw-token-id generation method — no detokenize), then decodes the emitted SNAC audio-codec tokens
+with the pure-Rust `SnacDecoder` (`forward/snac.rs`) → 24 kHz WAV. `SpeakPipeline` lives in
+`sapient-generate/src/speak.rs`. Traps when editing it: the Orpheus prompt **must include the
+tokenizer's BOS** (`encode_ids(.., true)` → realized `[128259, 128000, …]`) or the speech is
+fluent-but-wrong; SNAC weights come from the ungated `mlx-community/snac_24khz` mirror and need
+`normalize_snac_weights` (weight_norm fold + MLX→PyTorch conv-axis swap + `.layers.` strip); and the
+`mlx` config omits `latent_dim`, so the decoder derives it from the conv-in weight shape. Validate
+with `tests/snac_coherence.rs` (bit-close to torch) and the **speak→transcribe round-trip**.
 
 **Quantized storage.** `DType::Q4_0` and `DType::Q8_0` store raw ggml block bytes. The key
 invariant is that `as_bytes()` on a quantized tensor returns exactly `byte_count(numel)` bytes.

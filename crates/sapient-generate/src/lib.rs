@@ -46,6 +46,7 @@ pub mod kv_cache;
 pub mod pipeline;
 pub mod sampler;
 pub mod sentence;
+pub mod speak;
 pub mod speculative;
 pub mod transcribe;
 
@@ -61,5 +62,6 @@ pub use sapient_audio::{EnergyVad, VadConfig};
 pub use sapient_audio::{MicCapture, SpeakerPlayback};
 pub use sapient_models::{mac_gpu_support, LlmBackendKind as GenerationBackend, MacGpuSupport};
 pub use sentence::SentenceChunker;
+pub use speak::{SpeakPipeline, DEFAULT_ORPHEUS_VOICE, ORPHEUS_VOICES};
 pub use speculative::SpeculativePipeline;
 pub use transcribe::{TranscribeOptions, TranscribePipeline};

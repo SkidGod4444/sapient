@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use sapient_generate::{
     detect_devices, mac_gpu_support, recommend_backend, GenerationBackend, LoadOptions, Pipeline,
-    SpeculativePipeline, TranscribeOptions, TranscribePipeline,
+    SpeakPipeline, SpeculativePipeline, TranscribeOptions, TranscribePipeline, ORPHEUS_VOICES,
 };
 use sapient_hub::LoadOptions as HubLoadOptions;
 use sapient_runtime::{InferenceSession, Model, ModelConfig, SessionOptions};
@@ -134,6 +134,28 @@ enum Commands {
         /// System prompt to seed the conversation.
         #[arg(long)]
         system: Option<String>,
+    },
+
+    /// Synthesise speech from text with an Orpheus TTS model (text-to-speech).
+    #[command(visible_aliases = ["tts", "say"])]
+    Speak {
+        /// Orpheus model alias or repo id (e.g. `orpheus-3b`).
+        model: String,
+
+        /// Text to speak.
+        text: String,
+
+        /// Output WAV file path.
+        #[arg(short, long, default_value = "speech.wav")]
+        output: PathBuf,
+
+        /// Voice: tara | leah | jess | leo | dan | mia | zac | zoe.
+        #[arg(long, default_value = "tara")]
+        voice: String,
+
+        /// Generation backend: auto | cpu | metal | wgpu.
+        #[arg(short, long, default_value = "cpu")]
+        backend: String,
     },
 
     /// Download a model from HuggingFace Hub to the local cache.
@@ -416,6 +438,13 @@ async fn dispatch(cli: Cli) -> Result<()> {
             language,
             system,
         } => converse_command(model.as_str(), stt.as_str(), &backend, language, system).await,
+        Commands::Speak {
+            model,
+            text,
+            output,
+            voice,
+            backend,
+        } => speak_command(model.as_str(), &text, &output, &voice, &backend).await,
         Commands::Pull { model } => pull_command(model.as_str(), cli.verbose).await,
         Commands::List => list_command(),
         Commands::Models => models_command(),
@@ -1413,6 +1442,49 @@ async fn transcribe_command(
     if any {
         println!();
     }
+    Ok(())
+}
+
+// ── speak (text-to-speech) ──────────────────────────────────────────────────────
+
+async fn speak_command(
+    model: &str,
+    text: &str,
+    output: &std::path::Path,
+    voice: &str,
+    backend: &str,
+) -> Result<()> {
+    if !ORPHEUS_VOICES.contains(&voice) {
+        anyhow::bail!(
+            "unknown voice '{voice}' — choose one of: {}",
+            ORPHEUS_VOICES.join(", ")
+        );
+    }
+    let backend_kind = parse_generation_backend(backend)?;
+
+    let loading = ui::spinner(format!("loading {model}…"));
+    let pipeline = SpeakPipeline::from_pretrained_with_backend(model, backend_kind).await?;
+    drop(loading);
+
+    let synth = ui::spinner(format!("synthesising ({voice})…"));
+    let text = text.to_owned();
+    let voice = voice.to_owned();
+    let out_path = output.to_path_buf();
+    let (n, sample_rate) = tokio::task::spawn_blocking(move || {
+        let n = pipeline.speak_to_wav(&text, &voice, &out_path)?;
+        Ok::<_, anyhow::Error>((n, pipeline.sample_rate()))
+    })
+    .await
+    .context("speak task panicked")??;
+    drop(synth);
+
+    let secs = n as f32 / sample_rate as f32;
+    println!(
+        "✓ wrote {} ({:.1}s, {} Hz)",
+        output.display(),
+        secs,
+        sample_rate
+    );
     Ok(())
 }
 

@@ -63,8 +63,6 @@ pub fn conv1d(
 /// transpose layout), optional `bias [C_out]`. Output `[1, C_out, L_out]` with
 /// `L_out = (L-1)*stride - 2*pad + K`. Used by SNAC/DAC codec decoders to
 /// upsample; implemented as direct scatter-add (cheap at codec frame rates).
-// Foundation for the Phase 6d LM-codec (SNAC/DAC) decoder, not yet wired in.
-#[allow(dead_code)]
 pub fn conv_transpose1d(
     x: &Tensor,
     weight: &Tensor,
@@ -122,8 +120,6 @@ pub fn conv_transpose1d(
 
 /// Snake activation `x + sin²(α·x) / α` with a per-channel α. `x [1, C, L]`,
 /// `alpha [C]`. Used by SNAC/DAC decoder blocks. α is guarded against 0.
-// Foundation for the Phase 6d LM-codec (SNAC/DAC) decoder, not yet wired in.
-#[allow(dead_code)]
 pub fn snake(x: &Tensor, alpha: &Tensor) -> Result<Tensor> {
     let xd = x.shape().dims().to_vec();
     if xd.len() != 3 {
