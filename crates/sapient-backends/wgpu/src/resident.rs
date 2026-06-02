@@ -226,6 +226,54 @@ impl WgpuContext {
         out
     }
 
+    /// LayerNorm over each row with weight + bias:
+    /// `out[r,i] = (x[r,i] - mean_r) / sqrt(var_r + eps) * weight[i] + bias[i]`,
+    /// f32 accumulation. `x` is `[rows, dim]`; `weight`/`bias` are `[dim]`.
+    /// Used by the Whisper encoder/decoder (LayerNorm, not RMSNorm).
+    pub fn layer_norm(
+        &self,
+        x: &GpuBuffer,
+        weight: &GpuBuffer,
+        bias: &GpuBuffer,
+        rows: usize,
+        dim: usize,
+        eps: f32,
+    ) -> GpuBuffer {
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Params {
+            dim: u32,
+            rows: u32,
+            eps: f32,
+            _pad: u32,
+        }
+        let out = self.alloc_f32(rows * dim, "layer_norm.out");
+        let params = self.uniform(
+            &Params {
+                dim: dim as u32,
+                rows: rows as u32,
+                eps,
+                _pad: 0,
+            },
+            "layer_norm.params",
+        );
+        self.dispatch(
+            "layer_norm",
+            include_str!("shaders/layer_norm.wgsl"),
+            &[&x.buf, &weight.buf, &bias.buf, &out.buf],
+            &params,
+            rows as u32,
+        );
+        out
+    }
+
+    /// Exact erf-based GELU (Whisper's activation): `0.5·x·(1 + erf(x/√2))`,
+    /// element-wise. Distinct from the SwiGLU/tanh paths.
+    pub fn gelu_erf(&self, x: &GpuBuffer) -> GpuBuffer {
+        // `ewise` op=2 reads only the first input; pass `x` for both bindings.
+        self.ewise(x, x, 2)
+    }
+
     /// Resident linear projection `out[m,n] = x[m,k] @ w[n,k]^T` (w in HF `[n,k]`),
     /// GEMV-style cooperative reduction, f32 accumulation.
     pub fn matmul_nt(
