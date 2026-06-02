@@ -244,6 +244,38 @@ impl SnacDecoder {
     }
 }
 
+/// Codebook size per RVQ level for the Orpheus token layout (SNAC 24 kHz).
+const ORPHEUS_CODEBOOK: u32 = 4096;
+
+/// Convert an Orpheus audio-token stream into the 3 SNAC code levels.
+///
+/// Orpheus emits **7 codes per frame**, each offset by its position
+/// (`code_k = token − audio_base − k·4096`), interleaving SNAC's hierarchy:
+/// positions `0`→level0 (1/frame), `{1,4}`→level1 (2/frame), `{2,3,5,6}`→level2
+/// (4/frame) — i.e. SNAC `vq_strides = [4, 2, 1]`. `audio_codes` are the raw
+/// token ids with `audio_base` already subtracted (values in `0..7·4096`).
+/// Trailing partial frames are dropped. Returns `[level0, level1, level2]`.
+pub fn orpheus_codes_to_snac(audio_codes: &[u32]) -> Result<[Vec<u32>; 3]> {
+    let frames = audio_codes.len() / 7;
+    let (mut l0, mut l1, mut l2) = (Vec::new(), Vec::new(), Vec::new());
+    let sub = |v: u32, k: u32| -> Result<u32> {
+        v.checked_sub(k * ORPHEUS_CODEBOOK)
+            .filter(|&c| c < ORPHEUS_CODEBOOK)
+            .ok_or_else(|| anyhow!("Orpheus code {v} out of range for position {k}"))
+    };
+    for i in 0..frames {
+        let f = &audio_codes[7 * i..7 * i + 7];
+        l0.push(sub(f[0], 0)?);
+        l1.push(sub(f[1], 1)?);
+        l2.push(sub(f[2], 2)?);
+        l2.push(sub(f[3], 3)?);
+        l1.push(sub(f[4], 4)?);
+        l2.push(sub(f[5], 5)?);
+        l2.push(sub(f[6], 6)?);
+    }
+    Ok([l0, l1, l2])
+}
+
 /// Repeat each time step `stride` times along the last axis of `[1, C, T]`.
 fn repeat_interleave_time(x: &Tensor, stride: usize) -> Result<Tensor> {
     let d = x.shape().dims().to_vec();
@@ -303,5 +335,34 @@ mod tests {
         let w = weight_norm_fold(&vt, &gt).unwrap();
         let wv = w.as_f32_slice();
         assert_eq!(&wv[0..2], &[0.0, 0.0]); // zero v → zero w (no div-by-zero)
+    }
+
+    #[test]
+    fn orpheus_deframe_splits_7_codes_into_3_levels() {
+        let cb = ORPHEUS_CODEBOOK;
+        // One frame with per-position offsets applied (as Orpheus emits them).
+        let frame = [
+            10,
+            cb + 11,
+            2 * cb + 12,
+            3 * cb + 13,
+            4 * cb + 14,
+            5 * cb + 15,
+            6 * cb + 16,
+        ];
+        let [l0, l1, l2] = orpheus_codes_to_snac(&frame).unwrap();
+        assert_eq!(l0, vec![10]); // level0: 1/frame
+        assert_eq!(l1, vec![11, 14]); // level1: positions 1,4
+        assert_eq!(l2, vec![12, 13, 15, 16]); // level2: positions 2,3,5,6
+                                              // Two frames → lengths [2,4,8] (matches vq_strides [4,2,1] base ratios).
+        let two: Vec<u32> = frame.iter().chain(frame.iter()).copied().collect();
+        let [a, b, c] = orpheus_codes_to_snac(&two).unwrap();
+        assert_eq!((a.len(), b.len(), c.len()), (2, 4, 8));
+    }
+
+    #[test]
+    fn orpheus_deframe_rejects_out_of_range() {
+        // A code at position 0 that's ≥ 4096 (would belong to a later position).
+        assert!(orpheus_codes_to_snac(&[5000, 0, 0, 0, 0, 0, 0]).is_err());
     }
 }

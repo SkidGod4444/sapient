@@ -181,14 +181,18 @@ ONNX-wrapper crates (C++ dep) don't offer together.
   *wholesale*, needs **no G2P** (raw-text BPE, so no GPLv3 espeak), and collapses
   Kokoro's ~11 exacting kernels (BiLSTM/AdaIN/SineGen/ISTFT) to essentially
   **ConvTranspose1d + Snake + weight-norm fold** — and the SNAC decoder already exists
-  as a pure-Rust reference in `candle-transformers`. Done: `conv_transpose1d` + `snake`
-  kernels + `SnacConfig` + `weight_norm_fold` (all CPU-reference tested);
-  **`scripts/convert_snac_to_safetensors.py`** (folds weight_norm, `.pth`→safetensors —
-  the one offline step, matches the Rust fold). Remaining: SNAC decoder forward
-  (RVQ-from-codes → conv stack → 24 kHz WAV; numerically validated against a reference
-  once weights are converted) + audio-token framing (7 tokens/frame → 3 RVQ levels) +
-  `SpeakPipeline` + `sapient speak`. (Orpheus 3B Apache-2.0; OuteTTS-1.0 1B Llama but
-  CC-BY-NC; Kani 400M but non-Llama LFM2.) Kokoro dropped — worst fit on every axis but params.
+  as a pure-Rust reference in `candle-transformers`. Done — the whole codec path:
+  `conv_transpose1d` + `snake` kernels, `SnacConfig`, `weight_norm_fold`,
+  **`SnacDecoder`** (RVQ-from-codes → conv stack → 24 kHz waveform) **validated
+  bit-exact vs the torch reference (max_err 2.16e-6)** via the ignored
+  `snac_coherence` test; the Orpheus **7-codes-per-frame de-framing**
+  (`orpheus_codes_to_snac`, unit-tested); a pure-Rust **`write_wav`**; and
+  **`scripts/convert_snac_to_safetensors.py`** (the one offline `.pth`→safetensors
+  step, folding weight_norm to match the Rust path). Remaining: `SpeakPipeline` +
+  `sapient speak` — wire an Orpheus/OuteTTS LM (runs on `LlamaForward`) to emit
+  audio tokens → de-frame → `SnacDecoder` → `write_wav`. (Orpheus 3B Apache-2.0;
+  OuteTTS-1.0 1B Llama but CC-BY-NC; Kani 400M but non-Llama LFM2.) Kokoro dropped —
+  worst fit on every axis but params.
 - **6e — STS** (voice-in/text-out DONE): ✅ `EnergyVad` + `SentenceChunker` +
   `ConversePipeline` (STT→LLM→TTS, `Tts` trait) + `cpal` `MicCapture`/`SpeakerPlayback`
   (behind the `audio-io` feature) + `sapient converse <llm> [--stt] [--language]
