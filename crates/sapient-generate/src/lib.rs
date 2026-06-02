@@ -56,6 +56,9 @@ pub use device::{
 pub use kv_cache::KVCache;
 pub use pipeline::{GenerationConfig, LoadOptions, Pipeline};
 pub use sampler::{Sampler, SamplingStrategy};
+pub use sapient_audio::{EnergyVad, VadConfig};
+#[cfg(feature = "audio-io")]
+pub use sapient_audio::{MicCapture, SpeakerPlayback};
 pub use sapient_models::{mac_gpu_support, LlmBackendKind as GenerationBackend, MacGpuSupport};
 pub use sentence::SentenceChunker;
 pub use speculative::SpeculativePipeline;

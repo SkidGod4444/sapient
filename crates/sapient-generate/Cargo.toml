@@ -34,6 +34,8 @@ default = []
 mlx = ["sapient-models/mlx"]
 # Cross-platform GPU inference (Vulkan/DX12/Metal via wgpu) — Intel/AMD/Nvidia/Apple.
 wgpu = ["sapient-models/wgpu"]
+# Live mic/speaker I/O for the speech-to-speech cascade (sapient converse).
+audio-io = ["sapient-audio/audio-io"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

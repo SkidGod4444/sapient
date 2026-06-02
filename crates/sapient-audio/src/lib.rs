@@ -16,12 +16,20 @@
 //! the GPU. The transformer body that consumes the mel tensor is a separate
 //! concern (see `sapient-models`).
 
+#[cfg(feature = "audio-io")]
+pub mod capture;
 pub mod config;
 pub mod io;
 pub mod mel;
+#[cfg(feature = "audio-io")]
+pub mod playback;
 pub mod vad;
 
+#[cfg(feature = "audio-io")]
+pub use capture::MicCapture;
 pub use config::MelConfig;
 pub use io::load_audio;
 pub use mel::MelFrontend;
+#[cfg(feature = "audio-io")]
+pub use playback::SpeakerPlayback;
 pub use vad::{EnergyVad, Vad, VadConfig};

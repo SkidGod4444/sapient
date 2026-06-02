@@ -113,6 +113,29 @@ enum Commands {
         beam_size: usize,
     },
 
+    /// Real-time voice conversation: mic → speech-to-text → LLM → reply.
+    /// Requires the `audio-io` build feature (mic capture).
+    Converse {
+        /// LLM model alias/repo for the chat replies.
+        model: String,
+
+        /// Whisper STT model for transcription.
+        #[arg(long, default_value = "whisper-base")]
+        stt: String,
+
+        /// Generation backend: auto | cpu | metal | wgpu.
+        #[arg(short, long, default_value = "auto")]
+        backend: String,
+
+        /// Force the spoken language (otherwise auto-detected per utterance).
+        #[arg(long)]
+        language: Option<String>,
+
+        /// System prompt to seed the conversation.
+        #[arg(long)]
+        system: Option<String>,
+    },
+
     /// Download a model from HuggingFace Hub to the local cache.
     Pull {
         /// HuggingFace model ID.
@@ -386,6 +409,13 @@ async fn dispatch(cli: Cli) -> Result<()> {
             )
             .await
         }
+        Commands::Converse {
+            model,
+            stt,
+            backend,
+            language,
+            system,
+        } => converse_command(model.as_str(), stt.as_str(), &backend, language, system).await,
         Commands::Pull { model } => pull_command(model.as_str(), cli.verbose).await,
         Commands::List => list_command(),
         Commands::Models => models_command(),
@@ -1382,6 +1412,86 @@ async fn transcribe_command(
     }
     if any {
         println!();
+    }
+    Ok(())
+}
+
+// ── converse (real-time speech-to-speech) ──────────────────────────────────────
+
+#[cfg(not(feature = "audio-io"))]
+async fn converse_command(
+    _model: &str,
+    _stt: &str,
+    _backend: &str,
+    _language: Option<String>,
+    _system: Option<String>,
+) -> Result<()> {
+    anyhow::bail!(
+        "`sapient converse` needs live microphone capture — rebuild with the audio-io feature:\n\
+         \tcargo build --release -p sapient-cli --features audio-io\n\
+         (on Linux this also needs the ALSA dev headers: libasound2-dev)"
+    )
+}
+
+#[cfg(feature = "audio-io")]
+async fn converse_command(
+    model: &str,
+    stt: &str,
+    backend: &str,
+    language: Option<String>,
+    system: Option<String>,
+) -> Result<()> {
+    use sapient_generate::{
+        ConversePipeline, EnergyVad, MicCapture, NoopTts, Pipeline, TranscribePipeline, VadConfig,
+    };
+
+    let backend_kind = parse_generation_backend(backend)?;
+    let loading = ui::spinner(format!("loading {stt} + {model}…"));
+    let stt_pipe = TranscribePipeline::from_pretrained_with_backend(stt, backend_kind).await?;
+    let llm = Pipeline::from_pretrained(model).await?;
+    drop(loading);
+
+    let mut converse = ConversePipeline::new(stt_pipe, llm, Box::new(NoopTts));
+    if let Some(s) = system {
+        converse = converse.with_system(s);
+    }
+    if let Some(l) = language {
+        converse = converse.with_language(l);
+    }
+
+    // Mic stays on this thread (cpal Stream is !Send); the future runs on the
+    // main runtime (not spawned), so holding it across awaits is fine.
+    let cap = MicCapture::default_input()?;
+    let src_rate = cap.sample_rate();
+    let frames = cap.frames();
+    let frame_samples = (src_rate / 50).max(1) as usize; // 20 ms VAD frames at device rate
+    let mut vad = EnergyVad::new(VadConfig {
+        frame_samples,
+        ..VadConfig::default()
+    });
+    let mut buf: Vec<f32> = Vec::new();
+
+    println!("🎙️  listening — speak, then pause. Ctrl-C to stop.\n");
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => { println!("\n👋 bye"); break; }
+            chunk = frames.recv_async() => {
+                let Ok(chunk) = chunk else { break };
+                buf.extend_from_slice(&chunk);
+                while buf.len() >= frame_samples {
+                    let frame: Vec<f32> = buf.drain(..frame_samples).collect();
+                    if let Some(utt) = vad.push(&frame) {
+                        // Resample the finalized utterance (device rate → 16 kHz) for STT.
+                        let utt16 = sapient_audio::io::resample(&utt, src_rate, 16_000)?;
+                        if let Some(turn) = converse.run_utterance(&utt16).await? {
+                            println!("🗣️  {}", turn.transcript);
+                            println!("🤖 {}\n", turn.reply);
+                            // (When a real TTS replaces NoopTts, play turn.audio here.)
+                        }
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
