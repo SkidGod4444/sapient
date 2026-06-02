@@ -252,6 +252,13 @@ fn dir_size(path: &Path) -> Result<u64> {
     Ok(total)
 }
 
+/// Total bytes of the HuggingFace Hub cache (all downloaded SAPIENT models).
+pub fn hub_cache_size() -> u64 {
+    hub_cache_root()
+        .and_then(|d| dir_size(&d).ok())
+        .unwrap_or(0)
+}
+
 pub fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;

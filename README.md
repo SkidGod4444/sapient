@@ -104,6 +104,9 @@ sapient speak orpheus-3b "The quick brown fox." --voice leo -o fox.wav
 sapient converse openhorizon/qwen2.5-1.5b --stt whisper-base
 sapient converse openhorizon/qwen2.5-1.5b --speak   # also speak replies (Orpheus TTS; slow on CPU)
 
+# Live resource monitor — CPU cores, RAM, and disk used by SAPIENT
+sapient stats        # (aliases: top, monitor) — Ctrl-C to exit
+
 # Download a model to local cache
 sapient pull openhorizon/phi-2
 

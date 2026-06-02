@@ -4,6 +4,7 @@ mod hub;
 mod markdown;
 mod progress;
 mod server;
+mod stats;
 mod ui;
 mod update;
 
@@ -92,7 +93,8 @@ enum Commands {
         audio: PathBuf,
 
         /// Generation backend: auto | cpu | metal | wgpu.
-        #[arg(short, long, default_value = "cpu")]
+        /// `auto` uses the binary's compiled accelerator (GPU build → GPU).
+        #[arg(short, long, default_value = "auto")]
         backend: String,
 
         /// Source language code (e.g. `en`, `fr`). Omit to auto-detect.
@@ -160,7 +162,8 @@ enum Commands {
         voice: String,
 
         /// Generation backend: auto | cpu | metal | wgpu.
-        #[arg(short, long, default_value = "cpu")]
+        /// `auto` uses the binary's compiled accelerator (GPU build → GPU).
+        #[arg(short, long, default_value = "auto")]
         backend: String,
     },
 
@@ -214,6 +217,10 @@ enum Commands {
     /// is possible, and expected tok/s for common model sizes.
     #[command(hide = true)]
     Devices,
+
+    /// Live resource monitor — CPU cores, RAM, and disk used by SAPIENT.
+    #[command(visible_aliases = ["top", "monitor"])]
+    Stats,
 
     /// Save a HuggingFace access token for gated models.
     Login {
@@ -470,6 +477,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Commands::Info { model } => info_command(model.as_str()).await,
         Commands::BackendInfo => backend_info_command(),
         Commands::Devices => devices_command(),
+        Commands::Stats => stats::run().await,
         Commands::Login { token } => login_command(token.as_deref()),
         Commands::Run {
             model,
@@ -1616,7 +1624,8 @@ async fn converse_command(
     let mut vad = new_vad();
     let mut buf: Vec<f32> = Vec::new();
 
-    ui::converse_banner(src_rate, stt, model, speak);
+    let backend_label = converse.backend_label();
+    ui::converse_banner(src_rate, stt, model, &backend_label, speak);
 
     // Live mic meter + a one-time hint if the mic looks dead (the terminal lacks
     // microphone permission, so cpal delivers only silence).

@@ -34,18 +34,28 @@ pub struct VadConfig {
     pub min_utterance_frames: usize,
     /// Force-finalize an utterance once it reaches this many frames.
     pub max_utterance_frames: usize,
+    /// Absolute minimum RMS for a frame to count as speech. Floors the adaptive
+    /// threshold so typical room ambient (~0.003–0.01) is **not** mistaken for
+    /// speech — the bug that made every turn run to `max_utterance_frames`.
+    pub min_rms: f32,
+    /// In the speech state, a frame ends the turn when its RMS drops below
+    /// `end_ratio × (recent speech peak)` — a relative-drop detector that
+    /// finalizes on a real pause even when ambient noise exceeds `min_rms`.
+    pub end_ratio: f32,
 }
 
 impl Default for VadConfig {
     fn default() -> Self {
-        // 20 ms frames; ~120 ms to engage, ~700 ms silence to end a turn.
+        // 20 ms frames; ~120 ms to engage, ~600 ms silence to end a turn.
         Self {
             frame_samples: 320,
             enter_frames: 6,
-            silence_hang_frames: 35,
+            silence_hang_frames: 30,
             sensitivity: 0.5,
             min_utterance_frames: 10,   // 200 ms
             max_utterance_frames: 1500, // 30 s
+            min_rms: 0.01,
+            end_ratio: 0.35,
         }
     }
 }
@@ -70,6 +80,8 @@ pub struct EnergyVad {
     /// Recent frames held back during debounce so the utterance keeps its onset.
     lead: Vec<f32>,
     frames_in_utterance: usize,
+    /// Decaying peak RMS of the in-progress utterance (relative-drop reference).
+    peak: f32,
 }
 
 impl EnergyVad {
@@ -83,13 +95,15 @@ impl EnergyVad {
             buffer: Vec::new(),
             lead: Vec::new(),
             frames_in_utterance: 0,
+            peak: 0.0,
         }
     }
 
     fn threshold(&self) -> f32 {
-        // Map sensitivity 0..1 → multiplier ~2x..7x over the adaptive noise floor.
+        // Map sensitivity 0..1 → multiplier ~2x..7x over the adaptive noise floor,
+        // floored at `min_rms` so room ambient never reads as speech.
         let mult = 1.0 + self.cfg.sensitivity * 6.0 + 1.0;
-        (self.noise_floor * mult).max(1e-4)
+        (self.noise_floor * mult).max(self.cfg.min_rms)
     }
 
     /// Push one frame (`cfg.frame_samples` samples). Returns the finalized
@@ -118,13 +132,21 @@ impl EnergyVad {
                     self.buffer.append(&mut self.lead);
                     self.frames_in_utterance = self.run_speech;
                     self.run_silence = 0;
+                    self.peak = rms; // seed the relative-drop reference
                 }
                 None
             }
             State::Speech => {
                 self.buffer.extend_from_slice(frame);
                 self.frames_in_utterance += 1;
-                if speech {
+                // Track a slowly-decaying speech peak. A frame keeps the turn
+                // alive only if it's loud both in absolute terms (`threshold`)
+                // and relative to that peak — so a real pause (which drops well
+                // below the speaker's level) ends the turn even when ambient
+                // noise sits above the absolute floor.
+                self.peak = rms.max(self.peak * 0.995);
+                let end_level = (self.cfg.end_ratio * self.peak).max(self.threshold());
+                if rms >= end_level && (0.01..0.8).contains(&zcr) {
                     self.run_silence = 0;
                 } else {
                     self.run_silence += 1;
@@ -152,6 +174,7 @@ impl EnergyVad {
         self.state = State::Silence;
         self.run_speech = 0;
         self.run_silence = 0;
+        self.peak = 0.0;
         self.lead.clear();
         let frames = self.frames_in_utterance;
         self.frames_in_utterance = 0;
@@ -240,6 +263,65 @@ mod tests {
             assert!(vad.push(&vec![0.0f32; fs]).is_none());
         }
         assert!(vad.flush().is_none());
+    }
+
+    // 300 Hz tone of a given RMS — `amp = rms·√2`.
+    fn tone(idx: usize, fs: usize, rms_target: f32) -> Vec<f32> {
+        let amp = rms_target * std::f32::consts::SQRT_2;
+        (0..fs)
+            .map(|k| (std::f32::consts::TAU * 300.0 * (idx * fs + k) as f32 / 16_000.0).sin() * amp)
+            .collect()
+    }
+
+    #[test]
+    fn ambient_below_min_rms_never_triggers() {
+        // Steady room hum at rms ~0.004 (< min_rms 0.01) must never be treated as
+        // speech — this is the regression that made every turn run to the 30 s cap.
+        let cfg = VadConfig::default();
+        let mut vad = EnergyVad::new(cfg);
+        for i in 0..120 {
+            assert!(vad.push(&tone(i, cfg.frame_samples, 0.004)).is_none());
+        }
+        assert!(vad.flush().is_none());
+    }
+
+    #[test]
+    fn finalizes_promptly_on_real_pause() {
+        // Loud speech, then a realistic ambient pause (rms ~0.005, below min_rms):
+        // the turn must finalize at the silence-hang, NOT run to the 30 s cap, and
+        // the trailing ambient must not re-trigger a second phantom utterance.
+        let cfg = VadConfig {
+            silence_hang_frames: 10,
+            min_utterance_frames: 5,
+            ..VadConfig::default()
+        };
+        let mut vad = EnergyVad::new(cfg);
+        let fs = cfg.frame_samples;
+        let mut utts = Vec::new();
+        let mut idx = 0;
+        for _ in 0..25 {
+            if let Some(u) = vad.push(&tone(idx, fs, 0.2)) {
+                utts.push(u);
+            }
+            idx += 1;
+        }
+        for _ in 0..40 {
+            if let Some(u) = vad.push(&tone(idx, fs, 0.005)) {
+                utts.push(u);
+            }
+            idx += 1;
+        }
+        if let Some(u) = vad.flush() {
+            utts.push(u);
+        }
+        assert_eq!(
+            utts.len(),
+            1,
+            "exactly one utterance, finalized on the pause"
+        );
+        // Finalized well before the max cap (25 speech + ~10 hang ≈ 35 frames).
+        let secs = utts[0].len() as f32 / 16_000.0;
+        assert!(secs < 1.0, "utterance {secs}s — should not run to the cap");
     }
 
     #[test]

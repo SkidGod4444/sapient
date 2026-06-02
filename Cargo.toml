@@ -107,6 +107,7 @@ termimad  = "0.31"
 syntect   = { version = "5.2", default-features = false, features = ["default-fancy"] }
 sha2      = "0.10"
 dirs      = "5.0"
+sysinfo   = "0.32"   # live system/process telemetry for `sapient stats`
 
 # Telemetry
 tracing                     = "0.1"

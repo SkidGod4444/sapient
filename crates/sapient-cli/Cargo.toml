@@ -35,6 +35,7 @@ flate2      = { workspace = true }
 futures     = { workspace = true }
 indicatif   = { workspace = true }
 reqwest     = { workspace = true }
+sysinfo     = { workspace = true }
 rustyline   = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }

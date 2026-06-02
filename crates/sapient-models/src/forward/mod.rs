@@ -79,6 +79,24 @@ fn use_mlx_engine(backend: LlmBackendKind) -> bool {
     }
 }
 
+/// Returns true when the cross-platform wgpu GPU backend should be used:
+/// explicit `--backend wgpu`, **or** `Auto` on a binary compiled with the `wgpu`
+/// feature (the `-gpu` release variant) — so a GPU binary runs on the GPU by
+/// default without an explicit flag. MLX (Metal) is preferred first on Apple
+/// Silicon, so this is only reached when `use_mlx_engine` is false.
+fn use_wgpu_engine(backend: LlmBackendKind) -> bool {
+    #[cfg(feature = "wgpu")]
+    {
+        matches!(backend, LlmBackendKind::Wgpu | LlmBackendKind::Auto)
+    }
+    #[cfg(not(feature = "wgpu"))]
+    {
+        // Without the feature, only an *explicit* request reaches build_wgpu (which
+        // then errors clearly); Auto falls through to CPU.
+        matches!(backend, LlmBackendKind::Wgpu)
+    }
+}
+
 impl ForwardEngine {
     pub fn from_pretrained(info: ModelInfo, weight_paths: &[PathBuf]) -> Result<Self> {
         Self::from_weight_paths(info, weight_paths)
@@ -102,7 +120,9 @@ impl ForwardEngine {
             }
             WeightFormat::Safetensors | WeightFormat::PyTorchBin => match info.arch {
                 ArchType::Llama | ArchType::Qwen | ArchType::Gemma | ArchType::Mixtral => {
-                    if matches!(backend, LlmBackendKind::Wgpu) {
+                    // wgpu when explicitly requested or auto-selected on a -gpu build
+                    // (MLX/Metal is handled inside LlamaForward's backend dispatch).
+                    if use_wgpu_engine(backend) && !use_mlx_engine(backend) {
                         return Self::build_wgpu(info, weight_paths);
                     }
                     Ok(Self::Llama(LlamaForward::from_files_with_backend(
@@ -168,11 +188,8 @@ impl ForwardEngine {
         }
         match info.arch {
             ArchType::Llama | ArchType::Qwen | ArchType::Gemma | ArchType::Mixtral => {
-                // Cross-platform GPU path (Vulkan/DX12/Metal) when explicitly requested.
-                if matches!(backend, LlmBackendKind::Wgpu) {
-                    return Self::build_wgpu_from_weights(info, weights);
-                }
-                // Use the fully-native MLX engine when Metal is available and selected.
+                // Backend precedence (so the compiled binary variant decides):
+                // 1. MLX (Metal) — native lazy-graph, preferred on Apple Silicon.
                 if use_mlx_engine(backend) {
                     #[cfg(all(target_os = "macos", feature = "mlx"))]
                     {
@@ -184,6 +201,12 @@ impl ForwardEngine {
                         )?));
                     }
                 }
+                // 2. wgpu (Vulkan/DX12/Metal) — explicit `--backend wgpu`, or Auto on
+                //    a `-gpu` (wgpu-feature) build, so the GPU binary uses the GPU.
+                if use_wgpu_engine(backend) {
+                    return Self::build_wgpu_from_weights(info, weights);
+                }
+                // 3. CPU.
                 Ok(Self::Llama(LlamaForward::from_weights_with_backend(
                     info, weights, backend,
                 )?))

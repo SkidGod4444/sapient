@@ -94,6 +94,13 @@ impl ConversePipeline {
         &self.history
     }
 
+    /// A display label for the backend the LLM resolved to (e.g.
+    /// `"metal (MLX native graph)"` or a CPU label). The TTS uses the same
+    /// backend kind, so this reflects the whole compute path's accelerator.
+    pub fn backend_label(&self) -> String {
+        self.llm.backend_display_label()
+    }
+
     /// Transcribe one utterance (mono 16 kHz) to text — STT only, no history
     /// mutation. Returns the trimmed transcript (possibly empty for silence).
     /// Used by the live CLI to show the transcript before streaming the reply.

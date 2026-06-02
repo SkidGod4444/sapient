@@ -118,8 +118,9 @@ pub fn print_gen_stats(tokens: usize, elapsed: Duration, ttft: Option<Duration>)
 
 // ── converse (live voice) UI ──────────────────────────────────────────────────
 
-/// Banner shown when `sapient converse` starts.
-pub fn converse_banner(input_rate: u32, stt: &str, llm: &str, speak: bool) {
+/// Banner shown when `sapient converse` starts. `backend` is the resolved
+/// compute label (e.g. "metal (MLX native graph)" or a CPU label).
+pub fn converse_banner(input_rate: u32, stt: &str, llm: &str, backend: &str, speak: bool) {
     let bar = style("━".repeat(52)).dim();
     println!("\n{bar}");
     println!(
@@ -127,11 +128,21 @@ pub fn converse_banner(input_rate: u32, stt: &str, llm: &str, speak: bool) {
         style("SAPIENT Voice").bold().cyan(),
         style(format!("· in {input_rate}Hz · stt {stt} · llm {llm}")).dim()
     );
+    // Compute backend — green when accelerated, yellow + hint when CPU-only.
+    let lower = backend.to_ascii_lowercase();
+    let accelerated = lower.contains("metal") || lower.contains("gpu") || lower.contains("wgpu");
+    if accelerated {
+        println!("  {} {}", style("compute").dim(), style(backend).green());
+    } else {
+        println!(
+            "  {} {} {}",
+            style("compute").dim(),
+            style(backend).yellow(),
+            style("— for GPU latency run the accelerated build: `sapient update --metal`").dim()
+        );
+    }
     let mode = if speak {
-        style(format!(
-            "{NOTE} voice replies on (Orpheus TTS — slow on CPU)"
-        ))
-        .yellow()
+        style(format!("{NOTE} voice replies on (Orpheus TTS)")).yellow()
     } else {
         style(format!("{INFO} text replies · pass --speak to hear them")).dim()
     };
