@@ -1112,6 +1112,8 @@ mod tests {
     }
 
     // Helper: quantize an f32 row into packed Q8_0 weight blocks.
+    // Only used by the aarch64 SDOT test below (dead code on other arches).
+    #[cfg(target_arch = "aarch64")]
     fn q8_0_weight_row(w: &[f32]) -> Vec<u8> {
         let mut out = Vec::with_capacity(w.len() / QK * Q8_0_BLOCK_BYTES);
         for chunk in w.chunks_exact(QK) {
