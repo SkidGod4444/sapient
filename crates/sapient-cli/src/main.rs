@@ -1569,15 +1569,35 @@ async fn converse_command(
         MicPermission::Granted | MicPermission::Unknown => {}
     }
 
-    let loading = ui::spinner(format!("loading {stt} + {model}…"));
-    let stt_pipe = TranscribePipeline::from_pretrained_with_backend(stt, backend_kind).await?;
-    let llm = Pipeline::from_pretrained(model).await?;
-    // Optional spoken replies via Orpheus TTS (a 3B LM — slow on CPU).
-    let tts: Box<dyn Tts> = if speak {
-        let sp = SpeakPipeline::from_pretrained_with_backend("orpheus-3b", backend_kind).await?;
-        Box::new(sp)
+    let loading = ui::spinner(if speak {
+        format!("loading {stt} + {model} + orpheus-3b…")
     } else {
-        Box::new(NoopTts)
+        format!("loading {stt} + {model}…")
+    });
+    // Load all models concurrently at startup (their downloads overlap) and keep
+    // them resident for the whole session — no mid-conversation model load.
+    let llm_opts = LoadOptions {
+        backend: backend_kind,
+        ..Default::default()
+    };
+    let (stt_res, llm_res, tts_res) = tokio::join!(
+        TranscribePipeline::from_pretrained_with_backend(stt, backend_kind),
+        Pipeline::from_pretrained_with_opts(model, llm_opts),
+        async {
+            if speak {
+                SpeakPipeline::from_pretrained_with_backend("orpheus-3b", backend_kind)
+                    .await
+                    .map(Some)
+            } else {
+                Ok(None)
+            }
+        },
+    );
+    let stt_pipe = stt_res?;
+    let llm = llm_res?;
+    let tts: Box<dyn Tts> = match tts_res? {
+        Some(sp) => Box::new(sp),
+        None => Box::new(NoopTts),
     };
     drop(loading);
 

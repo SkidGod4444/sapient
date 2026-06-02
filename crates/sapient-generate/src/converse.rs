@@ -171,31 +171,21 @@ impl ConversePipeline {
         let gen_ms = gen_start.elapsed().as_millis();
         self.history.push(ChatMessage::assistant(reply.clone()));
 
-        // Synthesize per sentence, emitting each sentence's audio **only once it
-        // is fully decoded** (not as sub-chunks). Submitting a complete sentence
-        // to the player guarantees gap-free playback *within* speech — the codec
-        // LM (~17 tok/s) is slower than real-time (~82 tok/s needed), so feeding
-        // partial chunks to the speaker would underrun and stutter. The only
-        // thing between sentences is a natural pause while the next is decoded.
-        // (`synthesize` decodes the whole sentence; the streaming `Tts` path is
-        // kept for a future real-time-capable small model.) TTS is CPU-bound, so
-        // keep it off the async reactor.
+        // Synthesize the **whole reply as one clip**, then play it once. Splitting
+        // per sentence made the player run dry between sentences (the codec LM at
+        // ~17 tok/s is slower than real-time, so the next sentence isn't ready
+        // when the current finishes → a long mid-reply break). Decoding the full
+        // reply up front trades a bit more time-to-first-audio for **gap-free
+        // playback start-to-finish**. The brevity system prompt keeps `--speak`
+        // replies short so that upfront wait stays small. TTS is CPU-bound — keep
+        // it off the async reactor. (The streaming `Tts` path is retained for a
+        // future real-time-capable small model.)
         let sr = self.tts.sample_rate();
-        let mut chunker = crate::sentence::SentenceChunker::new(24, 240);
-        let mut sentences = chunker.push(&reply);
-        if let Some(rest) = chunker.flush() {
-            sentences.push(rest);
-        }
-        let mut audio: Vec<f32> = Vec::new();
-        let mut tts_ms = 0u128;
-        for sentence in sentences {
-            let t = Instant::now();
-            let samples = tokio::task::block_in_place(|| self.tts.synthesize(&sentence))?;
-            tts_ms += t.elapsed().as_millis();
-            if !samples.is_empty() {
-                on_audio(&samples, sr); // one complete sentence → plays gap-free
-                audio.extend_from_slice(&samples);
-            }
+        let t = std::time::Instant::now();
+        let audio = tokio::task::block_in_place(|| self.tts.synthesize(&reply))?;
+        let tts_ms = t.elapsed().as_millis();
+        if !audio.is_empty() {
+            on_audio(&audio, sr);
         }
 
         Ok(Turn {
