@@ -21,6 +21,22 @@ use crate::Pipeline;
 pub trait Tts: Send + Sync {
     fn synthesize(&self, text: &str) -> Result<Vec<f32>>;
     fn sample_rate(&self) -> u32;
+
+    /// Synthesize `text`, emitting audio in chunks via `on_audio(samples, rate)`
+    /// as soon as each is ready — for real-time playback that starts before the
+    /// whole clip is generated. The default batches (calls [`synthesize`] and
+    /// emits once); a codec TTS overrides this to stream as its LM decodes.
+    fn synthesize_streaming(
+        &self,
+        text: &str,
+        on_audio: &mut dyn FnMut(&[f32], u32),
+    ) -> Result<()> {
+        let audio = self.synthesize(text)?;
+        if !audio.is_empty() {
+            on_audio(&audio, self.sample_rate());
+        }
+        Ok(())
+    }
 }
 
 /// Placeholder TTS that produces no audio — lets the cascade run voice-in /
@@ -161,12 +177,16 @@ impl ConversePipeline {
         let mut tts_ms = 0u128;
         for sentence in sentences {
             let t = Instant::now();
-            let samples = tokio::task::block_in_place(|| self.tts.synthesize(&sentence))?;
+            // Stream this sentence's audio: the TTS emits chunks as its codec LM
+            // decodes, so playback can start before the sentence finishes.
+            tokio::task::block_in_place(|| {
+                self.tts
+                    .synthesize_streaming(&sentence, &mut |chunk, rate| {
+                        on_audio(chunk, rate);
+                        audio.extend_from_slice(chunk);
+                    })
+            })?;
             tts_ms += t.elapsed().as_millis();
-            if !samples.is_empty() {
-                on_audio(&samples, sr);
-                audio.extend_from_slice(&samples);
-            }
         }
 
         Ok(Turn {

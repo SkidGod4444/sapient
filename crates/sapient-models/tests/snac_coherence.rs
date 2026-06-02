@@ -76,3 +76,63 @@ fn snac_decode_matches_reference() {
         "SNAC decode diverged from reference: max_err={max_err}"
     );
 }
+
+/// Streaming-decode correctness: decoding a prefix of the codes must produce the
+/// same early samples as decoding the full sequence, once a look-ahead margin is
+/// held back. This is what makes `SpeakPipeline::speak_streaming` artifact-free —
+/// it re-decodes the running sequence and emits only the stable prefix. The
+/// margin here mirrors `STREAM_MARGIN_FRAMES` (8 frames) in `speak.rs`.
+#[test]
+#[ignore = "needs SNAC weights at $SAPIENT_SNAC_DIR"]
+fn decode_prefix_is_stable() {
+    let Ok(dir) = std::env::var("SAPIENT_SNAC_DIR") else {
+        eprintln!("SAPIENT_SNAC_DIR not set — skipping");
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    let cfg = SnacConfig::from_config_file(&dir.join("config.json")).expect("snac config");
+    let spf = cfg.vq_strides[0] * cfg.decoder_rates.iter().product::<usize>();
+    let st = ["model.safetensors", "snac.safetensors"]
+        .iter()
+        .map(|f| dir.join(f))
+        .find(|p| p.exists())
+        .expect("a SNAC safetensors file");
+    let w = normalize_snac_weights(weights::load_hf_weights(&[st]).unwrap()).unwrap();
+    let dec = SnacDecoder::from_weights(cfg, w);
+
+    // Synthetic codes (the fixture is only ~6 frames; stability is a property of
+    // the conv receptive field, independent of whether the codes are meaningful).
+    let frames = 48usize;
+    let cb = dec.config().codebook_size as u64;
+    let gen = |seed: u64, n: usize| -> Vec<u32> {
+        (0..n as u64)
+            .map(|i| ((i.wrapping_mul(2_654_435_761).wrapping_add(seed)) % cb) as u32)
+            .collect()
+    };
+    let codes = vec![gen(1, frames), gen(2, 2 * frames), gen(3, 4 * frames)];
+    let margin = 8usize;
+    let full = dec.decode(&codes).expect("full decode");
+
+    // Decode a prefix of k frames (levels scale 1×/2×/4× per frame) and compare
+    // its first (k - margin) frames of samples to the full decode.
+    let k = frames * 3 / 4;
+    let prefix = vec![
+        codes[0][..k].to_vec(),
+        codes[1][..2 * k].to_vec(),
+        codes[2][..4 * k].to_vec(),
+    ];
+    let part = dec.decode(&prefix).expect("prefix decode");
+    let stable = k.saturating_sub(margin) * spf;
+    assert!(stable > 0 && stable <= part.len() && stable <= full.len());
+
+    let max_err = full[..stable]
+        .iter()
+        .zip(&part[..stable])
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    eprintln!("prefix-stability max_err over {stable} samples ({k} frames, margin {margin}): {max_err:.2e}");
+    assert!(
+        max_err < 1e-4,
+        "streaming prefix unstable (margin {margin} too small): max_err={max_err}"
+    );
+}

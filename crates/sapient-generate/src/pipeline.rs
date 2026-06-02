@@ -874,6 +874,27 @@ impl Pipeline {
         stop_ids: &[u32],
         strategy: SamplingStrategy,
     ) -> Result<Vec<u32>> {
+        let mut generated = Vec::new();
+        self.generate_token_ids_streaming(prompt_ids, max_new, stop_ids, strategy, |tok| {
+            generated.push(tok);
+            true
+        })?;
+        Ok(generated)
+    }
+
+    /// Streaming variant of [`generate_token_ids`](Self::generate_token_ids):
+    /// invokes `on_token(id)` for **each** generated token as it is produced
+    /// (returning `false` stops generation early). Lets a vocoder decode and play
+    /// audio incrementally instead of waiting for the whole sequence — the basis
+    /// for real-time streamed TTS. Runs synchronously on the calling thread.
+    pub fn generate_token_ids_streaming<F: FnMut(u32) -> bool>(
+        &self,
+        prompt_ids: &[u32],
+        max_new: usize,
+        stop_ids: &[u32],
+        strategy: SamplingStrategy,
+        mut on_token: F,
+    ) -> Result<()> {
         if prompt_ids.is_empty() {
             anyhow::bail!("generate_token_ids: empty prompt");
         }
@@ -883,7 +904,6 @@ impl Pipeline {
             .map_err(|e| anyhow::anyhow!("engine lock poisoned: {e}"))?;
         let mut sampler = Sampler::new(strategy);
         let mut all = prompt_ids.to_vec();
-        let mut generated = Vec::new();
 
         engine.reset_cache();
         for step in 0..max_new {
@@ -897,10 +917,12 @@ impl Pipeline {
             if stop_ids.contains(&next) {
                 break;
             }
-            generated.push(next);
             all.push(next);
+            if !on_token(next) {
+                break;
+            }
         }
-        Ok(generated)
+        Ok(())
     }
 
     /// The configured stop sequences.

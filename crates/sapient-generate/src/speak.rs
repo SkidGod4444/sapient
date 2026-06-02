@@ -173,6 +173,116 @@ impl SpeakPipeline {
             .with_context(|| format!("writing WAV to {}", out.display()))?;
         Ok(wav.len())
     }
+
+    /// Waveform samples produced per Orpheus frame (`vq_strides[0] × ∏ decoder_rates`).
+    fn samples_per_frame(&self) -> usize {
+        let cfg = self.snac.config();
+        cfg.vq_strides.first().copied().unwrap_or(4) * cfg.decoder_rates.iter().product::<usize>()
+    }
+
+    /// Streaming synthesis: emits audio chunks via `on_audio(samples, rate)` as
+    /// the codec LM decodes, so playback can begin long before the clip is done.
+    /// Used by `sapient converse` for lower-latency spoken replies.
+    ///
+    /// It re-decodes the running code sequence every [`STREAM_CHUNK_FRAMES`] and
+    /// emits only the *stable* prefix — holding back [`STREAM_MARGIN_FRAMES`] of
+    /// look-ahead so an already-played sample never changes when more right-context
+    /// arrives (SNAC's convs have a finite right receptive field) — then flushes
+    /// the tail at the end.
+    pub fn speak_streaming(
+        &self,
+        text: &str,
+        voice: &str,
+        on_audio: &mut dyn FnMut(&[f32], u32),
+    ) -> Result<()> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(());
+        }
+        let voice = if voice.is_empty() {
+            DEFAULT_ORPHEUS_VOICE
+        } else {
+            voice
+        };
+        let prompt = self.build_prompt_ids(text, voice)?;
+        let strategy = SamplingStrategy::Combined {
+            top_k: 0,
+            top_p: 0.9,
+            temperature: 0.6,
+            repetition_penalty: 1.1,
+        };
+        let words = text.split_whitespace().count().max(1);
+        let max_new = (words * 90).clamp(256, 4096);
+
+        let spf = self.samples_per_frame();
+        let sr = self.sample_rate;
+        let mut codes: Vec<u32> = Vec::new();
+        let mut emitted = 0usize;
+        let mut since = 0usize;
+
+        self.lm
+            .generate_token_ids_streaming(&prompt, max_new, &[END_SPEECH], strategy, |tok| {
+                if (AUDIO_BASE..AUDIO_BASE + CODE_SPAN).contains(&tok) {
+                    codes.push(tok - AUDIO_BASE);
+                    if codes.len() % 7 == 0 {
+                        since += 1;
+                        if since >= STREAM_CHUNK_FRAMES {
+                            since = 0;
+                            let _ = emit_stable(
+                                &self.snac,
+                                &codes,
+                                &mut emitted,
+                                spf,
+                                sr,
+                                false,
+                                on_audio,
+                            );
+                        }
+                    }
+                }
+                true
+            })?;
+        // Flush whatever remains (the true tail of the clip).
+        emit_stable(&self.snac, &codes, &mut emitted, spf, sr, true, on_audio)
+    }
+}
+
+/// Decode every ~8 frames (~0.34 s of audio) during streaming.
+const STREAM_CHUNK_FRAMES: usize = 8;
+/// Look-ahead frames held back so an emitted sample never changes on re-decode.
+const STREAM_MARGIN_FRAMES: usize = 8;
+
+/// Decode the running code sequence and emit the newly-*stable* samples (or the
+/// whole tail when `flush`). Re-decoding from the start each call keeps full
+/// left-context (no boundary clicks); holding back [`STREAM_MARGIN_FRAMES`] keeps
+/// already-emitted samples byte-stable across calls.
+#[allow(clippy::too_many_arguments)]
+fn emit_stable(
+    snac: &SnacDecoder,
+    codes: &[u32],
+    emitted: &mut usize,
+    spf: usize,
+    sr: u32,
+    flush: bool,
+    on_audio: &mut dyn FnMut(&[f32], u32),
+) -> Result<()> {
+    let usable = codes.len() / 7 * 7;
+    if usable == 0 {
+        return Ok(());
+    }
+    let levels = orpheus_codes_to_snac(&codes[..usable])?;
+    let wave = snac.decode(&levels)?;
+    let total_frames = usable / 7;
+    let upto = if flush {
+        wave.len()
+    } else {
+        (total_frames.saturating_sub(STREAM_MARGIN_FRAMES) * spf).min(wave.len())
+    };
+    if upto > *emitted {
+        on_audio(&wave[*emitted..upto], sr);
+        *emitted = upto;
+    }
+    Ok(())
 }
 
 /// Use Orpheus TTS as the synthesizer in the speech-to-speech cascade
@@ -184,6 +294,13 @@ impl crate::converse::Tts for SpeakPipeline {
             return Ok(Vec::new());
         }
         self.speak(text, DEFAULT_ORPHEUS_VOICE)
+    }
+    fn synthesize_streaming(
+        &self,
+        text: &str,
+        on_audio: &mut dyn FnMut(&[f32], u32),
+    ) -> Result<()> {
+        self.speak_streaming(text, DEFAULT_ORPHEUS_VOICE, on_audio)
     }
     fn sample_rate(&self) -> u32 {
         self.sample_rate
