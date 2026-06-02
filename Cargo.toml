@@ -90,6 +90,8 @@ symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "alac"] }
 rubato    = "0.15"   # high-quality sinc resampling → 16 kHz mono
 realfft   = "3.3"    # real-input FFT (wraps rustfft) for STFT
 cpal      = "0.15"   # cross-platform mic/speaker I/O (real-time STS, audio-io feature)
+objc      = "0.2"    # macOS AVFoundation microphone-permission request (audio-io)
+block     = "0.1"    # ObjC completion-handler block for the above
 
 # HuggingFace ecosystem
 hf-hub     = { version = "0.4.0", default-features = false, features = ["tokio", "ureq", "rustls-tls"] }

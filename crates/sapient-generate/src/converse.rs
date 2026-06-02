@@ -88,6 +88,46 @@ impl ConversePipeline {
         &self.history
     }
 
+    /// Transcribe one utterance (mono 16 kHz) to text — STT only, no history
+    /// mutation. Returns the trimmed transcript (possibly empty for silence).
+    /// Used by the live CLI to show the transcript before streaming the reply.
+    pub fn transcribe_utterance(&mut self, samples: &[f32]) -> Result<String> {
+        let opts = self.stt_opts.clone();
+        let t = tokio::task::block_in_place(|| self.stt.transcribe_samples(samples, &opts))?;
+        Ok(t.trim().to_string())
+    }
+
+    /// Given a user `transcript`, stream the assistant's reply token-by-token to
+    /// `on_token`, append both messages to history, synthesize TTS, and return
+    /// the [`Turn`]. The live counterpart of [`run_utterance`](Self::run_utterance)
+    /// — the caller sees the reply as it is generated, not after it completes.
+    pub async fn respond_streaming<F: FnMut(&str)>(
+        &mut self,
+        transcript: &str,
+        mut on_token: F,
+    ) -> Result<Turn> {
+        use futures::StreamExt;
+
+        self.history.push(ChatMessage::user(transcript.to_string()));
+        let mut stream = self.llm.chat_stream(&self.history).await;
+        let mut reply = String::new();
+        while let Some(tok) = stream.next().await {
+            reply.push_str(&tok);
+            on_token(&tok);
+        }
+        self.history.push(ChatMessage::assistant(reply.clone()));
+
+        // TTS is CPU-bound (a neural codec) — keep it off the async reactor.
+        let audio = tokio::task::block_in_place(|| self.tts.synthesize(&reply))?;
+        let audio_sample_rate = self.tts.sample_rate();
+        Ok(Turn {
+            transcript: transcript.to_string(),
+            reply,
+            audio,
+            audio_sample_rate,
+        })
+    }
+
     /// Run one turn from mono 16 kHz samples: transcribe → chat → synthesize.
     /// Appends both the user transcript and the assistant reply to history.
     /// Returns `None` when the utterance transcribes to empty (silence/noise).

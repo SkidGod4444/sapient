@@ -22,6 +22,8 @@ pub mod config;
 pub mod io;
 pub mod mel;
 #[cfg(feature = "audio-io")]
+pub mod permissions;
+#[cfg(feature = "audio-io")]
 pub mod playback;
 pub mod vad;
 
@@ -30,6 +32,10 @@ pub use capture::MicCapture;
 pub use config::MelConfig;
 pub use io::{load_audio, write_wav};
 pub use mel::MelFrontend;
+#[cfg(feature = "audio-io")]
+pub use permissions::{
+    microphone_guidance, open_privacy_settings, request_microphone, MicPermission,
+};
 #[cfg(feature = "audio-io")]
 pub use playback::SpeakerPlayback;
 pub use vad::{EnergyVad, Vad, VadConfig};

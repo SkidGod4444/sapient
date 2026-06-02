@@ -175,6 +175,21 @@ impl SpeakPipeline {
     }
 }
 
+/// Use Orpheus TTS as the synthesizer in the speech-to-speech cascade
+/// (`sapient converse --speak`). Note: a 3B LM decode is slow on CPU, so spoken
+/// replies lag well behind text — keep replies short.
+impl crate::converse::Tts for SpeakPipeline {
+    fn synthesize(&self, text: &str) -> Result<Vec<f32>> {
+        if text.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        self.speak(text, DEFAULT_ORPHEUS_VOICE)
+    }
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+}
+
 /// Load the SNAC decoder: a local dir (`SAPIENT_SNAC_DIR`) if set, else the
 /// `snac_repo` from the Hub.
 async fn load_snac(snac_repo: &str) -> Result<SnacDecoder> {
