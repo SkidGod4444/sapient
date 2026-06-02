@@ -10,6 +10,8 @@ mod phi;
 #[cfg(feature = "wgpu")]
 mod wgpu_engine;
 mod whisper;
+#[cfg(feature = "wgpu")]
+mod whisper_wgpu;
 
 use std::path::{Path, PathBuf};
 
@@ -27,6 +29,8 @@ pub use phi::PhiForward;
 #[cfg(feature = "wgpu")]
 pub use wgpu_engine::WgpuForwardEngine;
 pub use whisper::{AudioEngine, WhisperForward};
+#[cfg(feature = "wgpu")]
+pub use whisper_wgpu::WhisperWgpuEngine;
 
 /// Architecture-specific inference engine with KV-cache support.
 pub enum ForwardEngine {

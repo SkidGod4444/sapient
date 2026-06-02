@@ -229,10 +229,11 @@ to see this list (and which models you've already downloaded) at any time.
 | `whisper-base` | Whisper | 74M | Speech-to-text — `sapient transcribe` |
 | `whisper-small` | Whisper | 244M | Speech-to-text — `sapient transcribe` |
 
-**Speech-to-text:** Whisper models power `sapient transcribe <model> <audio>` (CPU, all
-platforms). Audio is decoded + resampled to 16 kHz in pure Rust (`symphonia`/`rubato`), turned
-into a log-mel spectrogram, and run through a native Whisper encoder/decoder. Auto-detects the
-spoken language; `--language <code>` forces it and `--translate` outputs English.
+**Speech-to-text:** Whisper models power `sapient transcribe <model> <audio>` on all platforms.
+Audio is decoded + resampled to 16 kHz in pure Rust (`symphonia`/`rubato`), turned into a log-mel
+spectrogram, and run through a native Whisper encoder/decoder. Auto-detects the spoken language;
+`--language <code>` forces it and `--translate` outputs English. Runs on CPU by default, or on the
+cross-platform GPU with `--backend wgpu` (build `--features wgpu`).
 
 All text models run on the **CPU** backend everywhere; on Apple Silicon, building with
 `--features mlx` enables the **Metal** GPU backend. Weights are loaded from Safetensors

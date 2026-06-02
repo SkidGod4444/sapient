@@ -5,11 +5,13 @@
 //! drives: decode audio → 16 kHz mono → 30 s chunks → log-mel → encoder →
 //! cached cross-attention → forced-prompt greedy decode → text.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
 use sapient_audio::{load_audio, MelConfig, MelFrontend};
+use sapient_core::Tensor;
 use sapient_hub::client::LoadOptions;
 use sapient_hub::whisper_config::WhisperConfig;
 use sapient_hub::HubClient;
@@ -19,6 +21,27 @@ use sapient_tokenizers::WhisperTokenizer;
 use tracing::debug;
 
 const SAMPLE_RATE: u32 = 16_000;
+
+/// Build the audio engine for the chosen backend. `--backend wgpu` (when the
+/// `wgpu` feature is compiled in) runs the transformer body on the GPU from raw
+/// f32 weights; every other backend uses the CPU/Metal `WhisperForward` (which
+/// online-quantizes its linears to Q8_0).
+fn build_audio_engine(
+    cfg: WhisperConfig,
+    weights: HashMap<String, Tensor>,
+    backend: LlmBackendKind,
+) -> Result<AudioEngine> {
+    #[cfg(feature = "wgpu")]
+    if matches!(backend, LlmBackendKind::Wgpu) {
+        use sapient_models::forward::WhisperWgpuEngine;
+        return Ok(AudioEngine::WhisperWgpu(Box::new(
+            WhisperWgpuEngine::from_weights(cfg, weights)?,
+        )));
+    }
+    Ok(AudioEngine::Whisper(Box::new(
+        WhisperForward::from_weights_with_backend(cfg, weights, backend)?,
+    )))
+}
 
 /// Per-call transcription options.
 #[derive(Debug, Clone)]
@@ -86,7 +109,7 @@ impl TranscribePipeline {
 
         let raw =
             weights::load_hf_weights(&files.weight_paths).context("loading Whisper weights")?;
-        let whisper = WhisperForward::from_weights_with_backend(cfg.clone(), raw, backend)?;
+        let engine = build_audio_engine(cfg.clone(), raw, backend)?;
         let mel = MelFrontend::new(MelConfig::with_n_mels(cfg.num_mel_bins));
 
         debug!(
@@ -95,7 +118,7 @@ impl TranscribePipeline {
         );
 
         Ok(Self {
-            engine: Arc::new(Mutex::new(AudioEngine::Whisper(Box::new(whisper)))),
+            engine: Arc::new(Mutex::new(engine)),
             tokenizer: Arc::new(tokenizer),
             mel,
             cfg,

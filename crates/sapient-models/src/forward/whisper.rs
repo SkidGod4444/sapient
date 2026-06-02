@@ -409,7 +409,11 @@ fn append_kv(prev: Option<&Tensor>, new: &Tensor) -> Result<Tensor> {
 
 /// Audio inference engine (parallel to [`super::ForwardEngine`] for text).
 pub enum AudioEngine {
+    /// CPU (and Metal-via-`LlmBackendDispatch`) Whisper.
     Whisper(Box<WhisperForward>),
+    /// Cross-platform GPU Whisper (wgpu/WGSL — Vulkan/DX12/Metal).
+    #[cfg(feature = "wgpu")]
+    WhisperWgpu(Box<super::whisper_wgpu::WhisperWgpuEngine>),
 }
 
 impl AudioEngine {
@@ -422,6 +426,9 @@ impl AudioEngine {
                 w.set_audio_context(&ctx)?;
                 Ok(ctx)
             }
+            // The wgpu engine caches cross-attention K/V inside `encode`.
+            #[cfg(feature = "wgpu")]
+            Self::WhisperWgpu(w) => w.encode(mel),
         }
     }
 
@@ -429,6 +436,8 @@ impl AudioEngine {
     pub fn decode_step(&mut self, token_ids: &[u32]) -> Result<Vec<f32>> {
         match self {
             Self::Whisper(w) => w.decode_step(token_ids),
+            #[cfg(feature = "wgpu")]
+            Self::WhisperWgpu(w) => w.decode_step(token_ids),
         }
     }
 
@@ -436,12 +445,16 @@ impl AudioEngine {
     pub fn reset_decoder(&mut self) {
         match self {
             Self::Whisper(w) => w.reset_decoder(),
+            #[cfg(feature = "wgpu")]
+            Self::WhisperWgpu(w) => w.reset_decoder(),
         }
     }
 
     pub fn config(&self) -> &WhisperConfig {
         match self {
             Self::Whisper(w) => w.config(),
+            #[cfg(feature = "wgpu")]
+            Self::WhisperWgpu(w) => w.config(),
         }
     }
 }

@@ -271,7 +271,7 @@ impl WgpuContext {
     /// element-wise. Distinct from the SwiGLU/tanh paths.
     pub fn gelu_erf(&self, x: &GpuBuffer) -> GpuBuffer {
         // `ewise` op=2 reads only the first input; pass `x` for both bindings.
-        self.ewise(x, x, 2)
+        self.ewise(x, x, 2, 0)
     }
 
     /// Resident linear projection `out[m,n] = x[m,k] @ w[n,k]^T` (w in HF `[n,k]`),
@@ -314,13 +314,13 @@ impl WgpuContext {
 
     /// Element-wise op over `n` elements. `op`: 0 = `a+b` (residual), 1 = SwiGLU
     /// `silu(a)*b`. Returns a new buffer of length `n`.
-    fn ewise(&self, a: &GpuBuffer, b: &GpuBuffer, op: u32) -> GpuBuffer {
+    fn ewise(&self, a: &GpuBuffer, b: &GpuBuffer, op: u32, dim: u32) -> GpuBuffer {
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         struct P {
             n: u32,
             op: u32,
-            _b: u32,
+            dim: u32,
             _c: u32,
         }
         let n = a.len;
@@ -329,7 +329,7 @@ impl WgpuContext {
             &P {
                 n: n as u32,
                 op,
-                _b: 0,
+                dim,
                 _c: 0,
             },
             "ewise.params",
@@ -346,12 +346,59 @@ impl WgpuContext {
 
     /// Residual add: `out = a + b`.
     pub fn add(&self, a: &GpuBuffer, b: &GpuBuffer) -> GpuBuffer {
-        self.ewise(a, b, 0)
+        self.ewise(a, b, 0, 0)
     }
 
     /// SwiGLU: `out = silu(gate) * up` (element-wise).
     pub fn swiglu(&self, gate: &GpuBuffer, up: &GpuBuffer) -> GpuBuffer {
-        self.ewise(gate, up, 1)
+        self.ewise(gate, up, 1, 0)
+    }
+
+    /// Broadcast per-channel bias add: `out[r,i] = x[r,i] + bias[i]` for an
+    /// `x` of shape `[rows, dim]` and a `bias` of length `dim`. Used for the
+    /// Whisper linear-projection biases.
+    pub fn add_bias(&self, x: &GpuBuffer, bias: &GpuBuffer, dim: usize) -> GpuBuffer {
+        self.ewise(x, bias, 3, dim as u32)
+    }
+
+    /// Transpose the two leading axes of a `[outer, inner, head_dim]` tensor to
+    /// `[inner, outer, head_dim]`. Converts q/k/v between the matmul layout
+    /// `[seq, n_heads, head_dim]` and the attention layout `[n_heads, seq, head_dim]`
+    /// (and back): pass `(seq, n_heads)` one way, `(n_heads, seq)` the other.
+    pub fn transpose_heads(
+        &self,
+        x: &GpuBuffer,
+        outer: usize,
+        inner: usize,
+        head_dim: usize,
+    ) -> GpuBuffer {
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct P {
+            outer: u32,
+            inner: u32,
+            hd: u32,
+            n: u32,
+        }
+        let n = outer * inner * head_dim;
+        let out = self.alloc_f32(n, "transpose_heads.out");
+        let params = self.uniform(
+            &P {
+                outer: outer as u32,
+                inner: inner as u32,
+                hd: head_dim as u32,
+                n: n as u32,
+            },
+            "transpose_heads.params",
+        );
+        self.dispatch(
+            "transpose_heads",
+            include_str!("shaders/transpose_heads.wgsl"),
+            &[&x.buf, &out.buf],
+            &params,
+            (n as u32).div_ceil(256),
+        );
+        out
     }
 
     /// Apply RoPE in-place to `x` laid out as `[batch*n_heads*seq_len, head_dim]`
@@ -434,6 +481,7 @@ impl WgpuContext {
         kv_stride: usize,
         head_dim: usize,
         scale: f32,
+        causal: bool,
     ) -> GpuBuffer {
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -448,7 +496,7 @@ impl WgpuContext {
             jcount: u32,
             kv_stride: u32,
             scale: f32,
-            _p0: u32,
+            causal: u32,
             _p1: u32,
         }
         let out = self.alloc_f32(batch * n_heads * seq_q * head_dim, "attn.out");
@@ -464,7 +512,7 @@ impl WgpuContext {
                 jcount: (head_dim as u32).div_ceil(128),
                 kv_stride: kv_stride as u32,
                 scale,
-                _p0: 0,
+                causal: causal as u32,
                 _p1: 0,
             },
             "attn.params",

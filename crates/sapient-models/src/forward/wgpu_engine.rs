@@ -230,6 +230,7 @@ impl WgpuForwardEngine {
                 self.max_seq,
                 head_dim,
                 scale,
+                true, // causal (decoder LLM)
             );
             let mut o = ctx.matmul_nt(&attn, &layer.wo, 1, n_heads * head_dim, hidden);
             if let Some(b) = &layer.bo {

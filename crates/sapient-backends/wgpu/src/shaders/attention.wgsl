@@ -23,7 +23,7 @@ struct P {
     jcount: u32,       // ceil(head_dim / 128)
     kv_stride: u32,    // allocated positions per kv-head (cache capacity; ≥ seq_k)
     scale: f32,
-    _p0: u32,
+    causal: u32,       // 1 = causal (attend ≤ qi+kv_offset); 0 = full (attend all seq_k)
     _p1: u32,
 };
 
@@ -57,7 +57,8 @@ fn cs_main(@builtin(workgroup_id) wg: vec3<u32>,
     let hd = p.head_dim;
     let q_base = ((b * p.n_heads + h) * p.seq_q + qi) * hd;
     let kv_base = (b * p.n_kv_heads + kvh) * p.kv_stride * hd;
-    let attend_len = qi + p.kv_offset + 1u;   // causal
+    // causal: attend keys ≤ qi+kv_offset; full (encoder / cross-attn): attend all seq_k.
+    let attend_len = select(p.seq_k, qi + p.kv_offset + 1u, p.causal == 1u);
 
     let tid = lid.x;
 

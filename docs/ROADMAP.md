@@ -151,9 +151,18 @@ ONNX-wrapper crates (C++ dep) don't offer together.
   - `WhisperTokenizer` (control tokens + forced-prompt protocol + language detection),
     `TranscribePipeline`, `sapient transcribe <model> <audio>`, registry rows for
     `whisper-{tiny,base,small}`. Verified end-to-end on the JFK clip with `whisper-tiny`.
-- **6b — GPU offload of the audio transformer body** (deferred): WGSL `layer_norm`
-  (with bias) + `gelu` shaders; mirror `wgpu_engine.rs` for the encoder/decoder.
-  mel/STFT/conv stay CPU (cheap, once per chunk).
+- **6b — GPU offload of the audio transformer body** ✅ DONE (`--features wgpu --backend wgpu`):
+  - New WGSL kernels: `layer_norm` (with bias), exact-erf `gelu` (elementwise op=2),
+    a broadcast `add_bias` (op=3), a `transpose_heads` (seq↔heads), and a `causal`
+    flag on `attention` (non-causal for the encoder + cross-attn). All validated
+    bit-close to CPU in `tests/resident.rs`.
+  - `WhisperWgpuEngine` (`forward/whisper_wgpu.rs`) mirrors `WhisperForward` on the
+    GPU: weights upload once as f32; encoder + decoder blocks (LayerNorm/matmul/
+    attention/GELU/residual) run on-device; self-attn KV cache + cross-attn K/V are
+    GPU-resident; only logits read back. mel/STFT/conv stay CPU (cheap, once/chunk).
+  - `AudioEngine::WhisperWgpu` + `TranscribePipeline` wiring; verified end-to-end —
+    `sapient transcribe whisper-tiny jfk.wav --backend wgpu` produces the identical
+    transcript to CPU. Coherence test: `tests/whisper_wgpu_coherence.rs`.
 - **6c — STT polish** (deferred): beam search, full `suppress_tokens`, timestamp
   tokens + long-audio re-seeking, streaming token output, `serve` integration.
 - **6d — TTS** (deferred): Kokoro-82M (text encoder + vocoder/ISTFT; pure-Rust/MIT

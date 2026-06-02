@@ -1,8 +1,9 @@
 // Element-wise kernels, one invocation per element, 2-D-tiled grid.
 // `op`: 0 = add (a+b, residual), 1 = SwiGLU (silu(a)*b = gate·sigmoid(gate)·up),
-//       2 = exact erf GELU of `a` (b ignored — Whisper's activation).
+//       2 = exact erf GELU of `a` (b ignored — Whisper's activation),
+//       3 = broadcast bias add `a[i] + b[i % dim]` (b is a per-channel bias of length `dim`).
 
-struct P { n: u32, op: u32, _b: u32, _c: u32 };
+struct P { n: u32, op: u32, dim: u32, _c: u32 };
 
 @group(0) @binding(0) var<storage, read>       a:   array<f32>;
 @group(0) @binding(1) var<storage, read>       b:   array<f32>;
@@ -34,6 +35,8 @@ fn cs_main(@builtin(workgroup_id) wg: vec3<u32>,
     } else if (p.op == 2u) {
         let v = a[i];
         out[i] = 0.5 * v * (1.0 + erf_approx(v * 0.70710678));
+    } else if (p.op == 3u) {
+        out[i] = a[i] + b[i % p.dim];
     } else {
         out[i] = a[i] + b[i];
     }

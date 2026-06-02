@@ -254,7 +254,7 @@ fn attention_matches_cpu() {
         let kg = ctx.upload_f32(&k, "k");
         let vg = ctx.upload_f32(&v, "v");
         let og = ctx.attention(
-            &qg, &kg, &vg, 1, n_heads, n_kv_heads, seq_q, seq_k, seq_k, head_dim, scale,
+            &qg, &kg, &vg, 1, n_heads, n_kv_heads, seq_q, seq_k, seq_k, head_dim, scale, true,
         );
         let got = ctx.download_f32(&og).unwrap();
 
@@ -317,7 +317,7 @@ fn kv_cache_append_then_decode_matches_cpu() {
     let q: Vec<f32> = (0..n_heads * head_dim).map(|_| next()).collect();
     let qg = ctx.upload_f32(&q, "q");
     let og = ctx.attention(
-        &qg, &kcache, &vcache, 1, n_heads, n_kv_heads, 1, steps, max_seq, head_dim, scale,
+        &qg, &kcache, &vcache, 1, n_heads, n_kv_heads, 1, steps, max_seq, head_dim, scale, true,
     );
     let got = ctx.download_f32(&og).unwrap();
 
@@ -446,4 +446,133 @@ fn gelu_erf_matches_cpu() {
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f32, f32::max);
     assert!(max_err < 1e-5, "wgpu gelu_erf vs cpu max_err={max_err}");
+}
+
+#[test]
+fn add_bias_matches_cpu() {
+    let Some(ctx) = ctx() else {
+        eprintln!("no GPU adapter — skipping wgpu add_bias test");
+        return;
+    };
+    let (rows, dim) = (13usize, 320usize);
+    let mut next = lcg();
+    let x: Vec<f32> = (0..rows * dim).map(|_| next()).collect();
+    let bias: Vec<f32> = (0..dim).map(|_| next()).collect();
+
+    let xg = ctx.upload_f32(&x, "x");
+    let bg = ctx.upload_f32(&bias, "b");
+    let got = ctx.download_f32(&ctx.add_bias(&xg, &bg, dim)).unwrap();
+
+    for r in 0..rows {
+        for i in 0..dim {
+            let want = x[r * dim + i] + bias[i];
+            assert!((got[r * dim + i] - want).abs() < 1e-5);
+        }
+    }
+}
+
+#[test]
+fn transpose_heads_matches_cpu() {
+    let Some(ctx) = ctx() else {
+        eprintln!("no GPU adapter — skipping wgpu transpose_heads test");
+        return;
+    };
+    // [outer=seq, inner=heads, hd] → [heads, seq, hd] and back is identity.
+    let (seq, heads, hd) = (7usize, 5usize, 16usize);
+    let mut next = lcg();
+    let x: Vec<f32> = (0..seq * heads * hd).map(|_| next()).collect();
+
+    let xg = ctx.upload_f32(&x, "x");
+    let tg = ctx.transpose_heads(&xg, seq, heads, hd); // → [heads, seq, hd]
+    let t = ctx.download_f32(&tg).unwrap();
+
+    for s in 0..seq {
+        for h in 0..heads {
+            for c in 0..hd {
+                let src = (s * heads + h) * hd + c;
+                let dst = (h * seq + s) * hd + c;
+                assert!((t[dst] - x[src]).abs() < 1e-9);
+            }
+        }
+    }
+    // Round-trip back to [seq, heads, hd].
+    let bg = ctx.transpose_heads(&tg, heads, seq, hd);
+    let b = ctx.download_f32(&bg).unwrap();
+    for (i, (&a, &c)) in x.iter().zip(&b).enumerate() {
+        assert!((a - c).abs() < 1e-9, "roundtrip mismatch at {i}");
+    }
+}
+
+/// Non-causal (full) attention reference: every query attends to all seq_k keys.
+#[allow(clippy::too_many_arguments)]
+fn cpu_attn_full(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    n_heads: usize,
+    seq_q: usize,
+    seq_k: usize,
+    head_dim: usize,
+    scale: f32,
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; n_heads * seq_q * head_dim];
+    for h in 0..n_heads {
+        for qi in 0..seq_q {
+            let qbase = (h * seq_q + qi) * head_dim;
+            let mut scores = vec![0.0f32; seq_k];
+            let mut mx = f32::NEG_INFINITY;
+            for (ki, sc) in scores.iter_mut().enumerate() {
+                let kbase = (h * seq_k + ki) * head_dim;
+                let mut d = 0.0f32;
+                for c in 0..head_dim {
+                    d += q[qbase + c] * k[kbase + c];
+                }
+                *sc = d * scale;
+                mx = mx.max(*sc);
+            }
+            let mut den = 0.0f32;
+            for sc in scores.iter_mut() {
+                *sc = (*sc - mx).exp();
+                den += *sc;
+            }
+            for (ki, &w) in scores.iter().enumerate() {
+                let vbase = (h * seq_k + ki) * head_dim;
+                let pw = w / den;
+                for c in 0..head_dim {
+                    out[qbase + c] += pw * v[vbase + c];
+                }
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn non_causal_attention_matches_cpu() {
+    let Some(ctx) = ctx() else {
+        eprintln!("no GPU adapter — skipping wgpu non-causal attention test");
+        return;
+    };
+    // Cross-attention shape: query seq_q ≠ key seq_k, MHA, full (non-causal).
+    let (n_heads, seq_q, seq_k, head_dim) = (4usize, 6usize, 9usize, 64usize);
+    let mut next = lcg();
+    let q: Vec<f32> = (0..n_heads * seq_q * head_dim).map(|_| next()).collect();
+    let k: Vec<f32> = (0..n_heads * seq_k * head_dim).map(|_| next()).collect();
+    let v: Vec<f32> = (0..n_heads * seq_k * head_dim).map(|_| next()).collect();
+    let scale = 1.0 / (head_dim as f32).sqrt();
+
+    let qg = ctx.upload_f32(&q, "q");
+    let kg = ctx.upload_f32(&k, "k");
+    let vg = ctx.upload_f32(&v, "v");
+    let og = ctx.attention(
+        &qg, &kg, &vg, 1, n_heads, n_heads, seq_q, seq_k, seq_k, head_dim, scale, false,
+    );
+    let got = ctx.download_f32(&og).unwrap();
+    let want = cpu_attn_full(&q, &k, &v, n_heads, seq_q, seq_k, head_dim, scale);
+    let max_err = got
+        .iter()
+        .zip(&want)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(max_err < 1e-4, "non-causal attention max_err={max_err}");
 }
