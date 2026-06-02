@@ -23,6 +23,66 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::debug;
 
 const SAMPLE_RATE: u32 = 16_000;
+/// Seconds of audio per timestamp token: `input_stride(2) * hop(160) / sr(16k)`.
+const TIME_PRECISION: f32 = 0.02;
+
+/// Seconds represented by a timestamp token id.
+fn timestamp_seconds(timestamp_begin: u32, id: u32) -> f32 {
+    id.saturating_sub(timestamp_begin) as f32 * TIME_PRECISION
+}
+
+/// Whisper's ApplyTimestampRules, applied to `logits` before argmax in the
+/// timestamped decode path. `generated` is the tokens decoded *after* the forced
+/// prompt (text + timestamp tokens). Timestamp ids are `>= timestamp_begin`.
+///
+/// Rules (a subset of openai-whisper's, sufficient for greedy long-form):
+/// - (a) at the first position, force a timestamp (suppress all non-timestamps);
+/// - (b) after a lone timestamp, the next must be text/eot (suppress timestamps);
+///   after a closed timestamp pair, the next must be a timestamp (suppress text);
+/// - (c) timestamps must be monotonic non-decreasing.
+fn apply_timestamp_rules(logits: &mut [f32], timestamp_begin: u32, generated: &[u32]) {
+    let ts0 = timestamp_begin as usize;
+    if ts0 >= logits.len() {
+        return;
+    }
+    let neg = f32::NEG_INFINITY;
+
+    // (a) open every segment with a timestamp.
+    if generated.is_empty() {
+        for v in &mut logits[..ts0] {
+            *v = neg;
+        }
+        return;
+    }
+
+    let last = generated[generated.len() - 1];
+    let penult = generated.len().checked_sub(2).map(|i| generated[i]);
+    let last_ts = last >= timestamp_begin;
+    let penult_ts = penult.is_some_and(|p| p >= timestamp_begin);
+
+    // (b) pairing.
+    if last_ts && !penult_ts {
+        // lone timestamp → force text/eot
+        for v in &mut logits[ts0..] {
+            *v = neg;
+        }
+    } else if last_ts && penult_ts {
+        // closed pair → force the next timestamp
+        for v in &mut logits[..ts0] {
+            *v = neg;
+        }
+    }
+
+    // (c) monotonicity: forbid timestamps earlier than the last emitted one.
+    if let Some(&min_ts) = generated.iter().rev().find(|&&t| t >= timestamp_begin) {
+        let upper = (min_ts as usize).min(logits.len());
+        if upper > ts0 {
+            for v in &mut logits[ts0..upper] {
+                *v = neg;
+            }
+        }
+    }
+}
 
 /// Build the audio engine for the chosen backend. `--backend wgpu` (when the
 /// `wgpu` feature is compiled in) runs the transformer body on the GPU from raw
@@ -178,16 +238,31 @@ impl TranscribePipeline {
         let mut start = 0usize;
         while start < samples.len() {
             let end = (start + chunk_len).min(samples.len());
-            let text = transcribe_chunk(
-                &mut engine,
-                &self.tokenizer,
-                &self.mel,
-                &samples[start..end],
-                opts,
-                &self.cfg,
-                &self.gen_cfg,
-                &mut |_| {},
-            )?;
+            // Timestamped path advances by the last decoded segment's end time
+            // (long-form re-seek); the default path hops a fixed 30 s window.
+            let (text, advance) = if opts.timestamps {
+                transcribe_chunk_timestamped(
+                    &mut engine,
+                    &self.tokenizer,
+                    &self.mel,
+                    &samples[start..end],
+                    opts,
+                    &self.cfg,
+                    &self.gen_cfg,
+                )?
+            } else {
+                let t = transcribe_chunk(
+                    &mut engine,
+                    &self.tokenizer,
+                    &self.mel,
+                    &samples[start..end],
+                    opts,
+                    &self.cfg,
+                    &self.gen_cfg,
+                    &mut |_| {},
+                )?;
+                (t, chunk_len)
+            };
             let text = text.trim();
             if !text.is_empty() {
                 if !out.is_empty() {
@@ -195,7 +270,10 @@ impl TranscribePipeline {
                 }
                 out.push_str(text);
             }
-            start += chunk_len;
+            start += advance.min(chunk_len).max(SAMPLE_RATE as usize);
+            if end == samples.len() {
+                break; // processed the tail
+            }
         }
         Ok(out)
     }
@@ -330,6 +408,70 @@ fn transcribe_chunk(
     tok.decode(&out_tokens, true)
 }
 
+/// Timestamped chunk decode for long-form re-seeking. Returns the chunk text and
+/// the number of samples to advance the window (the last decoded segment's end
+/// timestamp, or the full chunk when no usable timestamp was produced).
+#[allow(clippy::too_many_arguments)]
+fn transcribe_chunk_timestamped(
+    engine: &mut AudioEngine,
+    tok: &WhisperTokenizer,
+    mel: &MelFrontend,
+    chunk: &[f32],
+    opts: &TranscribeOptions,
+    cfg: &WhisperConfig,
+    gen_cfg: &WhisperGenConfig,
+) -> Result<(String, usize)> {
+    let chunk_len = mel.config().n_samples();
+    let mel_t = mel.log_mel(chunk)?;
+    engine.encode(&mel_t)?;
+
+    let lang: Option<String> = match &opts.language {
+        Some(l) => Some(l.clone()),
+        None => {
+            engine.reset_decoder();
+            let logits = engine.decode_step(&[tok.sot])?;
+            argmax_restricted(&logits, &tok.language_token_ids())
+                .and_then(|id| tok.language_code(id).map(str::to_string))
+        }
+    };
+
+    engine.reset_decoder();
+    let prompt = tok.sot_sequence(lang.as_deref(), opts.translate, true); // timestamps on
+    let mut logits = engine.decode_step(&prompt)?;
+    apply_suppress(&mut logits, &gen_cfg.suppress_tokens);
+    apply_suppress(&mut logits, &gen_cfg.begin_suppress_tokens);
+
+    let budget = opts
+        .max_new_tokens
+        .min(cfg.max_target_positions.saturating_sub(prompt.len()).max(1));
+    let mut generated: Vec<u32> = Vec::new(); // text + timestamp tokens
+    let mut text_tokens: Vec<u32> = Vec::new();
+    for _ in 0..budget {
+        apply_timestamp_rules(&mut logits, tok.timestamp_begin, &generated);
+        let next = argmax(&logits);
+        if tok.is_eot(next) {
+            break;
+        }
+        generated.push(next);
+        if !tok.is_special(next) {
+            text_tokens.push(next);
+        }
+        logits = engine.decode_step(&[next])?;
+        apply_suppress(&mut logits, &gen_cfg.suppress_tokens);
+    }
+
+    let text = tok.decode(&text_tokens, true)?;
+    // Advance by the last emitted timestamp (clamped to the window in the caller).
+    let advance = generated
+        .iter()
+        .rev()
+        .find(|&&t| tok.is_timestamp(t))
+        .map(|&t| (timestamp_seconds(tok.timestamp_begin, t) * SAMPLE_RATE as f32) as usize)
+        .filter(|&s| s > 0)
+        .unwrap_or(chunk_len);
+    Ok((text, advance))
+}
+
 /// Mask the given token ids to -inf so they can never be sampled.
 fn apply_suppress(logits: &mut [f32], ids: &[u32]) {
     for &id in ids {
@@ -358,4 +500,53 @@ fn argmax_restricted(logits: &[f32], ids: &[u32]) -> Option<u32> {
         .copied()
         .filter(|&id| (id as usize) < logits.len())
         .max_by(|&a, &b| logits[a as usize].total_cmp(&logits[b as usize]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TB: u32 = 100; // synthetic timestamp_begin; ids < 100 are text, ≥100 are timestamps
+    const VOCAB: usize = 160;
+
+    fn fresh() -> Vec<f32> {
+        vec![0.0f32; VOCAB]
+    }
+
+    #[test]
+    fn timestamp_seconds_maps_correctly() {
+        assert!((timestamp_seconds(TB, TB) - 0.0).abs() < 1e-6);
+        assert!((timestamp_seconds(TB, TB + 50) - 1.0).abs() < 1e-6); // 50 * 0.02
+    }
+
+    #[test]
+    fn first_position_forces_a_timestamp() {
+        let mut l = fresh();
+        apply_timestamp_rules(&mut l, TB, &[]);
+        // All text logits (< TB) suppressed; timestamps untouched.
+        assert!(l[..TB as usize].iter().all(|&v| v == f32::NEG_INFINITY));
+        assert!(l[TB as usize..].iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn after_lone_timestamp_forces_text() {
+        let mut l = fresh();
+        // generated ends with a lone timestamp (penult is text) → suppress timestamps.
+        apply_timestamp_rules(&mut l, TB, &[5, TB + 10]);
+        assert!(l[..TB as usize].iter().all(|&v| v == 0.0)); // text allowed
+        assert!(l[TB as usize..].iter().all(|&v| v == f32::NEG_INFINITY));
+    }
+
+    #[test]
+    fn after_closed_pair_forces_timestamp() {
+        let mut l = fresh();
+        // ...text, ts, ts (closed pair) → next must be a timestamp.
+        apply_timestamp_rules(&mut l, TB, &[5, TB + 10, TB + 20]);
+        assert!(l[..TB as usize].iter().all(|&v| v == f32::NEG_INFINITY));
+        // monotonic: timestamps below the last (TB+20) also suppressed.
+        assert!(l[TB as usize..(TB + 20) as usize]
+            .iter()
+            .all(|&v| v == f32::NEG_INFINITY));
+        assert!(l[(TB + 20) as usize..].iter().all(|&v| v == 0.0));
+    }
 }

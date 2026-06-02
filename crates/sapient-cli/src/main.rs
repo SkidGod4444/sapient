@@ -102,6 +102,10 @@ enum Commands {
         /// Translate to English instead of transcribing in the source language.
         #[arg(long)]
         translate: bool,
+
+        /// Emit timestamp tokens and use them to re-seek long audio (>30 s).
+        #[arg(long)]
+        timestamps: bool,
     },
 
     /// Download a model from HuggingFace Hub to the local cache.
@@ -363,7 +367,18 @@ async fn dispatch(cli: Cli) -> Result<()> {
             backend,
             language,
             translate,
-        } => transcribe_command(model.as_str(), &audio, &backend, language, translate).await,
+            timestamps,
+        } => {
+            transcribe_command(
+                model.as_str(),
+                &audio,
+                &backend,
+                language,
+                translate,
+                timestamps,
+            )
+            .await
+        }
         Commands::Pull { model } => pull_command(model.as_str(), cli.verbose).await,
         Commands::List => list_command(),
         Commands::Models => models_command(),
@@ -1325,6 +1340,7 @@ async fn transcribe_command(
     backend: &str,
     language: Option<String>,
     translate: bool,
+    timestamps: bool,
 ) -> Result<()> {
     if !audio.exists() {
         anyhow::bail!("audio file not found: {}", audio.display());
@@ -1340,6 +1356,7 @@ async fn transcribe_command(
     let opts = TranscribeOptions {
         language,
         translate,
+        timestamps,
         ..Default::default()
     };
 
