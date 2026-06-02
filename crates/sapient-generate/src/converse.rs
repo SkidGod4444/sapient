@@ -164,9 +164,15 @@ impl ConversePipeline {
         let gen_ms = gen_start.elapsed().as_millis();
         self.history.push(ChatMessage::assistant(reply.clone()));
 
-        // Synthesize per sentence (TTS is a CPU-bound neural codec — keep it off
-        // the async reactor): the first sentence can play while the next is still
-        // being synthesized, so the user hears a reply far sooner on a long turn.
+        // Synthesize per sentence, emitting each sentence's audio **only once it
+        // is fully decoded** (not as sub-chunks). Submitting a complete sentence
+        // to the player guarantees gap-free playback *within* speech — the codec
+        // LM (~17 tok/s) is slower than real-time (~82 tok/s needed), so feeding
+        // partial chunks to the speaker would underrun and stutter. The only
+        // thing between sentences is a natural pause while the next is decoded.
+        // (`synthesize` decodes the whole sentence; the streaming `Tts` path is
+        // kept for a future real-time-capable small model.) TTS is CPU-bound, so
+        // keep it off the async reactor.
         let sr = self.tts.sample_rate();
         let mut chunker = crate::sentence::SentenceChunker::new(24, 240);
         let mut sentences = chunker.push(&reply);
@@ -177,16 +183,12 @@ impl ConversePipeline {
         let mut tts_ms = 0u128;
         for sentence in sentences {
             let t = Instant::now();
-            // Stream this sentence's audio: the TTS emits chunks as its codec LM
-            // decodes, so playback can start before the sentence finishes.
-            tokio::task::block_in_place(|| {
-                self.tts
-                    .synthesize_streaming(&sentence, &mut |chunk, rate| {
-                        on_audio(chunk, rate);
-                        audio.extend_from_slice(chunk);
-                    })
-            })?;
+            let samples = tokio::task::block_in_place(|| self.tts.synthesize(&sentence))?;
             tts_ms += t.elapsed().as_millis();
+            if !samples.is_empty() {
+                on_audio(&samples, sr); // one complete sentence → plays gap-free
+                audio.extend_from_slice(&samples);
+            }
         }
 
         Ok(Turn {
