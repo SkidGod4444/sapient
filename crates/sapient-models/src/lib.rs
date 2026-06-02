@@ -21,6 +21,7 @@ pub mod registry;
 pub mod weights;
 
 pub use forward::{
-    mac_gpu_support, total_system_ram_bytes, ForwardEngine, LlmBackendKind, MacGpuSupport,
+    mac_gpu_support, total_system_ram_bytes, AudioEngine, ForwardEngine, LlmBackendKind,
+    MacGpuSupport, WhisperForward,
 };
 pub use registry::{build_graph, ModelGraph};

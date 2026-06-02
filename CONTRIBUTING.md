@@ -104,9 +104,10 @@ crates/
 ├── sapient-telemetry/      # Tracing and metrics
 ├── sapient-runtime/        # InferenceSession, Model
 ├── sapient-hub/            # HuggingFace Hub client
-├── sapient-tokenizers/     # Tokenizers + chat templates
-├── sapient-models/         # Forward engines (Llama, Phi, …)
-├── sapient-generate/       # Pipeline API (from_pretrained, chat, stream)
+├── sapient-tokenizers/     # Tokenizers + chat templates + WhisperTokenizer
+├── sapient-audio/          # Audio front-end: decode/resample + log-mel STFT (Whisper)
+├── sapient-models/         # Forward engines (Llama, Phi, …) + AudioEngine (Whisper STT)
+├── sapient-generate/       # Pipeline API (from_pretrained, chat, stream) + TranscribePipeline
 └── sapient-cli/            # `sapient` binary (chat REPL uses a rustyline line
                             #   editor + markdown.rs live Markdown/code rendering)
 
@@ -131,6 +132,15 @@ When adding a dependency, keep layers acyclic — lower crates must not depend o
 to the live chat `Pipeline`. Architecture builders in `sapient-models/src/architectures/` target
 the IR graph path and are **not** used during inference. Adding a new model means adding a forward
 engine, not an architecture builder (unless it is for the graph path).
+
+**Audio (speech-to-text) is a separate path.** `WhisperForward`/`AudioEngine`
+(`forward/whisper.rs`) and `TranscribePipeline` (`sapient-generate`) are independent of the text
+`ForwardEngine`/`Pipeline` — `sapient transcribe` never touches the chat path. The front-end lives
+in `sapient-audio` (CPU log-mel via `realfft`). Two traps when editing it: the CPU
+`scaled_dot_product_attention` treats `mask=None` as **causal**, so the non-causal encoder and
+cross-attention must pass an explicit all-zeros mask; and Whisper needs **exact erf GELU**
+(`gelu_erf`), not the tanh `gelu`. Verify with `tests/whisper_coherence.rs` (synthetic, exact) and
+the ignored `transcribe_e2e.rs` (real `whisper-tiny`).
 
 **Quantized storage.** `DType::Q4_0` and `DType::Q8_0` store raw ggml block bytes. The key
 invariant is that `as_bytes()` on a quantized tensor returns exactly `byte_count(numel)` bytes.

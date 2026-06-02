@@ -199,6 +199,18 @@ Turns text into tokens and back, and formats chat conversations.
   (including *all* end tokens a model uses, like `<|im_end|>`) so generation stops correctly.
 - `chat.rs` — applies **chat templates** (the Jinja2 recipe that wraps your message with
   role markers like `<|im_start|>user`). Has built-in templates for ChatML, Llama, Gemma, etc.
+- `whisper.rs` — `WhisperTokenizer` for speech-to-text: Whisper's control tokens
+  (`<|startoftranscript|>`, language, `<|transcribe|>`, `<|notimestamps|>`, `<|endoftext|>`) and
+  the *forced prompt* that tells the model what to do.
+
+### 🎙️ `sapient-audio` — turning sound into numbers
+The front-end for speech models. Takes an audio file and produces the picture-of-sound a Whisper
+model reads.
+- `io.rs` — opens any audio file (WAV/FLAC/MP3/OGG/M4A via `symphonia`), mixes it to mono, and
+  resamples to 16 kHz (via `rubato`) — all pure Rust.
+- `mel.rs` — turns the waveform into a **log-mel spectrogram** (a heat-map of which pitches are
+  loud over time), exactly the way OpenAI Whisper does, using a real FFT (`realfft`).
+- `config.rs` — the front-end settings (window size, hop, number of mel bands).
 
 ### 🌐 `sapient-hub` — downloading & managing models
 Talks to Hugging Face, downloads model files, caches them, and keeps the **registry** of
@@ -245,6 +257,14 @@ The real generation math: how to run a Phi or Llama-style model layer by layer.
     via wgpu/WGSL (Vulkan/DX12/Metal) so it runs on Intel/AMD/Nvidia too. Weights upload
     once, the KV cache stays on the GPU, each token decodes on-device; only logits read
     back. Llama-family, f32 first cut — see the wgpu invariants in `CLAUDE.md`.
+  - `forward/whisper.rs` — the **Whisper speech-to-text engine** (`WhisperForward`,
+    wrapped in `AudioEngine`). An encoder turns the mel spectrogram into an "audio
+    understanding," then a decoder writes out the words one token at a time, *listening
+    back* to the audio at every step (cross-attention). Reuses the same linear/norm/
+    attention building blocks as the text engines; runs on CPU today. Powers
+    `sapient transcribe`.
+  - `forward/conv.rs` — a small **1-D convolution** (Whisper's audio "stem") built on top
+    of the existing 2-D conv kernel.
 - `architectures/` — graph **builders** for many model types (used by the IR/graph path).
   Note: only Phi and Llama are wired into live chat today; the rest are scaffolding.
   - `llama.rs`, `phi.rs`, `qwen.rs`, `gemma.rs`, `gpt2.rs`, `bert.rs`, `mixtral.rs`, `mod.rs`.
@@ -261,6 +281,9 @@ tokens, streams text, and stops at the right time.
   cache and produced garbage). Reuses the loaded target+draft engines across requests (no per-request
   rebuild), has `*_with_config` + accessors, and powers `sapient serve --speculative`. Auto-selects a
   **same-family** draft when `--draft-model` is omitted (vocab mismatch is rejected up front).
+- `transcribe.rs` — `TranscribePipeline`: the speech-to-text conductor. Loads a Whisper
+  model, decodes the audio, slices it into 30-second windows, builds the log-mel, runs the
+  encoder, then greedily decodes words (auto-detecting the language). Powers `sapient transcribe`.
 - `sampler.rs` — **how to pick the next token**: greedy (highest score), temperature,
   top-k, top-p, and repetition penalty.
 - `kv_cache.rs` — the memory notebook (KV cache) helpers. As of v0.2.9 the cache is allocated
@@ -328,8 +351,10 @@ Enabled with `--features wgpu` and selected via `--backend wgpu`.
 ### 🖥️ `sapient-cli` — the app you actually run
 The `sapient` command-line program: parses commands, shows the modern UI, and calls the
 libraries above.
-- `main.rs` — defines all commands (`chat`, `pull`, `run`, `list`, `models`, `info`,
-  `serve`, `login`, `update`, `reset`, `rm`, …) and wires them up. The interactive chat
+- `main.rs` — defines all commands (`chat`, `transcribe`, `pull`, `run`, `list`, `models`,
+  `info`, `serve`, `login`, `update`, `reset`, `rm`, …) and wires them up. `transcribe`
+  (aliases `stt`/`asr`) is speech-to-text: `sapient transcribe whisper-base clip.wav`.
+  The interactive chat
   REPL reads input with a `rustyline` line editor (`read_chat_line`) so pasting multi-line
   text no longer auto-submits — bracketed-paste mode inserts the paste into the buffer and
   only a real Enter sends it.

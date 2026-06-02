@@ -28,9 +28,11 @@ pub mod gguf;
 pub mod model_info;
 pub mod registry;
 pub mod resolver;
+pub mod whisper_config;
 
 pub use client::{HubClient, LoadOptions};
 pub use gguf::{select_best_gguf, tokenizer_fallback_model};
 pub use model_info::{ArchType, ModelInfo};
 pub use registry::resolve_model_alias;
 pub use resolver::{ModelFiles, WeightFormat};
+pub use whisper_config::WhisperConfig;

@@ -12,6 +12,7 @@ members = [
     "crates/sapient-hub",
     "crates/sapient-tokenizers",
     "crates/sapient-models",
+    "crates/sapient-audio",
     "crates/sapient-generate",
     "crates/sapient-cli",
 ]
@@ -46,6 +47,7 @@ sapient-runtime      = { path = "crates/sapient-runtime", version = "0.4.0" }
 sapient-hub          = { path = "crates/sapient-hub", version = "0.4.0" }
 sapient-tokenizers   = { path = "crates/sapient-tokenizers", version = "0.4.0" }
 sapient-models       = { path = "crates/sapient-models", version = "0.4.0" }
+sapient-audio        = { path = "crates/sapient-audio", version = "0.4.0" }
 sapient-generate     = { path = "crates/sapient-generate", version = "0.4.0" }
 
 # Core utilities
@@ -80,6 +82,13 @@ num-traits     = "0.2"
 # Formats
 memmap2 = "0.9"
 prost   = "0.12"
+
+# Audio (on-device STT/TTS front-end — pure Rust, no FFI)
+# symphonia: container/codec decode (WAV/FLAC/OGG/MP3/AAC/ALAC). Defaults cover
+# wav/flac/ogg/vorbis/pcm; extra features add the lossy/Apple formats.
+symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "alac"] }
+rubato    = "0.15"   # high-quality sinc resampling → 16 kHz mono
+realfft   = "3.3"    # real-input FFT (wraps rustfft) for STFT
 
 # HuggingFace ecosystem
 hf-hub     = { version = "0.4.0", default-features = false, features = ["tokio", "ureq", "rustls-tls"] }

@@ -2,12 +2,14 @@
 
 pub mod backend;
 pub mod common;
+mod conv;
 mod llama;
 #[cfg(all(target_os = "macos", feature = "mlx"))]
 mod mlx_engine;
 mod phi;
 #[cfg(feature = "wgpu")]
 mod wgpu_engine;
+mod whisper;
 
 use std::path::{Path, PathBuf};
 
@@ -24,6 +26,7 @@ pub use mlx_engine::MlxForwardEngine;
 pub use phi::PhiForward;
 #[cfg(feature = "wgpu")]
 pub use wgpu_engine::WgpuForwardEngine;
+pub use whisper::{AudioEngine, WhisperForward};
 
 /// Architecture-specific inference engine with KV-cache support.
 pub enum ForwardEngine {

@@ -123,6 +123,17 @@ pub fn gelu(x: &Tensor) -> Result<Tensor> {
     })
 }
 
+/// Exact (erf-based) GELU: `0.5 * x * (1 + erf(x / √2))`.
+///
+/// This is the variant used by HuggingFace/OpenAI Whisper (`activation_function
+/// = "gelu"`), as distinct from the tanh approximation in [`gelu`]. The two
+/// differ by < 1e-3 per element but the error compounds across a Whisper
+/// encoder/decoder stack, so the audio path uses this exact form.
+pub fn gelu_erf(x: &Tensor) -> Result<Tensor> {
+    const INV_SQRT_2: f32 = std::f32::consts::FRAC_1_SQRT_2;
+    unary_f32(x, |v| 0.5 * v * (1.0 + erf_approx(v * INV_SQRT_2)))
+}
+
 /// SiLU / Swish: x * sigmoid(x)
 pub fn silu(x: &Tensor) -> Result<Tensor> {
     unary_f32(x, |v| v / (1.0 + (-v).exp()))
@@ -198,6 +209,15 @@ mod tests {
     fn test_erf() {
         let v = erf_approx(0.0);
         assert!(v.abs() < 1e-6, "erf(0) should be ~0, got {v}");
+    }
+    #[test]
+    fn test_gelu_erf() {
+        // Exact GELU: g(0)=0, g(1)=0.8413447, g(-1)=-0.1586553.
+        let out = gelu_erf(&t(&[0.0, 1.0, -1.0])).unwrap();
+        let v = out.as_f32_slice();
+        assert!(v[0].abs() < 1e-6);
+        assert!((v[1] - 0.841_344_7).abs() < 1e-4, "g(1)={}", v[1]);
+        assert!((v[2] - (-0.158_655_3)).abs() < 1e-4, "g(-1)={}", v[2]);
     }
     #[test]
     fn test_scalar_broadcast() {

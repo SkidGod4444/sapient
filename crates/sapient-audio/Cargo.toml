@@ -1,0 +1,20 @@
+[package]
+name        = "sapient-audio"
+description = "Audio front-end for SAPIENT — decode/resample + log-mel spectrogram (pure Rust, no FFI)"
+version.workspace      = true
+edition.workspace      = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+sapient-core = { workspace = true }
+anyhow       = { workspace = true }
+tracing      = { workspace = true }
+symphonia    = { workspace = true }
+rubato       = { workspace = true }
+realfft      = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }

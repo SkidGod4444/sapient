@@ -17,6 +17,7 @@ sapient-runtime    = { workspace = true }
 sapient-hub        = { workspace = true }
 sapient-tokenizers = { workspace = true }
 sapient-models     = { workspace = true }
+sapient-audio      = { workspace = true }
 
 thiserror  = { workspace = true }
 anyhow     = { workspace = true }

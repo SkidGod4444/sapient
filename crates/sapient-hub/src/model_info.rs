@@ -33,6 +33,9 @@ pub enum ArchType {
     Bloom,
     /// T5 / Flan-T5 (encoder-decoder)
     T5,
+    /// OpenAI Whisper (speech-to-text, encoder-decoder). Parsed into a separate
+    /// [`crate::whisper_config::WhisperConfig`], not the LLM-centric `ModelInfo`.
+    Whisper,
     /// Any architecture not yet explicitly recognised — still loadable via GGUF.
     Unknown(String),
 }
@@ -58,6 +61,7 @@ impl ArchType {
             n if n.contains("MPT") => Self::Mpt,
             n if n.contains("Bloom") => Self::Bloom,
             n if n.contains("T5") => Self::T5,
+            n if n.contains("Whisper") => Self::Whisper,
             n if n.contains("Idefics") || n.contains("SmolVLM") => Self::Llama,
             other => Self::Unknown(other.to_owned()),
         }
@@ -324,6 +328,7 @@ impl ArchType {
             "mpt" => Self::Mpt,
             "bloom" => Self::Bloom,
             "t5" => Self::T5,
+            "whisper" => Self::Whisper,
             "idefics3" => Self::Llama,
             other => Self::Unknown(other.to_owned()),
         }

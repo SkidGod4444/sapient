@@ -41,13 +41,14 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release
 SAPIENT is a pure-Rust edge LLM inference engine. The crates form a clear dependency stack:
 
 ```
-sapient-cli              ← the `sapient` binary (chat, pull, run, models, update …)
-  sapient-generate       ← Pipeline API (from_pretrained / from_gguf, generate, chat, stream)
-    sapient-models       ← forward engines + weight loading
-    sapient-hub          ← HF Hub client, curated registry, ModelInfo
-    sapient-tokenizers   ← tokenizer + chat templates
+sapient-cli              ← the `sapient` binary (chat, transcribe, pull, run, models, update …)
+  sapient-generate       ← Pipeline API (from_pretrained / from_gguf, generate, chat, stream) + TranscribePipeline
+    sapient-models       ← forward engines (LLM) + AudioEngine (Whisper) + weight loading
+    sapient-hub          ← HF Hub client, curated registry, ModelInfo, WhisperConfig
+    sapient-tokenizers   ← tokenizer + chat templates + WhisperTokenizer
+    sapient-audio        ← audio front-end: decode/resample (symphonia+rubato) + log-mel STFT (realfft)
     sapient-io           ← file format loaders (safetensors mmap, GGUF quant, ONNX)
-    sapient-backends-cpu ← CPU kernels (matmul, attention, RoPE, quant dot-products)
+    sapient-backends-cpu ← CPU kernels (matmul, attention, conv2d, RoPE, quant dot-products)
     sapient-backends-metal ← MLX/Metal GPU backend (optional, `--features mlx`)
     sapient-backends-wgpu ← cross-platform GPU backend via wgpu (Vulkan/DX12/Metal) — Intel/AMD/Nvidia/Apple
   sapient-core           ← Tensor, DType, Shape, Buffer — used by everyone
@@ -66,6 +67,21 @@ sapient-cli              ← the `sapient` binary (chat, pull, run, models, upda
 - **`WgpuForwardEngine`** (`forward/wgpu_engine.rs`, `cfg(feature="wgpu")`) — cross-platform GPU path (Vulkan/DX12/Metal via wgpu) for Llama/Qwen/Mistral, selected via `--backend wgpu`. GPU-resident weights + KV cache; decode runs fully on-device, only logits read back. The portable answer for Intel/AMD/Nvidia on Linux/Windows where MLX (Apple-only) can't run. See its invariants below.
 
 Architecture builder files in `sapient-models/src/architectures/` (gemma, gpt2, bert, mixtral …) build IR graphs for the graph-execution path; they are **not** used for live inference.
+
+### Whisper speech-to-text (audio path, `sapient transcribe`)
+On-device STT is a **separate engine path** from the text `ForwardEngine` — it never touches the chat/serve code (zero regression risk). Components:
+- **`sapient-audio`** (`mel.rs`, `io.rs`, `config.rs`): CPU-only front-end. `io::load_audio` decodes any `symphonia` format → mono `f32` and resamples to 16 kHz via `rubato`. `MelFrontend::log_mel` computes the Whisper log-mel (`realfft` STFT, n_fft=400/hop=160, periodic Hann, **slaney** mel filterbank built analytically to match OpenAI/librosa, then `log10`→clamp to `max-8`→`(x+4)/4`). Output `[1, n_mels, 3000]`. Runs once per 30 s chunk, so it stays CPU even when the body is on GPU.
+- **`WhisperForward` + `AudioEngine`** (`forward/whisper.rs`): encoder (`conv1`→`conv2`→ +`embed_positions` → N pre-LN blocks → `layer_norm`) and decoder (`embed_tokens`+`embed_positions` → N blocks of [causal self-attn + cross-attn + MLP] → `layer_norm` → tied `proj_out`). Reuses `LlmBackendDispatch` for linear/layernorm+bias/add; **attention calls the CPU flash kernel directly** because non-causal attention needs an explicit mask. `AudioEngine::encode` runs the encoder once and caches each decoder layer's cross-attn K/V (`set_audio_context`); `decode_step` keeps a growing per-layer self-attn KV cache.
+- **Critical invariants:**
+  - **Mask, not `None`:** the CPU `scaled_dot_product_attention` treats `mask=None` as **causal**. The encoder self-attn and cross-attn MUST pass an explicit **all-zeros** `[seq_q,seq_k]` mask (`zeros_mask`); decoder self-attn passes `causal_mask(seq, total)`. Using `None` for the encoder silently makes it causal → wrong transcripts.
+  - **Exact GELU:** Whisper uses erf GELU, not the tanh approx. Use `kernels::elementwise::gelu_erf` (added for this), not `gelu`.
+  - **conv1d** = `conv2d` with a height-1 image (`forward/conv.rs`); conv weights stay full precision.
+  - **Online Q8_0** quantization applies only to F16/BF16 2-D linears (`should_quantize_online` skips conv/embed/pos/norm/bias by name+rank). F32 weights pass through unquantized — which is why the synthetic coherence test (F32) is an exact comparison.
+- **`WhisperConfig`** (`sapient-hub/src/whisper_config.rs`): dual encoder/decoder dims — `ModelInfo` (single-stack) can't represent Whisper, so `TranscribePipeline` branches on `ArchType::Whisper` and parses this instead.
+- **`WhisperTokenizer`** (`sapient-tokenizers/src/whisper.rs`): GPT-2 BPE + control tokens; `sot_sequence(lang, translate, timestamps)` builds the forced prompt; language auto-detect = argmax over `<|lang|>` token ids from one decode step after `<|sot|>`.
+- **`TranscribePipeline`** (`sapient-generate/src/transcribe.rs`): HF safetensors load → 30 s chunking → mel → encode → forced-prompt greedy decode (drops control/timestamp tokens, stops on `<|endoftext|>`).
+- **Loading:** ship **HF safetensors** (`openai/whisper-{tiny,base,small}`, registry family `Whisper`); whisper.cpp q5_0/q5_1 GGUF don't map to SAPIENT's Q-schemes, so safetensors + online-Q8_0 is the path.
+- **Tests:** `sapient-audio` mel/STFT/resample tests; `forward/conv.rs` conv1d-vs-naive; `tests/whisper_coherence.rs` (synthetic tiny model, batch==incremental decode equivalence + cross-attn dependency); `tests/transcribe_e2e.rs` (ignored — downloads `whisper-tiny`, transcribes the JFK clip, asserts "country"). **First-cut scope:** greedy decode, fixed 30 s windows, no timestamps/beam/suppress-tokens, CPU only (GPU offload + TTS/STS are `docs/ROADMAP.md` Phase 6b+).
 
 ### MlxForwardEngine — critical invariants
 - **RoPE axis:** `mlx_rs::fast::rope` uses dimension **−2** as the sequence-position axis. q/k/v MUST be transposed to `[1, n_heads, seq, head_dim]` (seq at −2) **before** RoPE — exactly like mlx-lm. Applying RoPE to `[1, seq, n_heads, head_dim]` scrambles positions across heads and produces garbage (every model collapses to one repeated token). This was the v0.3.4 fix.
