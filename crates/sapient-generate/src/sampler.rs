@@ -193,25 +193,34 @@ fn top_k_filter(logits: &[f32], k: usize) -> Vec<f32> {
 }
 
 fn top_p_filter(logits: &[f32], p: f32) -> Vec<f32> {
-    let mut indexed: Vec<(usize, f32)> = logits.iter().cloned().enumerate().collect();
-    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
     let probs = softmax(logits);
-    let mut sorted_probs: Vec<(usize, f32)> = probs.iter().cloned().enumerate().collect();
-    sorted_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    let n = probs.len();
 
+    // Collect the nucleus: the smallest set of highest-probability tokens whose
+    // cumulative probability reaches `p`. To avoid an O(V·log V) full sort on a
+    // large vocabulary (e.g. 156 940 for Orpheus — a real decode-speed cost when
+    // done every token), first partition to the top `MAX_CANDIDATES` in O(V) and
+    // sort only those; a p<1 nucleus is far smaller than that in practice.
+    const MAX_CANDIDATES: usize = 1024;
+    let mut order: Vec<usize> = (0..n).collect();
+    let cand: &[usize] = if n > MAX_CANDIDATES {
+        order.select_nth_unstable_by(MAX_CANDIDATES, |&a, &b| probs[b].total_cmp(&probs[a]));
+        order[..MAX_CANDIDATES].sort_unstable_by(|&a, &b| probs[b].total_cmp(&probs[a]));
+        &order[..MAX_CANDIDATES]
+    } else {
+        order.sort_unstable_by(|&a, &b| probs[b].total_cmp(&probs[a]));
+        &order[..]
+    };
+
+    let mut keep = std::collections::HashSet::with_capacity(64);
     let mut cum = 0.0f32;
-    let mut cutoff_idx = sorted_probs.len();
-    for (i, (_, prob)) in sorted_probs.iter().enumerate() {
-        cum += prob;
+    for &i in cand {
+        keep.insert(i);
+        cum += probs[i];
         if cum >= p {
-            cutoff_idx = i + 1;
             break;
         }
     }
-
-    let keep: std::collections::HashSet<usize> =
-        sorted_probs[..cutoff_idx].iter().map(|(i, _)| *i).collect();
     logits
         .iter()
         .enumerate()
@@ -267,5 +276,29 @@ mod tests {
         let logits = vec![1.0, 2.0, 3.0];
         let penalized = apply_repetition_penalty(&logits, &[2], 1.3);
         assert!(penalized[2] < logits[2]);
+    }
+
+    #[test]
+    fn top_p_keeps_dominant_token_only() {
+        // One token with ~all the mass → nucleus is just that token.
+        let logits = vec![10.0, 0.0, 0.0, 0.0];
+        let f = top_p_filter(&logits, 0.9);
+        assert!(f[0].is_finite());
+        assert!(f[1..].iter().all(|x| x.is_infinite() && *x < 0.0));
+    }
+
+    #[test]
+    fn top_p_large_vocab_partial_select() {
+        // Exercises the >MAX_CANDIDATES partition path: a peaked 5000-vocab dist
+        // keeps a tiny nucleus and always retains the argmax.
+        let mut logits = vec![0.0f32; 5000];
+        logits[1234] = 25.0;
+        let f = top_p_filter(&logits, 0.9);
+        assert!(f[1234].is_finite());
+        let kept = f.iter().filter(|x| x.is_finite()).count();
+        assert!(
+            kept < 50,
+            "nucleus should be tiny for a peaked dist, got {kept}"
+        );
     }
 }

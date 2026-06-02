@@ -1688,8 +1688,14 @@ async fn converse_command(
                             ui::converse_you(&transcript);
                             ui::converse_stt_stats(audio_secs, stt_elapsed);
                             ui::converse_assistant_prefix();
-                            // Stream reply tokens to stdout; play each synthesized
-                            // sentence as soon as it's ready (no-op without --speak).
+                            // Stream reply tokens to stdout; play synthesized audio as
+                            // it's produced (no-op without --speak). A short pre-roll
+                            // buffer is held before playback starts so brief gaps in
+                            // the codec LM's output don't underrun the speaker.
+                            const PREROLL_SAMPLES: usize = 14_400; // ~0.6 s @ 24 kHz
+                            let mut preroll: Vec<f32> = Vec::new();
+                            let mut started = false;
+                            let mut last_rate = 24_000u32;
                             let turn = converse
                                 .respond_streaming(
                                     &transcript,
@@ -1698,12 +1704,27 @@ async fn converse_command(
                                         let _ = std::io::stdout().flush();
                                     },
                                     |samples, rate| {
-                                        if let Some(p) = &player {
+                                        let Some(p) = &player else { return };
+                                        last_rate = rate;
+                                        if started {
                                             let _ = p.submit(samples, rate);
+                                        } else {
+                                            preroll.extend_from_slice(samples);
+                                            if preroll.len() >= PREROLL_SAMPLES {
+                                                let _ = p.submit(&preroll, rate);
+                                                preroll.clear();
+                                                started = true;
+                                            }
                                         }
                                     },
                                 )
                                 .await?;
+                            // Flush a pre-roll that never reached the threshold (short reply).
+                            if let Some(p) = &player {
+                                if !preroll.is_empty() {
+                                    let _ = p.submit(&preroll, last_rate);
+                                }
+                            }
                             println!();
                             let tts_info = if speak && !turn.audio.is_empty() {
                                 Some((
