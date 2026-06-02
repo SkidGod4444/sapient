@@ -94,11 +94,15 @@ jobs:
           key: ${{ matrix.target }}
 
       # ── macOS universal binary setup ───────────────────────────────────────
-      - name: Install OpenSSL (Linux)
+      # libasound2-dev: sapient-cli's default `audio-io` feature (live `converse`)
+      # pulls cpal, which links libasound on Linux. The aarch64-linux build is the
+      # zigbuild cross path, which instead drops audio-io (`--no-default-features`)
+      # to avoid cross-compiling ALSA — so this only covers the native x86_64 jobs.
+      - name: Install OpenSSL + ALSA (Linux)
         if: runner.os == 'Linux' && !matrix.zigbuild
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y pkg-config libssl-dev
+          sudo apt-get install -y pkg-config libssl-dev libasound2-dev
 
       # Cross-compile aarch64-linux from the x86_64 runner via cargo-zigbuild (zig is
       # the C cross-linker). Avoids the flaky native ARM runner pool. rustls means no
@@ -162,10 +166,15 @@ jobs:
             cargo build --release -p sapient-cli --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }}
           fi
 
+      # `--no-default-features` drops `audio-io` (live `converse`) for the cross
+      # build only — cross-compiling cpal's ALSA dependency via zig is the one
+      # fiddly link, and a headless aarch64-linux target rarely needs live mic I/O.
+      # chat/transcribe/speak/serve are all unaffected. Build natively on the Pi
+      # with `--features audio-io` (+ libasound2-dev) to get converse there.
       - name: Build (zigbuild — cross aarch64-linux)
         if: matrix.zigbuild
         shell: bash
-        run: cargo zigbuild --release -p sapient-cli --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }}
+        run: cargo zigbuild --release -p sapient-cli --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }} --no-default-features
 
       # ── Strip binary (reduces size ~50-70%) ───────────────────────────────
       # Use llvm-strip (ships with the zig toolchain via cargo-zigbuild's clang) for the

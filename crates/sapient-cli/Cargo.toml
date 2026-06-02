@@ -51,13 +51,17 @@ ureq        = { workspace = true }
 zip         = { workspace = true }
 
 [features]
-default = []
+# `audio-io` ships by default so `sapient converse` (live mic/speaker) works out
+# of the box on macOS (CoreAudio) and Windows (WASAPI), which need no extra system
+# libraries. On Linux it needs the ALSA dev headers (`libasound2-dev`) at build
+# time; if you don't want that, build with `--no-default-features` (drops only the
+# live-voice `converse` command — chat/transcribe/speak/serve are unaffected).
+default = ["audio-io"]
 mlx = ["sapient-generate/mlx"]
 # Cross-platform GPU inference (Vulkan/DX12/Metal via wgpu) — Intel/AMD/Nvidia/Apple.
 # Build: cargo build --release -p sapient-cli --features wgpu; then `--backend wgpu`.
 wgpu = ["sapient-generate/wgpu"]
-# Live mic/speaker speech-to-speech (`sapient converse`). Needs ALSA dev headers
-# on Linux: `cargo build -p sapient-cli --features audio-io`.
+# Live mic/speaker speech-to-speech (`sapient converse`).
 audio-io = ["sapient-generate/audio-io", "dep:sapient-audio"]
 
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -54,6 +54,7 @@ By contributing code, documentation, or other materials, you agree that your con
 |---|---|---|
 | Rust | **1.75+** | Install via [rustup](https://rustup.rs/) |
 | Git | any recent | |
+| ALSA dev headers | Linux only | `sudo apt-get install libasound2-dev` — needed because `sapient-cli`'s default `audio-io` feature (live `sapient converse`) links `cpal`/ALSA. macOS/Windows need nothing extra. |
 | [just](https://github.com/casey/just) | optional | Task runner — see `justfile` |
 
 ### Clone and build
@@ -62,6 +63,9 @@ By contributing code, documentation, or other materials, you agree that your con
 git clone https://github.com/SkidGod4444/sapient.git
 cd sapient
 cargo build --workspace
+# No audio device libs / don't want the live `converse` command? Drop the
+# default audio-io feature (chat/transcribe/speak/serve are unaffected):
+#   cargo build -p sapient-cli --no-default-features
 ```
 
 Run the CLI locally:

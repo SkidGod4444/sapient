@@ -1490,6 +1490,10 @@ async fn speak_command(
 
 // ── converse (real-time speech-to-speech) ──────────────────────────────────────
 
+// `audio-io` is a default feature, so the official release binaries (macOS,
+// Windows, x86_64 Linux) ship `converse`. This stub only compiles for builds
+// made with `--no-default-features` (e.g. the aarch64-linux release, which skips
+// the ALSA dependency to keep the cross-compile clean).
 #[cfg(not(feature = "audio-io"))]
 async fn converse_command(
     _model: &str,
@@ -1499,9 +1503,10 @@ async fn converse_command(
     _system: Option<String>,
 ) -> Result<()> {
     anyhow::bail!(
-        "`sapient converse` needs live microphone capture — rebuild with the audio-io feature:\n\
-         \tcargo build --release -p sapient-cli --features audio-io\n\
-         (on Linux this also needs the ALSA dev headers: libasound2-dev)"
+        "this build was compiled without live audio I/O. Rebuild with the \
+         `audio-io` feature (it is on by default): `cargo build --release -p \
+         sapient-cli` — on Linux install the ALSA dev headers first (`sudo \
+         apt-get install libasound2-dev`)."
     )
 }
 
