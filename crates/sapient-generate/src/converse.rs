@@ -83,7 +83,14 @@ pub struct ConversePipeline {
 
 impl ConversePipeline {
     /// Build from a loaded STT pipeline, LLM pipeline, and TTS backend.
-    pub fn new(stt: TranscribePipeline, llm: Pipeline, tts: Box<dyn Tts>) -> Self {
+    pub fn new(stt: TranscribePipeline, mut llm: Pipeline, tts: Box<dyn Tts>) -> Self {
+        // Each turn re-sends the whole conversation (system + history) as the
+        // prompt, so its token prefix is identical to the previous turn's up to
+        // the new user message. Prefix/prompt KV caching reuses that prefix
+        // instead of re-prefilling it every turn — the per-turn latency win grows
+        // with the conversation length. (Same feature `sapient serve` enables;
+        // it's in-process, so converse needs no HTTP round-trip to benefit.)
+        llm.enable_prefix_cache();
         Self {
             stt,
             llm,
