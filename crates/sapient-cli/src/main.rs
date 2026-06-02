@@ -1332,7 +1332,9 @@ async fn transcribe_command(
     let backend_kind = parse_generation_backend(backend)?;
 
     let loading = ui::spinner(format!("loading {model}…"));
-    let pipeline = TranscribePipeline::from_pretrained_with_backend(model, backend_kind).await?;
+    let pipeline = std::sync::Arc::new(
+        TranscribePipeline::from_pretrained_with_backend(model, backend_kind).await?,
+    );
     drop(loading);
 
     let opts = TranscribeOptions {
@@ -1341,11 +1343,19 @@ async fn transcribe_command(
         ..Default::default()
     };
 
-    let working = ui::spinner(format!("transcribing {}…", audio.display()));
-    let text = pipeline.transcribe_with(audio, opts).await?;
-    drop(working);
-
-    println!("{}", text.trim());
+    // Stream decoded text to stdout as the model produces it.
+    use futures::StreamExt;
+    use std::io::Write;
+    let mut stream = pipeline.transcribe_stream(audio, opts).await?;
+    let mut any = false;
+    while let Some(delta) = stream.next().await {
+        any = true;
+        print!("{delta}");
+        std::io::stdout().flush().ok();
+    }
+    if any {
+        println!();
+    }
     Ok(())
 }
 

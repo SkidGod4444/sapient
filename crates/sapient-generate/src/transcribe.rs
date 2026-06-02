@@ -18,6 +18,8 @@ use sapient_hub::HubClient;
 use sapient_models::forward::{AudioEngine, WhisperForward};
 use sapient_models::{weights, LlmBackendKind};
 use sapient_tokenizers::WhisperTokenizer;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use tracing::debug;
 
 const SAMPLE_RATE: u32 = 16_000;
@@ -184,6 +186,7 @@ impl TranscribePipeline {
                 opts,
                 &self.cfg,
                 &self.gen_cfg,
+                &mut |_| {},
             )?;
             let text = text.trim();
             if !text.is_empty() {
@@ -196,9 +199,69 @@ impl TranscribePipeline {
         }
         Ok(out)
     }
+
+    /// Transcribe an audio file, streaming decoded text as it is produced.
+    pub async fn transcribe_stream(
+        self: &Arc<Self>,
+        path: impl AsRef<Path>,
+        opts: TranscribeOptions,
+    ) -> Result<ReceiverStream<String>> {
+        let samples = load_audio(path, SAMPLE_RATE).context("decoding audio")?;
+        Ok(self.transcribe_samples_stream(samples, opts))
+    }
+
+    /// Stream decoded text for already-decoded mono 16 kHz samples. The CPU-bound
+    /// decode runs on a blocking task; text deltas arrive on the returned stream.
+    pub fn transcribe_samples_stream(
+        self: &Arc<Self>,
+        samples: Vec<f32>,
+        opts: TranscribeOptions,
+    ) -> ReceiverStream<String> {
+        let (tx, rx) = mpsc::channel::<String>(64);
+        let me = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            if samples.is_empty() {
+                return;
+            }
+            let mut engine = match me.engine.lock() {
+                Ok(e) => e,
+                Err(_) => return,
+            };
+            let chunk_len = me.mel.config().n_samples();
+            let mut start = 0usize;
+            let mut first_chunk = true;
+            while start < samples.len() {
+                let end = (start + chunk_len).min(samples.len());
+                // Separate chunks with a space in the stream.
+                if !first_chunk {
+                    let _ = tx.blocking_send(" ".to_string());
+                }
+                first_chunk = false;
+                let r = transcribe_chunk(
+                    &mut engine,
+                    &me.tokenizer,
+                    &me.mel,
+                    &samples[start..end],
+                    &opts,
+                    &me.cfg,
+                    &me.gen_cfg,
+                    &mut |delta| {
+                        let _ = tx.blocking_send(delta.to_string());
+                    },
+                );
+                if r.is_err() {
+                    break; // surface nothing further; partial text already sent
+                }
+                start += chunk_len;
+            }
+        });
+        ReceiverStream::new(rx)
+    }
 }
 
 /// Transcribe one ≤30 s chunk: log-mel → encode → forced-prompt greedy decode.
+/// `on_text` receives the newly-decoded text after each token (the stable delta),
+/// enabling streaming; the full chunk text is returned regardless.
 #[allow(clippy::too_many_arguments)]
 fn transcribe_chunk(
     engine: &mut AudioEngine,
@@ -208,6 +271,7 @@ fn transcribe_chunk(
     opts: &TranscribeOptions,
     cfg: &WhisperConfig,
     gen_cfg: &WhisperGenConfig,
+    on_text: &mut dyn FnMut(&str),
 ) -> Result<String> {
     let mel_t = mel.log_mel(chunk)?;
     engine.encode(&mel_t)?; // runs encoder + caches cross-attention K/V
@@ -237,6 +301,7 @@ fn transcribe_chunk(
         .max_new_tokens
         .min(cfg.max_target_positions.saturating_sub(prompt.len()).max(1));
     let mut out_tokens = Vec::new();
+    let mut emitted = String::new();
     for _ in 0..budget {
         let next = argmax(&logits);
         if tok.is_eot(next) {
@@ -246,6 +311,17 @@ fn transcribe_chunk(
         // feed them back so positions advance correctly.
         if !tok.is_special(next) {
             out_tokens.push(next);
+            // Emit the stable delta: re-decode the running tokens and send the
+            // suffix beyond what we've already emitted (handles BPE re-merges).
+            let full = tok.decode(&out_tokens, true)?;
+            if let Some(delta) = full.strip_prefix(&emitted) {
+                if !delta.is_empty() {
+                    on_text(delta);
+                }
+                emitted = full;
+            } else {
+                emitted = full; // rare re-tokenization shift — resync silently
+            }
         }
         logits = engine.decode_step(&[next])?;
         apply_suppress(&mut logits, &gen_cfg.suppress_tokens);
