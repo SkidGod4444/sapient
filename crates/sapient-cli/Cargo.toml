@@ -25,7 +25,7 @@ sapient-telemetry    = { workspace = true }
 sapient-tokenizers   = { workspace = true }
 
 anyhow      = { workspace = true }
-axum        = { workspace = true }
+axum        = { workspace = true, features = ["multipart"] }
 clap        = { workspace = true }
 console     = { workspace = true }
 dirs        = { workspace = true }
