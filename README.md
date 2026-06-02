@@ -99,7 +99,7 @@ sapient speak orpheus-3b "Hello, this is sapient speaking." -o hello.wav
 sapient speak orpheus-3b "The quick brown fox." --voice leo -o fox.wav
 #   voices: tara | leah | jess | leo | dan | mia | zac | zoe
 
-# Voice conversation — mic → speech-to-text → LLM → reply (build with --features audio-io)
+# Voice conversation — mic → speech-to-text → LLM → reply (live mic; Linux needs libasound2-dev)
 sapient converse openhorizon/qwen2.5-1.5b --stt whisper-base
 
 # Download a model to local cache
