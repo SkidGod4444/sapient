@@ -16,6 +16,7 @@ static CHECK: Emoji<'_, '_> = Emoji("✓", "OK");
 static CROSS: Emoji<'_, '_> = Emoji("✗", "x");
 static INFO: Emoji<'_, '_> = Emoji("ℹ", "i");
 static ARROW: Emoji<'_, '_> = Emoji("›", ">");
+static NOTE: Emoji<'_, '_> = Emoji("♪", "~");
 
 /// A branded spinner shown on stderr while a long operation runs.
 /// Call [`ProgressBar::finish_and_clear`] when done.
@@ -112,6 +113,124 @@ pub fn print_gen_stats(tokens: usize, elapsed: Duration, ttft: Option<Duration>)
             "  {BOLT} {tokens} tokens · {tps:.1} tok/s · {secs:.1}s{ttft_str}"
         ))
         .dim()
+    );
+}
+
+// ── converse (live voice) UI ──────────────────────────────────────────────────
+
+/// Banner shown when `sapient converse` starts.
+pub fn converse_banner(input_rate: u32, stt: &str, llm: &str, speak: bool) {
+    let bar = style("━".repeat(52)).dim();
+    println!("\n{bar}");
+    println!(
+        "  {} {}",
+        style("SAPIENT Voice").bold().cyan(),
+        style(format!("· in {input_rate}Hz · stt {stt} · llm {llm}")).dim()
+    );
+    let mode = if speak {
+        style(format!(
+            "{NOTE} voice replies on (Orpheus TTS — slow on CPU)"
+        ))
+        .yellow()
+    } else {
+        style(format!("{INFO} text replies · pass --speak to hear them")).dim()
+    };
+    println!("  {mode}");
+    println!("  {}", style("speak, then pause — Ctrl-C to stop").dim());
+    println!("{bar}");
+}
+
+/// One row of the live input-level meter (returned so the caller controls the
+/// in-place `\r` redraw). Green = loud, cyan = speech-ish, dim = quiet.
+pub fn mic_meter_line(rms: f32) -> String {
+    let level = (rms * 60.0).min(1.0);
+    let bars = (level * 22.0).round() as usize;
+    let fill = "█".repeat(bars);
+    let rest = "·".repeat(22 - bars);
+    let fill = if level > 0.5 {
+        style(fill).green()
+    } else if level > 0.12 {
+        style(fill).cyan()
+    } else {
+        style(fill).dim()
+    };
+    format!(
+        "\r\x1b[2K  {} {}{}",
+        style("mic").dim(),
+        fill,
+        style(rest).dim()
+    )
+}
+
+/// A transient dim status on the current line (e.g. "transcribing…").
+pub fn converse_status(msg: &str) {
+    print!("\r\x1b[2K  {}", style(format!("· {msg}")).dim());
+    let _ = io::stdout().flush();
+}
+
+/// The user's transcribed line: `[ you ] › <text>`.
+pub fn converse_you(transcript: &str) {
+    println!(
+        "\r\x1b[2K{} {} {}",
+        style(" you ").black().on_green().bold(),
+        style(ARROW).green().dim(),
+        transcript
+    );
+}
+
+/// The assistant badge + arrow (no newline) — stream reply tokens after it.
+pub fn converse_assistant_prefix() {
+    print!(
+        "{} {} ",
+        style(" sapient ").black().on_cyan().bold(),
+        style(ARROW).cyan().dim()
+    );
+    let _ = io::stdout().flush();
+}
+
+/// Dim STT telemetry under the user line.
+pub fn converse_stt_stats(audio_secs: f32, stt: Duration) {
+    let rt = audio_secs / stt.as_secs_f32().max(1e-3);
+    println!(
+        "  {}",
+        style(format!(
+            "{INFO} heard {audio_secs:.1}s · STT {}ms ({rt:.1}× realtime)",
+            stt.as_millis()
+        ))
+        .dim()
+    );
+}
+
+/// Dim generation/TTS telemetry under the assistant line. `tts` is
+/// `(synthesis_time, spoken_audio_secs)` when `--speak` is on.
+pub fn converse_gen_stats(tokens: usize, gen: Duration, tts: Option<(Duration, f32)>) {
+    let secs = gen.as_secs_f64().max(1e-6);
+    let tps = tokens as f64 / secs;
+    let mut line = format!("{BOLT} {tokens} tok · {tps:.1} tok/s · {secs:.1}s");
+    if let Some((tts_d, audio_secs)) = tts {
+        let tsecs = tts_d.as_secs_f32();
+        let rt = audio_secs / tsecs.max(1e-3);
+        line.push_str(&format!(" · {NOTE} TTS {tsecs:.1}s ({rt:.2}× realtime)"));
+    }
+    println!("  {}", style(line).dim());
+}
+
+/// A dim note on its own line (clears any in-place meter first).
+pub fn converse_note(msg: &str) {
+    println!("\r\x1b[2K  {}", style(format!("· {msg}")).dim());
+}
+
+/// Closing line when the session ends.
+pub fn converse_bye() {
+    println!("\n  {}", style("ended — bye").dim());
+}
+
+/// A yellow warning row (e.g. a silent mic).
+pub fn converse_warn(msg: &str) {
+    eprintln!(
+        "  {} {}",
+        style(" ! ").black().on_yellow().bold(),
+        style(msg).yellow()
     );
 }
 

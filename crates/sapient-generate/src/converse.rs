@@ -48,6 +48,12 @@ pub struct Turn {
     pub audio: Vec<f32>,
     /// Sample rate of `audio`.
     pub audio_sample_rate: u32,
+    /// Number of reply tokens generated (streamed pieces — approximate).
+    pub gen_tokens: usize,
+    /// Wall-clock time spent generating the reply.
+    pub gen_ms: u128,
+    /// Wall-clock time spent synthesizing TTS audio (0 with [`NoopTts`]).
+    pub tts_ms: u128,
 }
 
 /// Orchestrates STT → LLM → TTS across a conversation, holding chat history.
@@ -98,33 +104,72 @@ impl ConversePipeline {
     }
 
     /// Given a user `transcript`, stream the assistant's reply token-by-token to
-    /// `on_token`, append both messages to history, synthesize TTS, and return
-    /// the [`Turn`]. The live counterpart of [`run_utterance`](Self::run_utterance)
-    /// — the caller sees the reply as it is generated, not after it completes.
-    pub async fn respond_streaming<F: FnMut(&str)>(
+    /// `on_token`, then synthesize TTS **one sentence at a time** — invoking
+    /// `on_audio(samples, sample_rate)` for each sentence as soon as it is ready
+    /// so playback can begin (and pipeline with synthesis) before the whole
+    /// reply is spoken. Appends both messages to history and returns the [`Turn`]
+    /// (with timing/token metrics). The live counterpart of
+    /// [`run_utterance`](Self::run_utterance).
+    ///
+    /// With [`NoopTts`] each `synthesize` is empty, so `on_audio` is never called
+    /// and `audio` is empty — the text path is unaffected.
+    pub async fn respond_streaming<F, G>(
         &mut self,
         transcript: &str,
         mut on_token: F,
-    ) -> Result<Turn> {
+        mut on_audio: G,
+    ) -> Result<Turn>
+    where
+        F: FnMut(&str),
+        G: FnMut(&[f32], u32),
+    {
+        use std::time::Instant;
+
         use futures::StreamExt;
 
         self.history.push(ChatMessage::user(transcript.to_string()));
+
+        let gen_start = Instant::now();
         let mut stream = self.llm.chat_stream(&self.history).await;
         let mut reply = String::new();
+        let mut gen_tokens = 0usize;
         while let Some(tok) = stream.next().await {
+            gen_tokens += 1;
             reply.push_str(&tok);
             on_token(&tok);
         }
+        let gen_ms = gen_start.elapsed().as_millis();
         self.history.push(ChatMessage::assistant(reply.clone()));
 
-        // TTS is CPU-bound (a neural codec) — keep it off the async reactor.
-        let audio = tokio::task::block_in_place(|| self.tts.synthesize(&reply))?;
-        let audio_sample_rate = self.tts.sample_rate();
+        // Synthesize per sentence (TTS is a CPU-bound neural codec — keep it off
+        // the async reactor): the first sentence can play while the next is still
+        // being synthesized, so the user hears a reply far sooner on a long turn.
+        let sr = self.tts.sample_rate();
+        let mut chunker = crate::sentence::SentenceChunker::new(24, 240);
+        let mut sentences = chunker.push(&reply);
+        if let Some(rest) = chunker.flush() {
+            sentences.push(rest);
+        }
+        let mut audio: Vec<f32> = Vec::new();
+        let mut tts_ms = 0u128;
+        for sentence in sentences {
+            let t = Instant::now();
+            let samples = tokio::task::block_in_place(|| self.tts.synthesize(&sentence))?;
+            tts_ms += t.elapsed().as_millis();
+            if !samples.is_empty() {
+                on_audio(&samples, sr);
+                audio.extend_from_slice(&samples);
+            }
+        }
+
         Ok(Turn {
             transcript: transcript.to_string(),
             reply,
             audio,
-            audio_sample_rate,
+            audio_sample_rate: sr,
+            gen_tokens,
+            gen_ms,
+            tts_ms,
         })
     }
 
@@ -143,16 +188,23 @@ impl ConversePipeline {
         }
 
         self.history.push(ChatMessage::user(transcript.clone()));
+        let gen_start = std::time::Instant::now();
         let reply = self.llm.chat(&self.history).await?;
+        let gen_ms = gen_start.elapsed().as_millis();
         self.history.push(ChatMessage::assistant(reply.clone()));
 
+        let tts_start = std::time::Instant::now();
         let audio = self.tts.synthesize(&reply)?;
+        let tts_ms = tts_start.elapsed().as_millis();
         let audio_sample_rate = self.tts.sample_rate();
         Ok(Some(Turn {
             transcript,
             reply,
             audio,
             audio_sample_rate,
+            gen_tokens: 0,
+            gen_ms,
+            tts_ms,
         }))
     }
 }

@@ -57,6 +57,12 @@ impl SpeakerPlayback {
         self.sample_rate
     }
 
+    /// Seconds of audio still queued (not yet played by the device). Lets a
+    /// caller wait for playback to finish draining after the last `submit`.
+    pub fn pending_secs(&self) -> f32 {
+        self.tx.len() as f32 / self.sample_rate.max(1) as f32
+    }
+
     /// Queue mono `samples` (at `src_rate`) for playback, resampling to the
     /// device rate. Returns immediately; audio drains on the device thread.
     pub fn submit(&self, samples: &[f32], src_rate: u32) -> Result<()> {

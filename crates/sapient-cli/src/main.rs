@@ -1574,8 +1574,15 @@ async fn converse_command(
     drop(loading);
 
     let mut converse = ConversePipeline::new(stt_pipe, llm, tts);
-    if let Some(s) = system {
-        converse = converse.with_system(s);
+    match system {
+        Some(s) => converse = converse.with_system(s),
+        // Spoken replies via a 3B TTS are slow, so nudge brevity when --speak is on.
+        None if speak => {
+            converse = converse.with_system(
+                "You are a voice assistant. Reply in one or two short, natural sentences.",
+            );
+        }
+        None => {}
     }
     if let Some(l) = language {
         converse = converse.with_language(l);
@@ -1609,14 +1616,10 @@ async fn converse_command(
     let mut vad = new_vad();
     let mut buf: Vec<f32> = Vec::new();
 
-    println!("🎧 input device @ {src_rate} Hz · STT {stt} · LLM {model}");
-    if speak {
-        println!("🔊 spoken replies on (Orpheus TTS — slow; replies stream as text first)");
-    }
-    println!("🎙️  listening — speak, then pause. Ctrl-C to stop.");
+    ui::converse_banner(src_rate, stt, model, speak);
 
-    // Live mic meter + a one-time hint if the mic looks dead (e.g. the terminal
-    // lacks macOS microphone permission, so cpal delivers only silence).
+    // Live mic meter + a one-time hint if the mic looks dead (the terminal lacks
+    // microphone permission, so cpal delivers only silence).
     let tty = std::io::stdout().is_terminal();
     let mut peak = 0.0f32;
     let mut meter_tick = 0u32;
@@ -1633,77 +1636,95 @@ async fn converse_command(
 
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => { clear_meter(&mut meter_shown); println!("\n👋 bye"); break; }
+            _ = tokio::signal::ctrl_c() => { clear_meter(&mut meter_shown); ui::converse_bye(); break; }
             chunk = frames.recv_async() => {
                 let Ok(chunk) = chunk else { break };
                 buf.extend_from_slice(&chunk);
                 while buf.len() >= frame_samples {
                     let frame: Vec<f32> = buf.drain(..frame_samples).collect();
-                    // Live input level (independent of the VAD) so the user can
-                    // see the mic is hot.
+                    // Live input level (independent of the VAD) so the user can see the mic is hot.
                     let rms = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
                     peak = peak.max(rms);
                     total_frames += 1;
                     meter_tick += 1;
                     if tty && meter_tick % 5 == 0 {
-                        let bars = ((rms * 60.0).min(1.0) * 24.0) as usize;
-                        print!("\r\x1b[2K  mic [{}{}]", "#".repeat(bars), "·".repeat(24 - bars));
+                        print!("{}", ui::mic_meter_line(rms));
                         let _ = std::io::stdout().flush();
                         meter_shown = true;
                     }
                     // ~5 s in with no real signal → the mic is almost certainly muted/denied.
-                    if !warned_silent && total_frames > (src_rate as u64 / frame_samples as u64) * 5 && peak < 1e-3 {
+                    if !warned_silent
+                        && total_frames > (src_rate as u64 / frame_samples as u64) * 5
+                        && peak < 1e-3
+                    {
                         warned_silent = true;
                         clear_meter(&mut meter_shown);
-                        eprintln!(
-                            "⚠️  no audio from the mic yet (peak ~0). On macOS, grant your \
-                             terminal Microphone access in System Settings ▸ Privacy & \
-                             Security ▸ Microphone, then restart converse."
-                        );
+                        ui::converse_warn(microphone_guidance());
                     }
 
                     if let Some(utt) = vad.push(&frame) {
                         clear_meter(&mut meter_shown);
                         // Resample the finalized utterance (device rate → 16 kHz) for STT.
                         let utt16 = sapient_audio::io::resample(&utt, src_rate, 16_000)?;
+                        let audio_secs = utt16.len() as f32 / 16_000.0;
 
-                        print!("🗣️  transcribing…\r");
-                        let _ = std::io::stdout().flush();
+                        ui::converse_status("transcribing…");
+                        let t_stt = std::time::Instant::now();
                         let transcript = converse.transcribe_utterance(&utt16)?;
-                        print!("\x1b[2K");
+                        let stt_elapsed = t_stt.elapsed();
+
                         if transcript.is_empty() {
-                            println!("🗣️  (didn't catch that — try again)");
+                            ui::converse_note("didn't catch that — try again");
                         } else {
-                            println!("🗣️  you: {transcript}");
-                            print!("🤖 ");
-                            let _ = std::io::stdout().flush();
+                            ui::converse_you(&transcript);
+                            ui::converse_stt_stats(audio_secs, stt_elapsed);
+                            ui::converse_assistant_prefix();
+                            // Stream reply tokens to stdout; play each synthesized
+                            // sentence as soon as it's ready (no-op without --speak).
                             let turn = converse
-                                .respond_streaming(&transcript, |tok| {
-                                    print!("{tok}");
-                                    let _ = std::io::stdout().flush();
-                                })
+                                .respond_streaming(
+                                    &transcript,
+                                    |tok| {
+                                        print!("{tok}");
+                                        let _ = std::io::stdout().flush();
+                                    },
+                                    |samples, rate| {
+                                        if let Some(p) = &player {
+                                            let _ = p.submit(samples, rate);
+                                        }
+                                    },
+                                )
                                 .await?;
                             println!();
+                            let tts_info = if speak && !turn.audio.is_empty() {
+                                Some((
+                                    std::time::Duration::from_millis(turn.tts_ms as u64),
+                                    turn.audio.len() as f32 / turn.audio_sample_rate as f32,
+                                ))
+                            } else {
+                                None
+                            };
+                            ui::converse_gen_stats(
+                                turn.gen_tokens,
+                                std::time::Duration::from_millis(turn.gen_ms as u64),
+                                tts_info,
+                            );
+                            // Wait for queued speaker audio to finish draining.
                             if let Some(p) = &player {
-                                if !turn.audio.is_empty() {
-                                    println!("🔊 speaking…");
-                                    p.submit(&turn.audio, turn.audio_sample_rate)?;
-                                    let secs = turn.audio.len() as f32 / turn.audio_sample_rate as f32;
-                                    tokio::time::sleep(std::time::Duration::from_secs_f32(secs + 0.3)).await;
+                                while p.pending_secs() > 0.05 {
+                                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                                 }
                             }
-                            println!();
                         }
 
-                        // Discard anything captured during STT/LLM/TTS (including
-                        // our own speaker output) so it isn't treated as the next
+                        // Discard anything captured during STT/LLM/TTS (including our
+                        // own speaker output) so it isn't treated as the next
                         // utterance, and reset the segmenter for a fresh turn.
                         while frames.try_recv().is_ok() {}
                         buf.clear();
                         vad = new_vad();
                         peak = 0.0;
                         total_frames = 0;
-                        println!("🎙️  listening…");
                     }
                 }
             }
