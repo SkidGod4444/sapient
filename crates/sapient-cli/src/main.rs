@@ -106,6 +106,11 @@ enum Commands {
         /// Emit timestamp tokens and use them to re-seek long audio (>30 s).
         #[arg(long)]
         timestamps: bool,
+
+        /// Beam width (1 = greedy, the default). Higher is slower but can be
+        /// more accurate.
+        #[arg(long, default_value_t = 1)]
+        beam_size: usize,
     },
 
     /// Download a model from HuggingFace Hub to the local cache.
@@ -368,6 +373,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             language,
             translate,
             timestamps,
+            beam_size,
         } => {
             transcribe_command(
                 model.as_str(),
@@ -376,6 +382,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 language,
                 translate,
                 timestamps,
+                beam_size,
             )
             .await
         }
@@ -1334,6 +1341,7 @@ fn parse_generation_backend(value: &str) -> Result<GenerationBackend> {
 
 // ── transcribe (speech-to-text) ─────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn transcribe_command(
     model: &str,
     audio: &std::path::Path,
@@ -1341,6 +1349,7 @@ async fn transcribe_command(
     language: Option<String>,
     translate: bool,
     timestamps: bool,
+    beam_size: usize,
 ) -> Result<()> {
     if !audio.exists() {
         anyhow::bail!("audio file not found: {}", audio.display());
@@ -1357,6 +1366,7 @@ async fn transcribe_command(
         language,
         translate,
         timestamps,
+        beam_size,
         ..Default::default()
     };
 
