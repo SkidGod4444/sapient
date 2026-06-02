@@ -169,12 +169,26 @@ ONNX-wrapper crates (C++ dep) don't offer together.
     the tiny GPU compute. CPU is the `transcribe` default. **Batched prefill** (encode the
     whole forced prompt in one pass) and keeping logits/argmax on-GPU are the optimizations
     that make the GPU win on larger models / longer audio (tracked under 6c).
-- **6c — STT polish** (deferred): beam search, full `suppress_tokens`, timestamp
-  tokens + long-audio re-seeking, streaming token output, `serve` integration.
-- **6d — TTS** (deferred): Kokoro-82M (text encoder + vocoder/ISTFT; pure-Rust/MIT
-  G2P to avoid GPLv3 espeak-ng). New kernels: transposed conv, ISTFT.
-- **6e — STS** (deferred): cascade STT → existing LLM → TTS with `cpal` full-duplex
-  mic/speaker + VAD; later, end-to-end speech-LLMs (Moshi/Mimi).
+- **6c — STT polish** (mostly DONE, branch `feat/audio-tts-sts`): ✅ `suppress_tokens`
+  (from `generation_config.json`), ✅ streaming (`transcribe_stream` + live CLI),
+  ✅ timestamp tokens + long-audio re-seek (`--timestamps`, ApplyTimestampRules),
+  ✅ beam search (`--beam-size`, prefix-replay), ✅ batched prefill (already in the
+  engines). Remaining: `POST /v1/audio/transcriptions` serve endpoint.
+- **6d — TTS** (IN PROGRESS — **pivoted from Kokoro to LM-codec/SNAC**): the decisive
+  finding is that an **LM-codec TTS** (a Llama-3.2 backbone — Orpheus/OuteTTS — emitting
+  neural-audio-codec tokens, decoded by a small fully-convolutional **SNAC** decoder)
+  reuses SAPIENT's existing `LlamaForward` + GGUF + quant + KV cache + sampling
+  *wholesale*, needs **no G2P** (raw-text BPE, so no GPLv3 espeak), and collapses
+  Kokoro's ~11 exacting kernels (BiLSTM/AdaIN/SineGen/ISTFT) to essentially
+  **ConvTranspose1d + Snake + weight-norm fold** — and the SNAC decoder already exists
+  as a pure-Rust reference in `candle-transformers`. Done: `conv_transpose1d` + `snake`
+  kernels (CPU-reference tested, `forward/conv.rs`). Remaining: SNAC decoder port +
+  offline SNAC `.bin`→safetensors convert + audio-token framing + `SpeakPipeline` +
+  `sapient speak`. (Orpheus 3B Apache-2.0; OuteTTS-1.0 1B Llama but CC-BY-NC; Kani 400M
+  but non-Llama LFM2.) Kokoro is dropped — worst fit on every axis but param count.
+- **6e — STS** (foundations DONE): ✅ `EnergyVad` + `SentenceChunker`. Remaining: `cpal`
+  capture/playback (behind an `audio-io` feature) + `ConversePipeline` (STT→LLM→TTS) +
+  `sapient converse`; voice-in/text-out is shippable before TTS via a no-op TTS.
 - **Success metric (6a):** `sapient transcribe whisper-base sample.wav` produces a
   correct transcript on CPU across macOS/Linux/Windows.
 
