@@ -40,19 +40,28 @@
 //! }
 //! ```
 
+pub mod converse;
 pub mod device;
 pub mod kv_cache;
 pub mod pipeline;
 pub mod sampler;
+pub mod sentence;
+pub mod speak;
 pub mod speculative;
 pub mod transcribe;
 
+pub use converse::{ConversePipeline, NoopTts, Tts, Turn};
 pub use device::{
     detect as detect_devices, recommend as recommend_backend, BackendPlan, DeviceProfile,
 };
 pub use kv_cache::KVCache;
 pub use pipeline::{GenerationConfig, LoadOptions, Pipeline};
 pub use sampler::{Sampler, SamplingStrategy};
+pub use sapient_audio::{EnergyVad, VadConfig};
+#[cfg(feature = "audio-io")]
+pub use sapient_audio::{MicCapture, SpeakerPlayback};
 pub use sapient_models::{mac_gpu_support, LlmBackendKind as GenerationBackend, MacGpuSupport};
+pub use sentence::SentenceChunker;
+pub use speak::{SpeakPipeline, DEFAULT_ORPHEUS_VOICE, ORPHEUS_VOICES};
 pub use speculative::SpeculativePipeline;
 pub use transcribe::{TranscribeOptions, TranscribePipeline};

@@ -169,12 +169,41 @@ ONNX-wrapper crates (C++ dep) don't offer together.
     the tiny GPU compute. CPU is the `transcribe` default. **Batched prefill** (encode the
     whole forced prompt in one pass) and keeping logits/argmax on-GPU are the optimizations
     that make the GPU win on larger models / longer audio (tracked under 6c).
-- **6c — STT polish** (deferred): beam search, full `suppress_tokens`, timestamp
-  tokens + long-audio re-seeking, streaming token output, `serve` integration.
-- **6d — TTS** (deferred): Kokoro-82M (text encoder + vocoder/ISTFT; pure-Rust/MIT
-  G2P to avoid GPLv3 espeak-ng). New kernels: transposed conv, ISTFT.
-- **6e — STS** (deferred): cascade STT → existing LLM → TTS with `cpal` full-duplex
-  mic/speaker + VAD; later, end-to-end speech-LLMs (Moshi/Mimi).
+- **6c — STT polish** ✅ DONE (branch `feat/audio-tts-sts`): ✅ `suppress_tokens`
+  (from `generation_config.json`), ✅ streaming (`transcribe_stream` + live CLI),
+  ✅ timestamp tokens + long-audio re-seek (`--timestamps`, ApplyTimestampRules),
+  ✅ beam search (`--beam-size`, prefix-replay), ✅ batched prefill (already in the
+  engines), ✅ `POST /v1/audio/transcriptions` serve endpoint.
+- **6d — TTS** ✅ DONE (**pivoted from Kokoro to LM-codec/SNAC**): `sapient speak
+  <model> "<text>" -o out.wav [--voice tara]`. The decisive finding was that an
+  **LM-codec TTS** (a Llama-3.2 backbone — **Orpheus-3B** — emitting neural-audio-codec
+  tokens, decoded by a small fully-convolutional **SNAC** decoder) reuses SAPIENT's
+  existing `LlamaForward` + GGUF + quant + KV cache + sampling *wholesale*, needs
+  **no G2P** (raw-text BPE, so no GPLv3 espeak), and collapses Kokoro's ~11 exacting
+  kernels (BiLSTM/AdaIN/SineGen/ISTFT) to **ConvTranspose1d + Snake + weight-norm
+  fold**. Shipped:
+  - **`SnacDecoder`** (`forward/snac.rs`): RVQ-from-codes → conv stack → 24 kHz
+    waveform; NoiseBlock omitted (stochastic). conv primitives `conv1d`/
+    `conv_transpose1d`/`snake`; **validated bit-close to the torch reference
+    (max_err ~2e-6)** via the ignored `snac_coherence` test.
+  - **`normalize_snac_weights`**: loads the ungated **`mlx-community/snac_24khz`**
+    safetensors mirror out-of-box (`HubClient::download_files`) — folds weight_norm,
+    swaps MLX channel-last conv kernels to PyTorch layout, strips `.layers.` prefixes;
+    also accepts `scripts/convert_snac_to_safetensors.py` output (or `SAPIENT_SNAC_DIR`).
+  - **`SpeakPipeline`** + **`Pipeline::generate_token_ids`** (raw-token-id path) +
+    `sapient speak`; Orpheus prompt protocol (`[128259] + tokenizer("{voice}: {text}")
+    + [128009,128260,128261,128257]`, **BOS-included**), `orpheus_codes_to_snac`
+    7-per-frame de-framing, `write_wav`. 8 voices (tara/leah/jess/leo/dan/mia/zac/zoe).
+  - Verified **end-to-end** via the speak→transcribe round-trip (Orpheus speech →
+    Whisper STT → original text). (Orpheus 3B Apache-2.0; OuteTTS-1.0 1B Llama but
+    CC-BY-NC; Kani 400M but non-Llama LFM2.) Kokoro dropped — worst fit on every axis.
+- **6e — STS** (voice-in/text-out DONE): ✅ `EnergyVad` + `SentenceChunker` +
+  `ConversePipeline` (STT→LLM→TTS, `Tts` trait) + `cpal` `MicCapture`/`SpeakerPlayback`
+  (behind the `audio-io` feature) + `sapient converse <llm> [--stt] [--language]
+  [--system]` (mic → VAD utterance → STT → LLM → printed reply; Ctrl-C to stop).
+  Remaining: wrap the now-shipped `SpeakPipeline` (6d) as a `Tts` impl so `converse`
+  speaks the reply (`turn.audio` → `SpeakerPlayback`); optional barge-in + `earshot`
+  VAD upgrade.
 - **Success metric (6a):** `sapient transcribe whisper-base sample.wav` produces a
   correct transcript on CPU across macOS/Linux/Windows.
 

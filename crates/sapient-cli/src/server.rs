@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use axum::{
-    extract::State,
+    extract::{Multipart, State},
     http::StatusCode,
     response::{sse, IntoResponse, Response, Sse},
     routing::{get, post},
@@ -33,6 +33,7 @@ use tracing::info;
 
 use sapient_generate::{
     GenerationConfig, LoadOptions, Pipeline, SamplingStrategy, SpeculativePipeline,
+    TranscribeOptions, TranscribePipeline,
 };
 use sapient_tokenizers::ChatMessage;
 
@@ -205,6 +206,10 @@ impl<P> ModelCache<P> {
 #[derive(Clone)]
 struct ServeState {
     cache: Arc<Mutex<ModelCache<ServedModel>>>,
+    /// Parallel LRU cache for Whisper STT models (POST /v1/audio/transcriptions),
+    /// kept separate from the text `cache` so the text inference surface stays
+    /// uncluttered. Shares `load_lock` and `inference_sem` with the text path.
+    audio_cache: Arc<Mutex<ModelCache<Arc<TranscribePipeline>>>>,
     /// Serializes model loads so two concurrent first-requests for the same model
     /// don't both download/load it, and loads don't thrash each other.
     load_lock: Arc<Mutex<()>>,
@@ -290,6 +295,38 @@ impl ServeState {
             bytes as f64 / 1e9,
             self.cache.lock().await.entries.len(),
         );
+        Ok(entry)
+    }
+
+    /// Like [`get_or_load`], but for the Whisper STT (`TranscribePipeline`) cache
+    /// used by `POST /v1/audio/transcriptions`. Same fast-path / load-lock /
+    /// LRU-insert structure; no speculative variant.
+    async fn get_or_load_audio(
+        &self,
+        model_id: &str,
+    ) -> Result<Arc<CachedModel<Arc<TranscribePipeline>>>> {
+        if let Some(m) = self.audio_cache.lock().await.touch(model_id) {
+            return Ok(m);
+        }
+        let _load = self.load_lock.lock().await;
+        if let Some(m) = self.audio_cache.lock().await.touch(model_id) {
+            return Ok(m);
+        }
+
+        let backend_kind = crate::parse_generation_backend(&self.backend)?;
+        info!("loading STT model '{model_id}'…");
+        let pipeline = TranscribePipeline::from_pretrained_with_backend(model_id, backend_kind)
+            .await
+            .with_context(|| format!("failed to load STT model '{model_id}'"))?;
+        let entry = Arc::new(CachedModel {
+            model_id: model_id.to_string(),
+            payload: Arc::new(pipeline),
+            bytes: estimate_model_bytes(model_id),
+        });
+        let evicted = self.audio_cache.lock().await.insert(entry.clone());
+        for id in &evicted {
+            info!("evicted STT '{id}' from audio cache (LRU)");
+        }
         Ok(entry)
     }
 }
@@ -564,12 +601,133 @@ async fn handle_health(State(state): State<ServeState>) -> impl IntoResponse {
         let guard = state.cache.lock().await;
         (guard.ids(), guard.mru_id())
     };
+    let audio_resident = state.audio_cache.lock().await.ids();
     Json(json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "loaded_model": active,
         "resident_models": resident,
+        "audio_models": audio_resident,
     }))
+}
+
+/// `POST /v1/audio/transcriptions` (OpenAI-compatible, `multipart/form-data`).
+/// Fields: `file` (audio bytes, required), `model` (Whisper alias/repo, required),
+/// optional `language`, `response_format` (`json` default | `text`), `translate`.
+async fn handle_audio_transcriptions(
+    State(state): State<ServeState>,
+    mut multipart: Multipart,
+) -> Response {
+    let mut audio: Option<(Vec<u8>, String)> = None; // (bytes, extension)
+    let mut model: Option<String> = None;
+    let mut language: Option<String> = None;
+    let mut response_format = String::from("json");
+    let mut translate = false;
+
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(e) => {
+                return audio_err(
+                    StatusCode::BAD_REQUEST,
+                    &format!("malformed multipart: {e}"),
+                )
+            }
+        };
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "file" => {
+                // Preserve the upload's extension so symphonia can sniff the format.
+                let ext = field
+                    .file_name()
+                    .and_then(|f| f.rsplit('.').next())
+                    .filter(|e| !e.is_empty())
+                    .unwrap_or("wav")
+                    .to_string();
+                match field.bytes().await {
+                    Ok(b) => audio = Some((b.to_vec(), ext)),
+                    Err(e) => {
+                        return audio_err(StatusCode::BAD_REQUEST, &format!("reading file: {e}"))
+                    }
+                }
+            }
+            "model" => model = field.text().await.ok(),
+            "language" => language = field.text().await.ok().filter(|s| !s.is_empty()),
+            "response_format" => {
+                if let Ok(v) = field.text().await {
+                    response_format = v;
+                }
+            }
+            "translate" => {
+                translate = field
+                    .text()
+                    .await
+                    .map(|v| matches!(v.as_str(), "true" | "1"))
+                    .unwrap_or(false);
+            }
+            _ => {} // ignore unknown fields (temperature, etc.)
+        }
+    }
+
+    let Some((bytes, ext)) = audio else {
+        return audio_err(StatusCode::BAD_REQUEST, "missing `file` field");
+    };
+    let Some(model) = model else {
+        return audio_err(StatusCode::BAD_REQUEST, "missing `model` field");
+    };
+
+    // Persist to a temp file (load_audio dispatches on the path's extension).
+    let tmp = match tempfile::Builder::new()
+        .suffix(&format!(".{ext}"))
+        .tempfile()
+    {
+        Ok(t) => t,
+        Err(e) => return audio_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("tempfile: {e}")),
+    };
+    if let Err(e) = std::fs::write(tmp.path(), &bytes) {
+        return audio_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("writing audio: {e}"),
+        );
+    }
+
+    // Admission control (shared with text inference).
+    let _permit = match state.inference_sem.clone().acquire_owned().await {
+        Ok(p) => p,
+        Err(_) => return audio_err(StatusCode::SERVICE_UNAVAILABLE, "server shutting down"),
+    };
+
+    let pipeline = match state.get_or_load_audio(&model).await {
+        Ok(m) => m,
+        Err(e) => return audio_err(StatusCode::BAD_REQUEST, &format!("load '{model}': {e:#}")),
+    };
+
+    let opts = TranscribeOptions {
+        language,
+        translate,
+        ..Default::default()
+    };
+    let text = match pipeline.payload.transcribe_with(tmp.path(), opts).await {
+        Ok(t) => t,
+        Err(e) => {
+            return audio_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("transcribe: {e:#}"),
+            )
+        }
+    };
+
+    if response_format == "text" {
+        text.into_response()
+    } else {
+        Json(json!({ "text": text })).into_response()
+    }
+}
+
+/// OpenAI-style error envelope for the audio endpoint.
+fn audio_err(status: StatusCode, msg: &str) -> Response {
+    (status, Json(json!({ "error": { "message": msg } }))).into_response()
 }
 
 async fn handle_chat_completions(
@@ -950,6 +1108,10 @@ pub async fn serve_llm(
             max_models,
             budget_bytes,
         ))),
+        audio_cache: Arc::new(Mutex::new(ModelCache::<Arc<TranscribePipeline>>::new(
+            max_models,
+            budget_bytes,
+        ))),
         load_lock: Arc::new(Mutex::new(())),
         inference_sem: Arc::new(tokio::sync::Semaphore::new(concurrency)),
         backend: backend.to_string(),
@@ -978,6 +1140,13 @@ pub async fn serve_llm(
         .route("/v1/chat/completions", post(handle_chat_completions))
         .route("/v1/completions", post(handle_completions))
         .route("/v1/health", get(handle_health))
+        // Speech-to-text (multipart audio upload). Higher body limit than the text
+        // routes — audio files dwarf chat payloads.
+        .route(
+            "/v1/audio/transcriptions",
+            post(handle_audio_transcriptions)
+                .layer(axum::extract::DefaultBodyLimit::max(512 * 1024 * 1024)),
+        )
         .layer(CorsLayer::permissive())
         // Allow large prompts (long context / pasted documents) but cap to guard
         // against unbounded request bodies. 32 MiB ≫ any realistic chat payload.

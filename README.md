@@ -88,9 +88,19 @@ sapient chat openhorizon/qwen2.5-1.5b --speculative --draft-model openhorizon/qw
 sapient run openhorizon/phi-2 --prompt "Explain transformers in simple terms"
 
 # Speech-to-text — transcribe audio with Whisper (WAV/FLAC/MP3/OGG/M4A)
-sapient transcribe whisper-base recording.wav
+sapient transcribe whisper-base recording.wav             # streams text as it decodes
 sapient transcribe whisper-small talk.mp3 --language en   # skip auto-detect
 sapient transcribe whisper-tiny clip.flac --translate     # → English
+sapient transcribe whisper-base long.wav --timestamps     # long-audio re-seek
+sapient transcribe whisper-base clip.wav --beam-size 5    # beam search
+
+# Text-to-speech — synthesize a WAV with Orpheus (Llama-3.2 → SNAC codec)
+sapient speak orpheus-3b "Hello, this is sapient speaking." -o hello.wav
+sapient speak orpheus-3b "The quick brown fox." --voice leo -o fox.wav
+#   voices: tara | leah | jess | leo | dan | mia | zac | zoe
+
+# Voice conversation — mic → speech-to-text → LLM → reply (build with --features audio-io)
+sapient converse openhorizon/qwen2.5-1.5b --stt whisper-base
 
 # Download a model to local cache
 sapient pull openhorizon/phi-2
@@ -228,6 +238,7 @@ to see this list (and which models you've already downloaded) at any time.
 | `whisper-tiny` | Whisper | 39M | Speech-to-text — `sapient transcribe` |
 | `whisper-base` | Whisper | 74M | Speech-to-text — `sapient transcribe` |
 | `whisper-small` | Whisper | 244M | Speech-to-text — `sapient transcribe` |
+| `orpheus-3b` | Llama/Orpheus | 3B | Text-to-speech — `sapient speak` |
 
 **Speech-to-text:** Whisper models power `sapient transcribe <model> <audio>` on all platforms.
 Audio is decoded + resampled to 16 kHz in pure Rust (`symphonia`/`rubato`), turned into a log-mel
@@ -331,6 +342,7 @@ sapient serve --port 8080 --speculative
 | `GET /v1/models` | List loaded model(s) |
 | `POST /v1/chat/completions` | OpenAI-compatible chat completion |
 | `POST /v1/completions` | Raw text completion |
+| `POST /v1/audio/transcriptions` | OpenAI-compatible speech-to-text (multipart audio upload) |
 | `GET /v1/health` | Liveness check |
 
 Example with `curl`:

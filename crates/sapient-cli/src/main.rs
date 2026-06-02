@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use sapient_generate::{
     detect_devices, mac_gpu_support, recommend_backend, GenerationBackend, LoadOptions, Pipeline,
-    SpeculativePipeline, TranscribeOptions, TranscribePipeline,
+    SpeakPipeline, SpeculativePipeline, TranscribeOptions, TranscribePipeline, ORPHEUS_VOICES,
 };
 use sapient_hub::LoadOptions as HubLoadOptions;
 use sapient_runtime::{InferenceSession, Model, ModelConfig, SessionOptions};
@@ -102,6 +102,60 @@ enum Commands {
         /// Translate to English instead of transcribing in the source language.
         #[arg(long)]
         translate: bool,
+
+        /// Emit timestamp tokens and use them to re-seek long audio (>30 s).
+        #[arg(long)]
+        timestamps: bool,
+
+        /// Beam width (1 = greedy, the default). Higher is slower but can be
+        /// more accurate.
+        #[arg(long, default_value_t = 1)]
+        beam_size: usize,
+    },
+
+    /// Real-time voice conversation: mic → speech-to-text → LLM → reply.
+    /// Requires the `audio-io` build feature (mic capture).
+    Converse {
+        /// LLM model alias/repo for the chat replies.
+        model: String,
+
+        /// Whisper STT model for transcription.
+        #[arg(long, default_value = "whisper-base")]
+        stt: String,
+
+        /// Generation backend: auto | cpu | metal | wgpu.
+        #[arg(short, long, default_value = "auto")]
+        backend: String,
+
+        /// Force the spoken language (otherwise auto-detected per utterance).
+        #[arg(long)]
+        language: Option<String>,
+
+        /// System prompt to seed the conversation.
+        #[arg(long)]
+        system: Option<String>,
+    },
+
+    /// Synthesise speech from text with an Orpheus TTS model (text-to-speech).
+    #[command(visible_aliases = ["tts", "say"])]
+    Speak {
+        /// Orpheus model alias or repo id (e.g. `orpheus-3b`).
+        model: String,
+
+        /// Text to speak.
+        text: String,
+
+        /// Output WAV file path.
+        #[arg(short, long, default_value = "speech.wav")]
+        output: PathBuf,
+
+        /// Voice: tara | leah | jess | leo | dan | mia | zac | zoe.
+        #[arg(long, default_value = "tara")]
+        voice: String,
+
+        /// Generation backend: auto | cpu | metal | wgpu.
+        #[arg(short, long, default_value = "cpu")]
+        backend: String,
     },
 
     /// Download a model from HuggingFace Hub to the local cache.
@@ -363,7 +417,34 @@ async fn dispatch(cli: Cli) -> Result<()> {
             backend,
             language,
             translate,
-        } => transcribe_command(model.as_str(), &audio, &backend, language, translate).await,
+            timestamps,
+            beam_size,
+        } => {
+            transcribe_command(
+                model.as_str(),
+                &audio,
+                &backend,
+                language,
+                translate,
+                timestamps,
+                beam_size,
+            )
+            .await
+        }
+        Commands::Converse {
+            model,
+            stt,
+            backend,
+            language,
+            system,
+        } => converse_command(model.as_str(), stt.as_str(), &backend, language, system).await,
+        Commands::Speak {
+            model,
+            text,
+            output,
+            voice,
+            backend,
+        } => speak_command(model.as_str(), &text, &output, &voice, &backend).await,
         Commands::Pull { model } => pull_command(model.as_str(), cli.verbose).await,
         Commands::List => list_command(),
         Commands::Models => models_command(),
@@ -1319,12 +1400,15 @@ fn parse_generation_backend(value: &str) -> Result<GenerationBackend> {
 
 // ── transcribe (speech-to-text) ─────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn transcribe_command(
     model: &str,
     audio: &std::path::Path,
     backend: &str,
     language: Option<String>,
     translate: bool,
+    timestamps: bool,
+    beam_size: usize,
 ) -> Result<()> {
     if !audio.exists() {
         anyhow::bail!("audio file not found: {}", audio.display());
@@ -1332,20 +1416,155 @@ async fn transcribe_command(
     let backend_kind = parse_generation_backend(backend)?;
 
     let loading = ui::spinner(format!("loading {model}…"));
-    let pipeline = TranscribePipeline::from_pretrained_with_backend(model, backend_kind).await?;
+    let pipeline = std::sync::Arc::new(
+        TranscribePipeline::from_pretrained_with_backend(model, backend_kind).await?,
+    );
     drop(loading);
 
     let opts = TranscribeOptions {
         language,
         translate,
+        timestamps,
+        beam_size,
         ..Default::default()
     };
 
-    let working = ui::spinner(format!("transcribing {}…", audio.display()));
-    let text = pipeline.transcribe_with(audio, opts).await?;
-    drop(working);
+    // Stream decoded text to stdout as the model produces it.
+    use futures::StreamExt;
+    use std::io::Write;
+    let mut stream = pipeline.transcribe_stream(audio, opts).await?;
+    let mut any = false;
+    while let Some(delta) = stream.next().await {
+        any = true;
+        print!("{delta}");
+        std::io::stdout().flush().ok();
+    }
+    if any {
+        println!();
+    }
+    Ok(())
+}
 
-    println!("{}", text.trim());
+// ── speak (text-to-speech) ──────────────────────────────────────────────────────
+
+async fn speak_command(
+    model: &str,
+    text: &str,
+    output: &std::path::Path,
+    voice: &str,
+    backend: &str,
+) -> Result<()> {
+    if !ORPHEUS_VOICES.contains(&voice) {
+        anyhow::bail!(
+            "unknown voice '{voice}' — choose one of: {}",
+            ORPHEUS_VOICES.join(", ")
+        );
+    }
+    let backend_kind = parse_generation_backend(backend)?;
+
+    let loading = ui::spinner(format!("loading {model}…"));
+    let pipeline = SpeakPipeline::from_pretrained_with_backend(model, backend_kind).await?;
+    drop(loading);
+
+    let synth = ui::spinner(format!("synthesising ({voice})…"));
+    let text = text.to_owned();
+    let voice = voice.to_owned();
+    let out_path = output.to_path_buf();
+    let (n, sample_rate) = tokio::task::spawn_blocking(move || {
+        let n = pipeline.speak_to_wav(&text, &voice, &out_path)?;
+        Ok::<_, anyhow::Error>((n, pipeline.sample_rate()))
+    })
+    .await
+    .context("speak task panicked")??;
+    drop(synth);
+
+    let secs = n as f32 / sample_rate as f32;
+    println!(
+        "✓ wrote {} ({:.1}s, {} Hz)",
+        output.display(),
+        secs,
+        sample_rate
+    );
+    Ok(())
+}
+
+// ── converse (real-time speech-to-speech) ──────────────────────────────────────
+
+#[cfg(not(feature = "audio-io"))]
+async fn converse_command(
+    _model: &str,
+    _stt: &str,
+    _backend: &str,
+    _language: Option<String>,
+    _system: Option<String>,
+) -> Result<()> {
+    anyhow::bail!(
+        "`sapient converse` needs live microphone capture — rebuild with the audio-io feature:\n\
+         \tcargo build --release -p sapient-cli --features audio-io\n\
+         (on Linux this also needs the ALSA dev headers: libasound2-dev)"
+    )
+}
+
+#[cfg(feature = "audio-io")]
+async fn converse_command(
+    model: &str,
+    stt: &str,
+    backend: &str,
+    language: Option<String>,
+    system: Option<String>,
+) -> Result<()> {
+    use sapient_generate::{
+        ConversePipeline, EnergyVad, MicCapture, NoopTts, Pipeline, TranscribePipeline, VadConfig,
+    };
+
+    let backend_kind = parse_generation_backend(backend)?;
+    let loading = ui::spinner(format!("loading {stt} + {model}…"));
+    let stt_pipe = TranscribePipeline::from_pretrained_with_backend(stt, backend_kind).await?;
+    let llm = Pipeline::from_pretrained(model).await?;
+    drop(loading);
+
+    let mut converse = ConversePipeline::new(stt_pipe, llm, Box::new(NoopTts));
+    if let Some(s) = system {
+        converse = converse.with_system(s);
+    }
+    if let Some(l) = language {
+        converse = converse.with_language(l);
+    }
+
+    // Mic stays on this thread (cpal Stream is !Send); the future runs on the
+    // main runtime (not spawned), so holding it across awaits is fine.
+    let cap = MicCapture::default_input()?;
+    let src_rate = cap.sample_rate();
+    let frames = cap.frames();
+    let frame_samples = (src_rate / 50).max(1) as usize; // 20 ms VAD frames at device rate
+    let mut vad = EnergyVad::new(VadConfig {
+        frame_samples,
+        ..VadConfig::default()
+    });
+    let mut buf: Vec<f32> = Vec::new();
+
+    println!("🎙️  listening — speak, then pause. Ctrl-C to stop.\n");
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => { println!("\n👋 bye"); break; }
+            chunk = frames.recv_async() => {
+                let Ok(chunk) = chunk else { break };
+                buf.extend_from_slice(&chunk);
+                while buf.len() >= frame_samples {
+                    let frame: Vec<f32> = buf.drain(..frame_samples).collect();
+                    if let Some(utt) = vad.push(&frame) {
+                        // Resample the finalized utterance (device rate → 16 kHz) for STT.
+                        let utt16 = sapient_audio::io::resample(&utt, src_rate, 16_000)?;
+                        if let Some(turn) = converse.run_utterance(&utt16).await? {
+                            println!("🗣️  {}", turn.transcript);
+                            println!("🤖 {}\n", turn.reply);
+                            // (When a real TTS replaces NoopTts, play turn.audio here.)
+                        }
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 

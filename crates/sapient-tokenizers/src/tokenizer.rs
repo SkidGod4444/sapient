@@ -125,6 +125,20 @@ impl SapientTokenizer {
         Ok(ids)
     }
 
+    /// Encode `text` to raw token IDs **without** injecting BOS/EOS.
+    ///
+    /// `add_special` toggles the tokenizer's own special-token logic (post-
+    /// processor). Audio LMs such as Orpheus TTS build their own special-token
+    /// framing around the text, so they encode the body with `add_special =
+    /// false` and prepend/append the control ids themselves.
+    pub fn encode_ids(&self, text: &str, add_special: bool) -> Result<Vec<u32>> {
+        let encoding = self
+            .inner
+            .encode(text, add_special)
+            .map_err(|e| anyhow::anyhow!("Tokenizer encode error: {e}"))?;
+        Ok(encoding.get_ids().to_vec())
+    }
+
     /// Decode token IDs back to a string.
     pub fn decode(&self, ids: &[u32], skip_special: bool) -> Result<String> {
         self.inner

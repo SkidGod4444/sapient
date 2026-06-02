@@ -164,6 +164,35 @@ pub fn resample(input: &[f32], from: u32, to: u32) -> Result<Vec<f32>> {
     Ok(out)
 }
 
+/// Write mono `f32` samples (in `[-1, 1]`) to a 16-bit PCM WAV file at
+/// `sample_rate`. Pure Rust — emits the 44-byte canonical header + i16 samples;
+/// no `hound`/codec dependency needed for output. Used by `sapient speak` (TTS).
+pub fn write_wav(path: impl AsRef<Path>, samples: &[f32], sample_rate: u32) -> Result<()> {
+    let n = samples.len();
+    let data_bytes = (n * 2) as u32; // 16-bit mono
+    let byte_rate = sample_rate * 2;
+    let mut buf = Vec::with_capacity(44 + n * 2);
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
+    buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    buf.extend_from_slice(&1u16.to_le_bytes()); // mono
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    buf.extend_from_slice(&byte_rate.to_le_bytes());
+    buf.extend_from_slice(&2u16.to_le_bytes()); // block align
+    buf.extend_from_slice(&16u16.to_le_bytes()); // bits/sample
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&data_bytes.to_le_bytes());
+    for &s in samples {
+        let v = (s.clamp(-1.0, 1.0) * 32767.0).round() as i16;
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+    std::fs::write(path.as_ref(), &buf)
+        .with_context(|| format!("writing WAV {}", path.as_ref().display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,5 +220,26 @@ mod tests {
         );
         // Output must be finite and bounded (no resampler blow-up).
         assert!(out.iter().all(|v| v.is_finite() && v.abs() < 4.0));
+    }
+
+    #[test]
+    fn write_wav_roundtrips_through_decode() {
+        let sr = 24_000u32;
+        let samples: Vec<f32> = (0..2400)
+            .map(|i| (std::f32::consts::TAU * 220.0 * i as f32 / sr as f32).sin() * 0.5)
+            .collect();
+        let tmp = std::env::temp_dir().join("sapient_write_wav_test.wav");
+        write_wav(&tmp, &samples, sr).unwrap();
+        let (back, rate) = decode_to_mono(&tmp).unwrap();
+        std::fs::remove_file(&tmp).ok();
+        assert_eq!(rate, sr);
+        assert_eq!(back.len(), samples.len());
+        // 16-bit quantization error ≤ ~1/32767.
+        let max_err = samples
+            .iter()
+            .zip(&back)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_err < 1e-3, "wav roundtrip max_err={max_err}");
     }
 }

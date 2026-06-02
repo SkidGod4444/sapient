@@ -8,16 +8,28 @@
 //!   log-mel spectrogram, via `realfft`. Numerically aligned with OpenAI Whisper
 //!   / `librosa` (slaney mel scale, slaney normalization).
 //! - [`config`] — [`MelConfig`], the front-end parameters (n_fft, hop, n_mels, …).
+//! - [`vad`] — energy-based voice activity detection / utterance segmentation
+//!   (pure Rust, no device deps) for the speech-to-speech cascade.
 //!
 //! The front-end is deliberately CPU-only: STFT/mel run once per 30 s audio
 //! chunk and are sub-100 ms on one core, so there is no reason to push them onto
 //! the GPU. The transformer body that consumes the mel tensor is a separate
 //! concern (see `sapient-models`).
 
+#[cfg(feature = "audio-io")]
+pub mod capture;
 pub mod config;
 pub mod io;
 pub mod mel;
+#[cfg(feature = "audio-io")]
+pub mod playback;
+pub mod vad;
 
+#[cfg(feature = "audio-io")]
+pub use capture::MicCapture;
 pub use config::MelConfig;
-pub use io::load_audio;
+pub use io::{load_audio, write_wav};
 pub use mel::MelFrontend;
+#[cfg(feature = "audio-io")]
+pub use playback::SpeakerPlayback;
+pub use vad::{EnergyVad, Vad, VadConfig};

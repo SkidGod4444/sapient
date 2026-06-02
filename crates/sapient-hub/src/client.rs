@@ -123,6 +123,24 @@ impl HubClient {
         Ok(files)
     }
 
+    /// Download specific `files` from a HuggingFace repo by its **raw repo id**,
+    /// bypassing the curated registry. Used for auxiliary assets that aren't
+    /// chat models — e.g. the SNAC codec weights (`config.json` +
+    /// `model.safetensors`) that the Orpheus TTS path decodes with. Returns the
+    /// local cached paths in the same order as `files`.
+    pub async fn download_files(&self, repo_id: &str, files: &[&str]) -> Result<Vec<PathBuf>> {
+        let repo = self.api.model(repo_id.to_string());
+        let mut out = Vec::with_capacity(files.len());
+        for f in files {
+            let path = repo
+                .get(f)
+                .await
+                .with_context(|| format!("downloading `{f}` from `{repo_id}`"))?;
+            out.push(path);
+        }
+        Ok(out)
+    }
+
     /// Fetch model info / architecture type from the Hub (reads `config.json`).
     pub async fn model_info(&self, model_alias: &str) -> Result<ModelInfo> {
         let actual_repo = crate::registry::resolve_model_alias(model_alias)?;
@@ -179,10 +197,18 @@ impl HubClient {
     // ── Internals ──────────────────────────────────────────────────────────────
 
     async fn resolve_files(&self, repo: &ApiRepo, model_id: &str) -> Result<ModelFiles> {
-        let (config_result, tokenizer_path, tokenizer_config_path, weight_paths) = tokio::join!(
+        let (
+            config_result,
+            tokenizer_path,
+            tokenizer_config_path,
+            generation_config_path,
+            weight_paths,
+        ) = tokio::join!(
             async { repo.get("config.json").await.ok() },
             async { repo.get("tokenizer.json").await.ok() },
             async { repo.get("tokenizer_config.json").await.ok() },
+            // Optional: Whisper ships suppress-token lists here. Ignored if absent.
+            async { repo.get("generation_config.json").await.ok() },
             self.fetch_weights(repo, model_id),
         );
 
@@ -217,6 +243,7 @@ impl HubClient {
             config_path,
             tokenizer_path,
             tokenizer_config_path,
+            generation_config_path,
             weight_paths,
         })
     }

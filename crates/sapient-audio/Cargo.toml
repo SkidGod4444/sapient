@@ -15,6 +15,14 @@ tracing      = { workspace = true }
 symphonia    = { workspace = true }
 rubato       = { workspace = true }
 realfft      = { workspace = true }
+# Real-time mic/speaker I/O — optional, only for the speech-to-speech cascade.
+cpal  = { workspace = true, optional = true }
+flume = { workspace = true, optional = true }
+
+[features]
+# Live microphone capture + speaker playback (cpal). Off by default so the core
+# build (and headless CI) needs no audio device libraries (ALSA dev headers on Linux).
+audio-io = ["dep:cpal", "dep:flume"]
 
 [dev-dependencies]
 approx = { workspace = true }

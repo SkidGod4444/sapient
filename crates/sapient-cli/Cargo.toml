@@ -25,7 +25,9 @@ sapient-telemetry    = { workspace = true }
 sapient-tokenizers   = { workspace = true }
 
 anyhow      = { workspace = true }
-axum        = { workspace = true }
+# Only needed for `sapient converse` (audio-io); used for utterance resampling.
+sapient-audio = { workspace = true, optional = true }
+axum        = { workspace = true, features = ["multipart"] }
 clap        = { workspace = true }
 console     = { workspace = true }
 dirs        = { workspace = true }
@@ -54,6 +56,9 @@ mlx = ["sapient-generate/mlx"]
 # Cross-platform GPU inference (Vulkan/DX12/Metal via wgpu) — Intel/AMD/Nvidia/Apple.
 # Build: cargo build --release -p sapient-cli --features wgpu; then `--backend wgpu`.
 wgpu = ["sapient-generate/wgpu"]
+# Live mic/speaker speech-to-speech (`sapient converse`). Needs ALSA dev headers
+# on Linux: `cargo build -p sapient-cli --features audio-io`.
+audio-io = ["sapient-generate/audio-io", "dep:sapient-audio"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 sapient-backends-metal = { workspace = true }

@@ -1,35 +1,43 @@
-//! 1-D convolution as a thin wrapper over the 2-D im2col kernel.
+//! 1-D convolution primitives for audio models.
 //!
-//! Whisper's audio stem is two `Conv1d` layers. Rather than add a dedicated 1-D
-//! kernel, we treat the length-`L` signal as a height-1 image (`[N, C, 1, L]`)
-//! and reuse the verified [`conv2d`] im2col+GEMM path. The convs run once per
-//! 30 s chunk (not per token), so the im2col scratch is negligible.
+//! - [`conv1d`] wraps the verified 2-D im2col [`conv2d`] (Whisper's audio stem).
+//! - [`conv_transpose1d`] is the transposed (fractionally-strided) conv used by
+//!   neural-audio-codec decoders (SNAC/DAC) to upsample codec frames to waveform.
+//! - [`snake`] is the periodic Snake activation `x + sin²(αx)/α` (per-channel α)
+//!   used throughout those codec decoders.
+//!
+//! These run a handful of times per generated audio frame, so straightforward
+//! correct implementations are fine (no im2col/GEMM needed for the transpose).
 
 use anyhow::{anyhow, Result};
 use sapient_backends_cpu::kernels::conv2d::conv2d;
-use sapient_core::Tensor;
+use sapient_core::{Shape, Tensor};
 
-/// Conv1d: `x [1, C_in, L]`, `weight [C_out, C_in, K]`, optional `bias [C_out]`
-/// → `[1, C_out, L_out]`, with symmetric padding `pad` and stride `stride`.
+/// Conv1d: `x [1, C_in, L]`, `weight [C_out, C_in/groups, K]`, optional `bias
+/// [C_out]` → `[1, C_out, L_out]`, with symmetric padding `pad`, `stride`,
+/// `dilation`, and `groups` (groups = C_in for depthwise). Whisper uses
+/// `dilation=1, groups=1`; SNAC's codec decoder uses depthwise + dilated convs.
 pub fn conv1d(
     x: &Tensor,
     weight: &Tensor,
     bias: Option<&Tensor>,
     pad: usize,
     stride: usize,
+    dilation: usize,
+    groups: usize,
 ) -> Result<Tensor> {
     let xd = x.shape().dims();
     let wd = weight.shape().dims();
     if xd.len() != 3 || wd.len() != 3 {
-        anyhow::bail!("conv1d expects x [1,C_in,L] and weight [C_out,C_in,K]");
+        anyhow::bail!("conv1d expects x [1,C_in,L] and weight [C_out,C_in/groups,K]");
     }
     let (n, c_in, l) = (xd[0], xd[1], xd[2]);
-    let (c_out, c_in_w, k) = (wd[0], wd[1], wd[2]);
+    let (c_out, c_in_g, k) = (wd[0], wd[1], wd[2]);
 
-    // Reshape to height-1 images: x → [N, C_in, 1, L], w → [C_out, C_in, 1, K].
+    // Reshape to height-1 images: x → [N, C_in, 1, L], w → [C_out, C_in/g, 1, K].
     let x4 = x.reshape(vec![n, c_in, 1, l]).map_err(|e| anyhow!("{e}"))?;
     let w4 = weight
-        .reshape(vec![c_out, c_in_w, 1, k])
+        .reshape(vec![c_out, c_in_g, 1, k])
         .map_err(|e| anyhow!("{e}"))?;
 
     // pads = [top, left, bottom, right]; only the width (last) axis is padded.
@@ -40,14 +48,99 @@ pub fn conv1d(
         [1, k],
         [0, pad, 0, pad],
         [1, stride],
-        [1, 1],
-        1,
+        [1, dilation],
+        groups,
     )
     .map_err(|e| anyhow!("{e}"))?;
 
     let yd = y.shape().dims().to_vec(); // [N, C_out, 1, L_out]
     y.reshape(vec![yd[0], yd[1], yd[3]])
         .map_err(|e| anyhow!("{e}"))
+}
+
+/// Transposed 1-D convolution (PyTorch `ConvTranspose1d`, dilation=1,
+/// output_padding=0). `x [1, C_in, L]`, `weight [C_in, C_out, K]` (PyTorch
+/// transpose layout), optional `bias [C_out]`. Output `[1, C_out, L_out]` with
+/// `L_out = (L-1)*stride - 2*pad + K`. Used by SNAC/DAC codec decoders to
+/// upsample; implemented as direct scatter-add (cheap at codec frame rates).
+pub fn conv_transpose1d(
+    x: &Tensor,
+    weight: &Tensor,
+    bias: Option<&Tensor>,
+    stride: usize,
+    pad: usize,
+) -> Result<Tensor> {
+    let xd = x.shape().dims();
+    let wd = weight.shape().dims();
+    if xd.len() != 3 || wd.len() != 3 {
+        anyhow::bail!("conv_transpose1d expects x [1,C_in,L] and weight [C_in,C_out,K]");
+    }
+    let (c_in, l) = (xd[1], xd[2]);
+    let (c_in_w, c_out, k) = (wd[0], wd[1], wd[2]);
+    if c_in != c_in_w {
+        anyhow::bail!("conv_transpose1d C_in mismatch: x {c_in} vs weight {c_in_w}");
+    }
+    let full = (l - 1) * stride + k; // length before cropping padding
+    let l_out = full
+        .checked_sub(2 * pad)
+        .ok_or_else(|| anyhow!("conv_transpose1d: padding {pad} too large for output"))?;
+
+    let xv = x.to_f32_cow();
+    let wv = weight.to_f32_cow();
+    let bias_v = bias.map(|b| b.to_f32_vec());
+
+    // Scatter-add into the full (un-cropped) output, then crop `pad` each side.
+    let mut full_out = vec![0.0f32; c_out * full];
+    for ci in 0..c_in {
+        for li in 0..l {
+            let x_val = xv[ci * l + li];
+            if x_val == 0.0 {
+                continue;
+            }
+            for co in 0..c_out {
+                let w_base = (ci * c_out + co) * k;
+                let o_base = co * full + li * stride;
+                for kk in 0..k {
+                    full_out[o_base + kk] += x_val * wv[w_base + kk];
+                }
+            }
+        }
+    }
+
+    // Crop and add bias.
+    let mut out = vec![0.0f32; c_out * l_out];
+    for co in 0..c_out {
+        let b = bias_v.as_ref().map(|v| v[co]).unwrap_or(0.0);
+        for oi in 0..l_out {
+            out[co * l_out + oi] = full_out[co * full + pad + oi] + b;
+        }
+    }
+    Tensor::from_f32(&out, Shape::new([1, c_out, l_out])).map_err(|e| anyhow!("{e}"))
+}
+
+/// Snake activation `x + sin²(α·x) / α` with a per-channel α. `x [1, C, L]`,
+/// `alpha [C]`. Used by SNAC/DAC decoder blocks. α is guarded against 0.
+pub fn snake(x: &Tensor, alpha: &Tensor) -> Result<Tensor> {
+    let xd = x.shape().dims().to_vec();
+    if xd.len() != 3 {
+        anyhow::bail!("snake expects x [1, C, L]");
+    }
+    let (c, l) = (xd[1], xd[2]);
+    let a = alpha.to_f32_vec();
+    if a.len() != c {
+        anyhow::bail!("snake alpha length {} != channels {c}", a.len());
+    }
+    let xv = x.to_f32_cow();
+    let mut out = vec![0.0f32; c * l];
+    for ci in 0..c {
+        let inv = 1.0 / (a[ci] + 1e-9);
+        for li in 0..l {
+            let v = xv[ci * l + li];
+            let s = (a[ci] * v).sin();
+            out[ci * l + li] = v + inv * s * s;
+        }
+    }
+    Tensor::from_f32(&out, Shape::new([1, c, l])).map_err(|e| anyhow!("{e}"))
 }
 
 #[cfg(test)]
@@ -70,7 +163,7 @@ mod tests {
         let w = Tensor::from_f32(&w_data, vec![c_out, c_in, k]).unwrap();
         let b = Tensor::from_f32(&b_data, vec![c_out]).unwrap();
 
-        let y = conv1d(&x, &w, Some(&b), pad, stride).unwrap();
+        let y = conv1d(&x, &w, Some(&b), pad, stride, 1, 1).unwrap();
         let l_out = (l + 2 * pad - k) / stride + 1;
         assert_eq!(y.shape().dims(), &[1, c_out, l_out]);
         let y_data = y.as_f32_slice();
@@ -94,5 +187,67 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// conv_transpose1d must match a naive scatter-add reference.
+    #[test]
+    fn conv_transpose1d_matches_naive() {
+        let (c_in, c_out, k, l) = (2usize, 3usize, 4usize, 5usize);
+        let (stride, pad) = (2usize, 1usize);
+        let gen = |i: usize| (i as f32 * 0.37 + 0.2).cos();
+        let x: Vec<f32> = (0..c_in * l).map(gen).collect();
+        let w: Vec<f32> = (0..c_in * c_out * k).map(|i| gen(i + 17)).collect();
+        let b: Vec<f32> = (0..c_out).map(|i| gen(i + 99)).collect();
+
+        let xt = Tensor::from_f32(&x, vec![1, c_in, l]).unwrap();
+        let wt = Tensor::from_f32(&w, vec![c_in, c_out, k]).unwrap();
+        let bt = Tensor::from_f32(&b, vec![c_out]).unwrap();
+        let y = conv_transpose1d(&xt, &wt, Some(&bt), stride, pad).unwrap();
+
+        let full = (l - 1) * stride + k;
+        let l_out = full - 2 * pad;
+        assert_eq!(y.shape().dims(), &[1, c_out, l_out]);
+        let yv = y.as_f32_slice();
+
+        // Naive reference: scatter-add then crop + bias.
+        let mut fout = vec![0.0f32; c_out * full];
+        for ci in 0..c_in {
+            for li in 0..l {
+                for co in 0..c_out {
+                    for kk in 0..k {
+                        fout[co * full + li * stride + kk] +=
+                            x[ci * l + li] * w[(ci * c_out + co) * k + kk];
+                    }
+                }
+            }
+        }
+        for co in 0..c_out {
+            for oi in 0..l_out {
+                let want = fout[co * full + pad + oi] + b[co];
+                assert!((yv[co * l_out + oi] - want).abs() < 1e-4);
+            }
+        }
+    }
+
+    #[test]
+    fn snake_matches_formula() {
+        let (c, l) = (2usize, 4usize);
+        let x =
+            Tensor::from_f32(&[0.0, 0.5, 1.0, -1.0, 0.2, 0.4, 0.6, 0.8], vec![1, c, l]).unwrap();
+        let alpha = Tensor::from_f32(&[1.0, 2.0], vec![c]).unwrap();
+        let y = snake(&x, &alpha).unwrap();
+        let yv = y.as_f32_slice();
+        let xv = x.as_f32_slice();
+        let a = [1.0f32, 2.0];
+        for ci in 0..c {
+            for li in 0..l {
+                let v = xv[ci * l + li];
+                let s = (a[ci] * v).sin();
+                let want = v + (1.0 / (a[ci] + 1e-9)) * s * s;
+                assert!((yv[ci * l + li] - want).abs() < 1e-6);
+            }
+        }
+        // snake(0) == 0 for any alpha.
+        assert!(yv[0].abs() < 1e-9);
     }
 }

@@ -857,6 +857,52 @@ impl Pipeline {
         self.eos_token_ids()
     }
 
+    /// Generate **raw token IDs** from `prompt_ids`, sampling with `strategy`,
+    /// stopping when a token in `stop_ids` is produced or `max_new` tokens have
+    /// been emitted. Returns the generated IDs (the prompt and the stop token
+    /// are excluded).
+    ///
+    /// Unlike [`Pipeline::generate`], this does not detokenize — it is the path
+    /// for audio LMs (e.g. Orpheus TTS) whose output tokens are neural-codec
+    /// codes consumed directly by a vocoder rather than decoded to text. Reuses
+    /// the loaded engine and runs synchronously on the calling thread (CPU
+    /// bound); call it from a blocking context.
+    pub fn generate_token_ids(
+        &self,
+        prompt_ids: &[u32],
+        max_new: usize,
+        stop_ids: &[u32],
+        strategy: SamplingStrategy,
+    ) -> Result<Vec<u32>> {
+        if prompt_ids.is_empty() {
+            anyhow::bail!("generate_token_ids: empty prompt");
+        }
+        let mut engine = self
+            .engine
+            .lock()
+            .map_err(|e| anyhow::anyhow!("engine lock poisoned: {e}"))?;
+        let mut sampler = Sampler::new(strategy);
+        let mut all = prompt_ids.to_vec();
+        let mut generated = Vec::new();
+
+        engine.reset_cache();
+        for step in 0..max_new {
+            let chunk: Vec<u32> = if step == 0 {
+                all.clone()
+            } else {
+                vec![*all.last().unwrap()]
+            };
+            let logits = engine.forward_logits(&chunk, true)?;
+            let next = sampler.sample(&logits, &all)?;
+            if stop_ids.contains(&next) {
+                break;
+            }
+            generated.push(next);
+            all.push(next);
+        }
+        Ok(generated)
+    }
+
     /// The configured stop sequences.
     pub fn stop_sequences(&self) -> &[String] {
         &self.config.stop_sequences

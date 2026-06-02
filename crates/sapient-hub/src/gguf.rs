@@ -98,6 +98,13 @@ pub fn gguf_preference_score(name: &str) -> i32 {
 pub fn tokenizer_fallback_model(model_id: &str) -> Option<&'static str> {
     let id = model_id.to_ascii_lowercase();
 
+    // Orpheus TTS extends the Llama-3.2 tokenizer with SNAC audio-codec tokens
+    // (vocab 156940). The base Llama-3 tokenizer (128256) would mismatch the
+    // model and fail the vocab-compat check, so resolve the ungated Orpheus
+    // tokenizer. Checked before the generic arch fallback ("llama" → Llama-3.1).
+    if id.contains("orpheus") {
+        return Some("unsloth/orpheus-3b-0.1-ft");
+    }
     // SmolLM / SmolLM2
     if id.contains("smollm") {
         return Some("HuggingFaceTB/SmolLM2-360M-Instruct");
@@ -221,6 +228,21 @@ mod tests {
         assert_eq!(
             tokenizer_fallback_model("mistralai/Mistral-7B-v0.1"),
             Some("mistralai/Mistral-7B-v0.1")
+        );
+    }
+
+    #[test]
+    fn orpheus_tokenizer_fallback_is_extended_vocab() {
+        // The Orpheus GGUF's general.name is "Orpheus Tts 0.1 Pretrained" — it
+        // must resolve to the 156940-vocab Orpheus tokenizer, NOT the generic
+        // Llama-3 fallback (128256), which would fail the vocab-compat check.
+        assert_eq!(
+            tokenizer_fallback_model("Orpheus Tts 0.1 Pretrained"),
+            Some("unsloth/orpheus-3b-0.1-ft")
+        );
+        assert_eq!(
+            tokenizer_fallback_model("isaiahbjork/orpheus-3b-0.1-ft-Q4_K_M-GGUF"),
+            Some("unsloth/orpheus-3b-0.1-ft")
         );
     }
 }

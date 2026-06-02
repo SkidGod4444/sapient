@@ -75,6 +75,46 @@ impl WhisperConfig {
     }
 }
 
+/// Whisper decoding controls from `generation_config.json` (HF).
+///
+/// `suppress_tokens` is masked to -inf at *every* decode step (non-speech
+/// symbols/markup); `begin_suppress_tokens` (`[220, 50256]` = blank + eot) is
+/// additionally masked on the *first* sampled step. Both default empty when the
+/// file is absent, so suppression simply no-ops.
+#[derive(Debug, Clone, Default)]
+pub struct WhisperGenConfig {
+    pub suppress_tokens: Vec<u32>,
+    pub begin_suppress_tokens: Vec<u32>,
+}
+
+impl WhisperGenConfig {
+    pub fn from_config_file(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path).context("reading generation_config.json")?;
+        Self::from_json_str(&text)
+    }
+
+    pub fn from_json_str(json: &str) -> Result<Self> {
+        let v: serde_json::Value =
+            serde_json::from_str(json).context("invalid generation_config.json")?;
+        // Parse only the two integer arrays; drop negatives (legacy -1 sentinel).
+        let ids = |key: &str| -> Vec<u32> {
+            v[key]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_u64())
+                        .map(|n| n as u32)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Ok(Self {
+            suppress_tokens: ids("suppress_tokens"),
+            begin_suppress_tokens: ids("begin_suppress_tokens"),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +145,18 @@ mod tests {
         assert_eq!(c.head_dim(), 64); // 512 / 8
         assert_eq!(c.vocab_size, 51865);
         assert_eq!(c.max_source_positions, 1500);
+    }
+
+    #[test]
+    fn parse_gen_config() {
+        let g = WhisperGenConfig::from_json_str(
+            r#"{ "suppress_tokens": [1, 2, 7, 50257], "begin_suppress_tokens": [220, 50256] }"#,
+        )
+        .unwrap();
+        assert_eq!(g.suppress_tokens, vec![1, 2, 7, 50257]);
+        assert_eq!(g.begin_suppress_tokens, vec![220, 50256]);
+        // Missing file / fields → empty (suppression no-ops).
+        let empty = WhisperGenConfig::from_json_str("{}").unwrap();
+        assert!(empty.suppress_tokens.is_empty() && empty.begin_suppress_tokens.is_empty());
     }
 }
