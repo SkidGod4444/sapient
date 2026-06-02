@@ -189,9 +189,12 @@ ONNX-wrapper crates (C++ dep) don't offer together.
   once weights are converted) + audio-token framing (7 tokens/frame → 3 RVQ levels) +
   `SpeakPipeline` + `sapient speak`. (Orpheus 3B Apache-2.0; OuteTTS-1.0 1B Llama but
   CC-BY-NC; Kani 400M but non-Llama LFM2.) Kokoro dropped — worst fit on every axis but params.
-- **6e — STS** (foundations DONE): ✅ `EnergyVad` + `SentenceChunker`. Remaining: `cpal`
-  capture/playback (behind an `audio-io` feature) + `ConversePipeline` (STT→LLM→TTS) +
-  `sapient converse`; voice-in/text-out is shippable before TTS via a no-op TTS.
+- **6e — STS** (voice-in/text-out DONE): ✅ `EnergyVad` + `SentenceChunker` +
+  `ConversePipeline` (STT→LLM→TTS, `Tts` trait) + `cpal` `MicCapture`/`SpeakerPlayback`
+  (behind the `audio-io` feature) + `sapient converse <llm> [--stt] [--language]
+  [--system]` (mic → VAD utterance → STT → LLM → printed reply; Ctrl-C to stop).
+  Remaining: swap `NoopTts` for the real Phase 6d synthesizer to speak the reply
+  (`turn.audio` → `SpeakerPlayback`); optional barge-in + `earshot` VAD upgrade.
 - **Success metric (6a):** `sapient transcribe whisper-base sample.wav` produces a
   correct transcript on CPU across macOS/Linux/Windows.
 
