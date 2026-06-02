@@ -163,6 +163,12 @@ ONNX-wrapper crates (C++ dep) don't offer together.
   - `AudioEngine::WhisperWgpu` + `TranscribePipeline` wiring; verified end-to-end —
     `sapient transcribe whisper-tiny jfk.wav --backend wgpu` produces the identical
     transcript to CPU. Coherence test: `tests/whisper_wgpu_coherence.rs`.
+  - **Perf note:** on small models / short clips the GPU path currently *trails* CPU
+    (tiny 3.1 s vs 1.3 s, base 5.7 s vs 1.8 s end-to-end on M-series/Metal) — per-process
+    GPU init + the one-token-at-a-time decoder with a logits read-back each step dominate
+    the tiny GPU compute. CPU is the `transcribe` default. **Batched prefill** (encode the
+    whole forced prompt in one pass) and keeping logits/argmax on-GPU are the optimizations
+    that make the GPU win on larger models / longer audio (tracked under 6c).
 - **6c — STT polish** (deferred): beam search, full `suppress_tokens`, timestamp
   tokens + long-audio re-seeking, streaming token output, `serve` integration.
 - **6d — TTS** (deferred): Kokoro-82M (text encoder + vocoder/ISTFT; pure-Rust/MIT
