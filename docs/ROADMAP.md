@@ -182,10 +182,13 @@ ONNX-wrapper crates (C++ dep) don't offer together.
   Kokoro's ~11 exacting kernels (BiLSTM/AdaIN/SineGen/ISTFT) to essentially
   **ConvTranspose1d + Snake + weight-norm fold** — and the SNAC decoder already exists
   as a pure-Rust reference in `candle-transformers`. Done: `conv_transpose1d` + `snake`
-  kernels (CPU-reference tested, `forward/conv.rs`). Remaining: SNAC decoder port +
-  offline SNAC `.bin`→safetensors convert + audio-token framing + `SpeakPipeline` +
-  `sapient speak`. (Orpheus 3B Apache-2.0; OuteTTS-1.0 1B Llama but CC-BY-NC; Kani 400M
-  but non-Llama LFM2.) Kokoro is dropped — worst fit on every axis but param count.
+  kernels + `SnacConfig` + `weight_norm_fold` (all CPU-reference tested);
+  **`scripts/convert_snac_to_safetensors.py`** (folds weight_norm, `.pth`→safetensors —
+  the one offline step, matches the Rust fold). Remaining: SNAC decoder forward
+  (RVQ-from-codes → conv stack → 24 kHz WAV; numerically validated against a reference
+  once weights are converted) + audio-token framing (7 tokens/frame → 3 RVQ levels) +
+  `SpeakPipeline` + `sapient speak`. (Orpheus 3B Apache-2.0; OuteTTS-1.0 1B Llama but
+  CC-BY-NC; Kani 400M but non-Llama LFM2.) Kokoro dropped — worst fit on every axis but params.
 - **6e — STS** (foundations DONE): ✅ `EnergyVad` + `SentenceChunker`. Remaining: `cpal`
   capture/playback (behind an `audio-io` feature) + `ConversePipeline` (STT→LLM→TTS) +
   `sapient converse`; voice-in/text-out is shippable before TTS via a no-op TTS.
