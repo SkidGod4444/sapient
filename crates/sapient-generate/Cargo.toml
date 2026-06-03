@@ -28,6 +28,7 @@ tokio-stream = { workspace = true }
 tracing    = { workspace = true }
 futures    = { workspace = true }
 async-trait = { workspace = true }
+misaki-rs = { version = "0.3.0", default-features = false }
 
 [features]
 default = []

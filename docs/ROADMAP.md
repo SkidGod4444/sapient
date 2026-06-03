@@ -204,6 +204,19 @@ ONNX-wrapper crates (C++ dep) don't offer together.
   Remaining: wrap the now-shipped `SpeakPipeline` (6d) as a `Tts` impl so `converse`
   speaks the reply (`turn.audio` → `SpeakerPlayback`); optional barge-in + `earshot`
   VAD upgrade.
+- **6f — Kokoro-82M, the real-time TTS** ✅ DONE: the Orpheus/SNAC path (6d) is
+  autoregressive (~0.18× real-time on Metal — too slow for live `converse`). Revisited
+  Kokoro after a deep-research pass and **ported it pure-Rust** (`forward/kokoro/`):
+  non-autoregressive StyleTTS2 + ISTFTNet, one forward pass, **RTF ≈ 0.79 (1.3×
+  real-time) on M4 CPU**, ~12× faster than Orpheus. The ~11 "exacting kernels" feared
+  in 6d were built + unit-tested (BiLSTM, iSTFT with 1,2,1 irfft + window² OLA, AdaLayerNorm,
+  AdaIN1d, NSF SineGen, length-regulator) and the whole model is **validated stage-by-stage
+  vs a PyTorch reference** (ALBERT 1e-5 … audio envelope 0.999). G2P via pure-Rust
+  `misaki-rs` (no espeak). Weights: offline `.pth→safetensors` (`scripts/convert_kokoro_to_safetensors.py`)
+  → mirror `sai1974dev/kokoro-82m-safetensors` (or `SAPIENT_KOKORO_DIR`). `KokoroTts: Tts`
+  → `sapient speak kokoro-82m` + **`converse --speak` now defaults to Kokoro**. Apache-2.0,
+  54 voices. (Supersedes the "Kokoro dropped" call in 6d — the LM-codec detour shipped a
+  voice first; Kokoro shipped real-time.)
 - **Success metric (6a):** `sapient transcribe whisper-base sample.wav` produces a
   correct transcript on CPU across macOS/Linux/Windows.
 

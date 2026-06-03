@@ -42,6 +42,7 @@
 
 pub mod converse;
 pub mod device;
+pub mod kokoro_tts;
 pub mod kv_cache;
 pub mod pipeline;
 pub mod sampler;
@@ -54,6 +55,7 @@ pub use converse::{ConversePipeline, NoopTts, Tts, Turn};
 pub use device::{
     detect as detect_devices, recommend as recommend_backend, BackendPlan, DeviceProfile,
 };
+pub use kokoro_tts::{KokoroTts, DEFAULT_KOKORO_VOICE, KOKORO_REPO};
 pub use kv_cache::KVCache;
 pub use pipeline::{GenerationConfig, LoadOptions, Pipeline};
 pub use sampler::{Sampler, SamplingStrategy};

@@ -137,9 +137,8 @@ enum Commands {
         #[arg(long)]
         system: Option<String>,
 
-        /// Also speak the reply aloud via Orpheus TTS (slow on CPU — a 3B LM
-        /// decode runs per reply; keep replies short). Off by default; replies
-        /// stream as text either way.
+        /// Also speak the reply aloud via Kokoro-82M TTS (non-autoregressive →
+        /// real-time on CPU). Off by default; replies stream as text either way.
         #[arg(long)]
         speak: bool,
     },
@@ -1472,6 +1471,12 @@ async fn transcribe_command(
 
 // ── speak (text-to-speech) ──────────────────────────────────────────────────────
 
+/// True for the Kokoro-82M TTS aliases (the non-autoregressive, real-time path).
+fn is_kokoro_model(model: &str) -> bool {
+    let m = model.to_lowercase();
+    m == "kokoro" || m == "kokoro-82m" || m.contains("kokoro")
+}
+
 async fn speak_command(
     model: &str,
     text: &str,
@@ -1479,6 +1484,9 @@ async fn speak_command(
     voice: &str,
     backend: &str,
 ) -> Result<()> {
+    if is_kokoro_model(model) {
+        return speak_kokoro_command(text, output, voice).await;
+    }
     if !ORPHEUS_VOICES.contains(&voice) {
         anyhow::bail!(
             "unknown voice '{voice}' — choose one of: {}",
@@ -1510,6 +1518,39 @@ async fn speak_command(
         secs,
         sample_rate
     );
+    Ok(())
+}
+
+/// Synthesize with Kokoro-82M (non-autoregressive, real-time). Pulls the
+/// converted safetensors mirror (or `SAPIENT_KOKORO_DIR`), runs the pure-Rust
+/// StyleTTS2 + ISTFTNet forward, and writes a 24 kHz WAV.
+async fn speak_kokoro_command(text: &str, output: &std::path::Path, voice: &str) -> Result<()> {
+    use sapient_generate::converse::Tts;
+    use sapient_generate::{KokoroTts, DEFAULT_KOKORO_VOICE};
+    // `--voice` defaults to the Orpheus default ("tara"); map that to Kokoro's.
+    let voice = if voice == "tara" {
+        DEFAULT_KOKORO_VOICE
+    } else {
+        voice
+    };
+
+    let loading = ui::spinner("loading kokoro-82m…".to_string());
+    let tts = KokoroTts::from_default().await?.with_voice(voice);
+    drop(loading);
+
+    let synth = ui::spinner(format!("synthesising ({voice})…"));
+    let text = text.to_owned();
+    let out_path = output.to_path_buf();
+    let (n, sr) = tokio::task::spawn_blocking(move || {
+        let n = tts.speak_to_wav(&text, &out_path)?;
+        Ok::<_, anyhow::Error>((n, tts.sample_rate()))
+    })
+    .await
+    .context("kokoro speak task panicked")??;
+    drop(synth);
+
+    let secs = n as f32 / sr as f32;
+    println!("✓ wrote {} ({:.1}s, {} Hz)", output.display(), secs, sr);
     Ok(())
 }
 
@@ -1549,7 +1590,7 @@ async fn converse_command(
 
     use sapient_generate::{
         microphone_guidance, open_privacy_settings, request_microphone, ConversePipeline,
-        EnergyVad, MicCapture, MicPermission, NoopTts, Pipeline, SpeakPipeline, SpeakerPlayback,
+        EnergyVad, KokoroTts, MicCapture, MicPermission, NoopTts, Pipeline, SpeakerPlayback,
         TranscribePipeline, Tts, VadConfig,
     };
 
@@ -1570,12 +1611,14 @@ async fn converse_command(
     }
 
     let loading = ui::spinner(if speak {
-        format!("loading {stt} + {model} + orpheus-3b…")
+        format!("loading {stt} + {model} + kokoro-82m…")
     } else {
         format!("loading {stt} + {model}…")
     });
     // Load all models concurrently at startup (their downloads overlap) and keep
     // them resident for the whole session — no mid-conversation model load.
+    // Spoken replies use Kokoro-82M (non-autoregressive → real-time on CPU),
+    // unlike the autoregressive Orpheus-3B which is ~0.18× real-time.
     let llm_opts = LoadOptions {
         backend: backend_kind,
         ..Default::default()
@@ -1585,9 +1628,7 @@ async fn converse_command(
         Pipeline::from_pretrained_with_opts(model, llm_opts),
         async {
             if speak {
-                SpeakPipeline::from_pretrained_with_backend("orpheus-3b", backend_kind)
-                    .await
-                    .map(Some)
+                KokoroTts::from_default().await.map(Some)
             } else {
                 Ok(None)
             }
@@ -1596,7 +1637,7 @@ async fn converse_command(
     let stt_pipe = stt_res?;
     let llm = llm_res?;
     let tts: Box<dyn Tts> = match tts_res? {
-        Some(sp) => Box::new(sp),
+        Some(k) => Box::new(k),
         None => Box::new(NoopTts),
     };
     drop(loading);
@@ -1604,7 +1645,7 @@ async fn converse_command(
     let mut converse = ConversePipeline::new(stt_pipe, llm, tts);
     match system {
         Some(s) => converse = converse.with_system(s),
-        // Spoken replies via a 3B TTS are slow, so nudge brevity when --speak is on.
+        // Keep replies short and natural for a conversational voice cadence.
         None if speak => {
             converse = converse.with_system(
                 "You are a voice assistant. Reply in one or two short, natural sentences.",

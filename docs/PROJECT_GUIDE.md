@@ -268,8 +268,16 @@ The real generation math: how to run a Phi or Llama-style model layer by layer.
   - `forward/snac.rs` — the **SNAC neural-audio-codec decoder** (`SnacDecoder`): turns the
     audio-codec tokens an Orpheus TTS model emits back into a 24 kHz waveform (codebook
     lookup → conv stack with transposed-conv upsampling + Snake → tanh). Fully
-    convolutional, runs on CPU. Powers `sapient speak`. `normalize_snac_weights` adapts the
-    ungated `mlx-community/snac_24khz` safetensors layout.
+    convolutional, runs on CPU. Powers `sapient speak orpheus-3b`. `normalize_snac_weights`
+    adapts the ungated `mlx-community/snac_24khz` safetensors layout.
+  - `forward/kokoro/` — the **Kokoro-82M TTS** (`KokoroModel`): a *non-autoregressive*
+    StyleTTS2 + ISTFTNet model that turns phonemes + a voice into a 24 kHz waveform in **one
+    forward pass** (no codec-token loop) → **real-time on CPU** (RTF ≈ 0.79 on M4), unlike the
+    autoregressive Orpheus/SNAC path. Pure-Rust port (ALBERT encoder → prosody predictor →
+    text encoder → ISTFTNet decoder) with new CPU kernels in `ops.rs` (BiLSTM, STFT/iSTFT,
+    AdaLayerNorm, AdaIN1d, NSF source, length-regulator), validated stage-by-stage vs a PyTorch
+    reference. Weights from the converted mirror `sai1974dev/kokoro-82m-safetensors` (or
+    `SAPIENT_KOKORO_DIR`). Powers `sapient speak kokoro-82m` and `converse --speak`.
 - `architectures/` — graph **builders** for many model types (used by the IR/graph path).
   Note: only Phi and Llama are wired into live chat today; the rest are scaffolding.
   - `llama.rs`, `phi.rs`, `qwen.rs`, `gemma.rs`, `gpt2.rs`, `bert.rs`, `mixtral.rs`, `mod.rs`.
@@ -292,8 +300,12 @@ tokens, streams text, and stops at the right time.
 - `speak.rs` — `SpeakPipeline`: the text-to-speech conductor. Runs an **Orpheus-3B** model
   (a Llama-3.2 fine-tune, on the normal text engine) to emit SNAC audio-codec **tokens**
   (`Pipeline::generate_token_ids`), de-frames them (7 codes/frame → 3 RVQ levels), and
-  decodes them with `SnacDecoder` into a 24 kHz WAV. Powers `sapient speak`. Eight built-in
-  voices; SNAC weights auto-download (or `SAPIENT_SNAC_DIR`).
+  decodes them with `SnacDecoder` into a 24 kHz WAV. Powers `sapient speak orpheus-3b`. Eight
+  built-in voices; SNAC weights auto-download (or `SAPIENT_SNAC_DIR`).
+- `kokoro_tts.rs` — `KokoroTts` (`Tts` impl): the **real-time** text-to-speech path. Text →
+  phonemes via the pure-Rust `misaki-rs` G2P (no espeak) → `KokoroModel` (one non-autoregressive
+  forward pass) → 24 kHz WAV. `from_default()` pulls the converted safetensors mirror (or
+  `SAPIENT_KOKORO_DIR`). Powers `sapient speak kokoro-82m` and is the default `converse --speak` TTS.
 - `sampler.rs` — **how to pick the next token**: greedy (highest score), temperature,
   top-k, top-p, and repetition penalty.
 - `kv_cache.rs` — the memory notebook (KV cache) helpers. As of v0.2.9 the cache is allocated

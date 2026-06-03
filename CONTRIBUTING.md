@@ -157,6 +157,18 @@ fluent-but-wrong; SNAC weights come from the ungated `mlx-community/snac_24khz` 
 `mlx` config omits `latent_dim`, so the decoder derives it from the conv-in weight shape. Validate
 with `tests/snac_coherence.rs` (bit-close to torch) and the **speak→transcribe round-trip**.
 
+**Kokoro-82M TTS (the real-time path).** `sapient-models/src/forward/kokoro/` is a pure-Rust
+StyleTTS2 + ISTFTNet port — *non-autoregressive*, so it runs **real-time on CPU** (unlike the
+autoregressive Orpheus/SNAC). New CPU kernels (BiLSTM, `torch.istft`-equivalent STFT/iSTFT,
+AdaLayerNorm, AdaIN1d, NSF source, length-regulator) live in `kokoro/ops.rs`, each unit-tested vs a
+reference. Weights: run `python3 scripts/convert_kokoro_to_safetensors.py --out ~/.cache/sapient-kokoro`
+once (converts the upstream `.pth` pickle → safetensors; already hosted at `sai1974dev/kokoro-82m-safetensors`),
+then point `SAPIENT_KOKORO_DIR` at it for the ignored coherence tests (`kokoro/stage_tests.rs`
+validate every stage vs a committed PyTorch fixture; `sapient-generate/tests/kokoro_tts_e2e.rs` is the
+text→audio + RTF check). G2P is the pure-Rust `misaki-rs` (no espeak). Editing trap: the NSF source
+**omits** training-time noise/random-phase for determinism, so validate by **energy-envelope/spectrogram
+correlation** (≈0.99), not max_err, plus the **speak→transcribe round-trip**.
+
 **Quantized storage.** `DType::Q4_0` and `DType::Q8_0` store raw ggml block bytes. The key
 invariant is that `as_bytes()` on a quantized tensor returns exactly `byte_count(numel)` bytes.
 Use `as_quant_blocks()` to iterate raw blocks and `to_f32_vec()` to dequantize. Never call

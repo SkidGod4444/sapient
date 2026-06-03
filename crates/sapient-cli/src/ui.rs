@@ -142,7 +142,10 @@ pub fn converse_banner(input_rate: u32, stt: &str, llm: &str, backend: &str, spe
         );
     }
     let mode = if speak {
-        style(format!("{NOTE} voice replies on (Orpheus TTS)")).yellow()
+        style(format!(
+            "{NOTE} voice replies on (Kokoro-82M TTS · real-time)"
+        ))
+        .green()
     } else {
         style(format!("{INFO} text replies · pass --speak to hear them")).dim()
     };
