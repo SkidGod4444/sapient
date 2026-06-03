@@ -148,56 +148,70 @@ fn generator(
     let har_cat = Tensor::from_f32(&har_cat, Shape::new([1, 2 * fbins, frames]))
         .map_err(|e| anyhow!("{e}"))?;
 
+    let timing = std::env::var("SAPIENT_KOKORO_TIMING").is_ok();
+    let mut t_src_convs = 0u128;
+    let mut t_resblocks = 0u128;
+
     let num_up = g.upsample_rates.len(); // 2
     let mut x = x.clone();
     for i in 0..num_up {
+        let _t0 = std::time::Instant::now();
         // x = leaky_relu(x, 0.1)
         let mut xv = x.to_f32_vec();
         leaky_relu_inplace(&mut xv, 0.1);
         let xd = x.shape().dims().to_vec();
         x = Tensor::from_f32(&xv, Shape::new([1, xd[1], xd[2]])).map_err(|e| anyhow!("{e}"))?;
 
-        // x_source = noise_convs[i](har) — plain Conv1d (not weight_norm)
-        // (kernel comes from the weight tensor; we only need stride + padding)
+        // The noise-source branch (noise_conv → noise_res) and the upsample branch
+        // (ConvTranspose1d → reflection-pad) are independent until they're summed,
+        // so run them concurrently — each is a substantial serial cost.
         let (stride_ns, pad_ns) = if i + 1 < num_up {
             let stride_f0: usize = g.upsample_rates[i + 1..].iter().product();
             (stride_f0, stride_f0.div_ceil(2))
         } else {
             (1, 0)
         };
-        let x_source = conv1d(
-            &har_cat,
-            get(w, &format!("decoder.generator.noise_convs.{i}.weight"))?,
-            Some(get(w, &format!("decoder.generator.noise_convs.{i}.bias"))?),
-            pad_ns,
-            stride_ns,
-            1,
-            1,
-        )?;
         let nr_k = if i + 1 < num_up { 7 } else { 11 };
-        let x_source = adain_resblock1(
-            w,
-            &format!("decoder.generator.noise_res.{i}"),
-            &x_source,
-            s,
-            nr_k,
-            &[1, 3, 5],
-        )?;
-
-        // x = ups[i](x)  (ConvTranspose1d, weight-normed → folded)
         let u = g.upsample_rates[i];
         let k = g.upsample_kernel_sizes[i];
-        x = conv_transpose1d(
-            &x,
-            get(w, &format!("decoder.generator.ups.{i}.weight"))?,
-            Some(get(w, &format!("decoder.generator.ups.{i}.bias"))?),
-            u,
-            (k - u) / 2,
-        )?;
-
-        if i == num_up - 1 {
-            x = reflection_pad_left1(&x)?;
-        }
+        let (source_res, up_res) = rayon::join(
+            || -> Result<Tensor> {
+                // x_source = noise_res(noise_convs[i](har)) — noise_convs is a plain
+                // Conv1d (kernel from the weight tensor; only stride+pad needed).
+                let xs = conv1d(
+                    &har_cat,
+                    get(w, &format!("decoder.generator.noise_convs.{i}.weight"))?,
+                    Some(get(w, &format!("decoder.generator.noise_convs.{i}.bias"))?),
+                    pad_ns,
+                    stride_ns,
+                    1,
+                    1,
+                )?;
+                adain_resblock1(
+                    w,
+                    &format!("decoder.generator.noise_res.{i}"),
+                    &xs,
+                    s,
+                    nr_k,
+                    &[1, 3, 5],
+                )
+            },
+            || -> Result<Tensor> {
+                let mut xu = conv_transpose1d(
+                    &x,
+                    get(w, &format!("decoder.generator.ups.{i}.weight"))?,
+                    Some(get(w, &format!("decoder.generator.ups.{i}.bias"))?),
+                    u,
+                    (k - u) / 2,
+                )?;
+                if i == num_up - 1 {
+                    xu = reflection_pad_left1(&xu)?;
+                }
+                Ok(xu)
+            },
+        );
+        let x_source = source_res?;
+        x = up_res?;
 
         // x = x + x_source
         let a = x.to_f32_vec();
@@ -213,6 +227,10 @@ fn generator(
         let summed: Vec<f32> = a.iter().zip(b.iter()).map(|(p, q)| p + q).collect();
         x = Tensor::from_f32(&summed, Shape::new([1, xd[1], xd[2]])).map_err(|e| anyhow!("{e}"))?;
 
+        if timing {
+            t_src_convs += _t0.elapsed().as_millis();
+        }
+        let _t1 = std::time::Instant::now();
         // resblocks: the `num_kernels` blocks are independent (same input, summed
         // then averaged) — run them across cores. This is the decoder's hot path.
         let nk = g.resblock_kernel_sizes.len();
@@ -244,7 +262,11 @@ fn generator(
         }
         let xd = x.shape().dims().to_vec();
         x = Tensor::from_f32(&avg, Shape::new([1, xd[1], xd[2]])).map_err(|e| anyhow!("{e}"))?;
+        if timing {
+            t_resblocks += _t1.elapsed().as_millis();
+        }
     }
+    let _tp = std::time::Instant::now();
 
     // x = leaky_relu(x) [default 0.01]; conv_post; exp/sin; iSTFT
     let mut xv = x.to_f32_vec();
@@ -271,7 +293,14 @@ fn generator(
             ph[k * lf + t] = pv[(fbins + k) * lf + t].sin();
         }
     }
-    Ok(istft(&spec, &ph, fbins, lf, n_fft, hop))
+    let wav = istft(&spec, &ph, fbins, lf, n_fft, hop);
+    if timing {
+        eprintln!(
+            "    [gen] src+convs {t_src_convs} ms · resblocks {t_resblocks} ms · post+istft {} ms",
+            _tp.elapsed().as_millis()
+        );
+    }
+    Ok(wav)
 }
 
 /// Full ISTFTNet decoder: `asr` `[1, 512, T]`, `f0`/`n` `[2T]`, `s` 128-d style.

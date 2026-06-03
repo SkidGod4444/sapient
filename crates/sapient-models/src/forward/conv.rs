@@ -10,6 +10,7 @@
 //! correct implementations are fine (no im2col/GEMM needed for the transpose).
 
 use anyhow::{anyhow, Result};
+use rayon::prelude::*;
 use sapient_backends_cpu::kernels::conv2d::conv2d;
 use sapient_core::{Shape, Tensor};
 
@@ -89,32 +90,35 @@ pub fn conv_transpose1d(
     let wv = weight.to_f32_cow();
     let bias_v = bias.map(|b| b.to_f32_vec());
 
-    // Scatter-add into the full (un-cropped) output, then crop `pad` each side.
-    let mut full_out = vec![0.0f32; c_out * full];
-    for ci in 0..c_in {
-        for li in 0..l {
-            let x_val = xv[ci * l + li];
-            if x_val == 0.0 {
-                continue;
-            }
-            for co in 0..c_out {
+    // Each output channel is independent (it gathers from every input channel),
+    // so compute the cropped+biased output row per `co` in parallel — this is the
+    // hot upsampling op in the ISTFTNet generator (512→256 ×10, 256→128 ×6). The
+    // inner loops are the same scatter, just with `co` as the outer (per-thread)
+    // axis so there's no write contention.
+    let mut out = vec![0.0f32; c_out * l_out];
+    out.par_chunks_mut(l_out)
+        .enumerate()
+        .for_each(|(co, out_row)| {
+            let mut full_row = vec![0.0f32; full];
+            for ci in 0..c_in {
                 let w_base = (ci * c_out + co) * k;
-                let o_base = co * full + li * stride;
-                for kk in 0..k {
-                    full_out[o_base + kk] += x_val * wv[w_base + kk];
+                let x_off = ci * l;
+                for li in 0..l {
+                    let x_val = xv[x_off + li];
+                    if x_val == 0.0 {
+                        continue;
+                    }
+                    let o = li * stride;
+                    for kk in 0..k {
+                        full_row[o + kk] += x_val * wv[w_base + kk];
+                    }
                 }
             }
-        }
-    }
-
-    // Crop and add bias.
-    let mut out = vec![0.0f32; c_out * l_out];
-    for co in 0..c_out {
-        let b = bias_v.as_ref().map(|v| v[co]).unwrap_or(0.0);
-        for oi in 0..l_out {
-            out[co * l_out + oi] = full_out[co * full + pad + oi] + b;
-        }
-    }
+            let b = bias_v.as_ref().map(|v| v[co]).unwrap_or(0.0);
+            for (oi, slot) in out_row.iter_mut().enumerate() {
+                *slot = full_row[pad + oi] + b;
+            }
+        });
     Tensor::from_f32(&out, Shape::new([1, c_out, l_out])).map_err(|e| anyhow!("{e}"))
 }
 
