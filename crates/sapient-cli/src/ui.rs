@@ -120,7 +120,14 @@ pub fn print_gen_stats(tokens: usize, elapsed: Duration, ttft: Option<Duration>)
 
 /// Banner shown when `sapient converse` starts. `backend` is the resolved
 /// compute label (e.g. "metal (MLX native graph)" or a CPU label).
-pub fn converse_banner(input_rate: u32, stt: &str, llm: &str, backend: &str, speak: bool) {
+pub fn converse_banner(
+    input_rate: u32,
+    stt: &str,
+    llm: &str,
+    backend: &str,
+    speak: bool,
+    tts_engine: &str,
+) {
     let bar = style("━".repeat(52)).dim();
     println!("\n{bar}");
     println!(
@@ -142,10 +149,12 @@ pub fn converse_banner(input_rate: u32, stt: &str, llm: &str, backend: &str, spe
         );
     }
     let mode = if speak {
-        style(format!(
-            "{NOTE} voice replies on (Kokoro-82M TTS · real-time)"
-        ))
-        .green()
+        let label = if tts_engine == "orpheus" {
+            format!("{NOTE} voice replies on (Orpheus-3B TTS · slow on CPU)")
+        } else {
+            format!("{NOTE} voice replies on (Kokoro-82M TTS · real-time)")
+        };
+        style(label).green()
     } else {
         style(format!("{INFO} text replies · pass --speak to hear them")).dim()
     };

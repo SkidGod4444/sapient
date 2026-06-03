@@ -137,13 +137,19 @@ enum Commands {
         #[arg(long)]
         system: Option<String>,
 
-        /// Also speak the reply aloud via Kokoro-82M TTS (non-autoregressive →
-        /// real-time on CPU). Off by default; replies stream as text either way.
+        /// Also speak the reply aloud (text replies stream either way). Off by default.
         #[arg(long)]
         speak: bool,
+
+        /// Voice engine for spoken replies (with --speak): `kokoro` (Kokoro-82M,
+        /// real-time on CPU — default) or `orpheus` (Orpheus-3B, richer but slow,
+        /// not real-time). NOTE: this is the text-to-SPEECH model; `--stt` is the
+        /// separate speech-to-TEXT (Whisper) model.
+        #[arg(long, default_value = "kokoro")]
+        tts: String,
     },
 
-    /// Synthesise speech from text with an Orpheus TTS model (text-to-speech).
+    /// Synthesise speech from text with a TTS model (text-to-speech).
     #[command(visible_aliases = ["tts", "say"])]
     Speak {
         /// Orpheus model alias or repo id (e.g. `orpheus-3b`).
@@ -450,6 +456,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             language,
             system,
             speak,
+            tts,
         } => {
             converse_command(
                 model.as_str(),
@@ -458,6 +465,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 language,
                 system,
                 speak,
+                tts.as_str(),
             )
             .await
         }
@@ -1561,6 +1569,7 @@ async fn speak_kokoro_command(text: &str, output: &std::path::Path, voice: &str)
 // made with `--no-default-features` (e.g. the aarch64-linux release, which skips
 // the ALSA dependency to keep the cross-compile clean).
 #[cfg(not(feature = "audio-io"))]
+#[allow(clippy::too_many_arguments)]
 async fn converse_command(
     _model: &str,
     _stt: &str,
@@ -1568,6 +1577,7 @@ async fn converse_command(
     _language: Option<String>,
     _system: Option<String>,
     _speak: bool,
+    _tts: &str,
 ) -> Result<()> {
     anyhow::bail!(
         "this build was compiled without live audio I/O. Rebuild with the \
@@ -1578,6 +1588,7 @@ async fn converse_command(
 }
 
 #[cfg(feature = "audio-io")]
+#[allow(clippy::too_many_arguments)]
 async fn converse_command(
     model: &str,
     stt: &str,
@@ -1585,16 +1596,39 @@ async fn converse_command(
     language: Option<String>,
     system: Option<String>,
     speak: bool,
+    tts: &str,
 ) -> Result<()> {
     use std::io::{IsTerminal, Write};
 
     use sapient_generate::{
         microphone_guidance, open_privacy_settings, request_microphone, ConversePipeline,
-        EnergyVad, KokoroTts, MicCapture, MicPermission, NoopTts, Pipeline, SpeakerPlayback,
-        TranscribePipeline, Tts, VadConfig,
+        EnergyVad, KokoroTts, MicCapture, MicPermission, NoopTts, Pipeline, SpeakPipeline,
+        SpeakerPlayback, TranscribePipeline, Tts, VadConfig,
     };
 
     let backend_kind = parse_generation_backend(backend)?;
+
+    // `--stt` is the speech-to-TEXT (Whisper) model. A text-to-SPEECH model like
+    // orpheus-3b has no Whisper weights and would fail cryptically ("no weights
+    // found"), so catch the mix-up here with a clear message.
+    if let Some(m) = sapient_hub::registry::lookup(stt) {
+        if m.family != "Whisper" {
+            anyhow::bail!(
+                "--stt expects a speech-to-text (Whisper) model, but '{stt}' is a {} \
+                 (text-to-speech) model. Use --stt whisper-base | whisper-tiny | \
+                 whisper-small. To choose the spoken voice, use: --speak --tts {}.",
+                m.family,
+                m.family.to_lowercase()
+            );
+        }
+    }
+
+    // Spoken-voice engine for `--speak`: kokoro (real-time) or orpheus (slow).
+    let tts_engine = match tts.trim().to_lowercase().as_str() {
+        "kokoro" | "kokoro-82m" => "kokoro",
+        "orpheus" | "orpheus-3b" | "openhorizon/orpheus-3b" => "orpheus",
+        other => anyhow::bail!("unknown --tts '{other}'; choose: kokoro | orpheus"),
+    };
 
     // Ask the OS for microphone access up front (macOS shows the consent prompt;
     // Windows/Linux have no per-app prompt → Unknown, handled by the level meter).
@@ -1611,14 +1645,14 @@ async fn converse_command(
     }
 
     let loading = ui::spinner(if speak {
-        format!("loading {stt} + {model} + kokoro-82m…")
+        format!("loading {stt} + {model} + {tts_engine}…")
     } else {
         format!("loading {stt} + {model}…")
     });
     // Load all models concurrently at startup (their downloads overlap) and keep
-    // them resident for the whole session — no mid-conversation model load.
-    // Spoken replies use Kokoro-82M (non-autoregressive → real-time on CPU),
-    // unlike the autoregressive Orpheus-3B which is ~0.18× real-time.
+    // them resident for the whole session — no mid-conversation model load. The
+    // spoken-voice engine is chosen by --tts: Kokoro-82M (non-autoregressive →
+    // real-time on CPU) or Orpheus-3B (autoregressive → richer but ~0.18× real-time).
     let llm_opts = LoadOptions {
         backend: backend_kind,
         ..Default::default()
@@ -1627,19 +1661,22 @@ async fn converse_command(
         TranscribePipeline::from_pretrained_with_backend(stt, backend_kind),
         Pipeline::from_pretrained_with_opts(model, llm_opts),
         async {
-            if speak {
-                KokoroTts::from_default().await.map(Some)
+            if !speak {
+                return Ok::<Option<std::sync::Arc<dyn Tts>>, anyhow::Error>(None);
+            }
+            if tts_engine == "orpheus" {
+                let sp =
+                    SpeakPipeline::from_pretrained_with_backend("orpheus-3b", backend_kind).await?;
+                Ok(Some(std::sync::Arc::new(sp) as std::sync::Arc<dyn Tts>))
             } else {
-                Ok(None)
+                let k = KokoroTts::from_default().await?;
+                Ok(Some(std::sync::Arc::new(k) as std::sync::Arc<dyn Tts>))
             }
         },
     );
     let stt_pipe = stt_res?;
     let llm = llm_res?;
-    let tts: std::sync::Arc<dyn Tts> = match tts_res? {
-        Some(k) => std::sync::Arc::new(k),
-        None => std::sync::Arc::new(NoopTts),
-    };
+    let tts: std::sync::Arc<dyn Tts> = tts_res?.unwrap_or_else(|| std::sync::Arc::new(NoopTts));
     drop(loading);
 
     let mut converse = ConversePipeline::new(stt_pipe, llm, tts);
@@ -1686,7 +1723,7 @@ async fn converse_command(
     let mut buf: Vec<f32> = Vec::new();
 
     let backend_label = converse.backend_label();
-    ui::converse_banner(src_rate, stt, model, &backend_label, speak);
+    ui::converse_banner(src_rate, stt, model, &backend_label, speak, tts_engine);
 
     // Live mic meter + a one-time hint if the mic looks dead (the terminal lacks
     // microphone permission, so cpal delivers only silence).

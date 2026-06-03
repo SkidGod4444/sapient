@@ -60,14 +60,16 @@ jobs:
             features: wgpu
             suffix: -gpu
 
-          # Linux — ARM64 (Pi 4/5 64-bit, cloud ARM). Cross-compiled from x86_64 with
-          # cargo-zigbuild on the stable runner — the native ubuntu-*-arm pool was
-          # preemptible and kept killing release builds mid-link (SIGTERM/143). rustls
-          # (no openssl-sys) makes this clean; same path as the documented Pi build.
+          # Linux — ARM64 (Pi 4/5 64-bit, cloud ARM). Built on a **native** ARM
+          # runner (GitHub-hosted `ubuntu-22.04-arm`, GA since 2025) so cpal/ALSA
+          # compiles and the default `audio-io` feature ships — i.e. `converse`
+          # works on the Pi out of the box. (The old cargo-zigbuild cross path had
+          # to drop audio-io because cross-compiling cpal's ALSA dep is fiddly;
+          # building natively removes that constraint. The earlier native-ARM
+          # flakiness was the preview pool — the GA runners are stable.)
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-22.04
+            os: ubuntu-22.04-arm
             archive: tar.gz
-            zigbuild: true
 
           # Windows — x86_64
           - target: x86_64-pc-windows-msvc
@@ -103,28 +105,14 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # ── macOS universal binary setup ───────────────────────────────────────
       # libasound2-dev: sapient-cli's default `audio-io` feature (live `converse`)
-      # pulls cpal, which links libasound on Linux. The aarch64-linux build is the
-      # zigbuild cross path, which instead drops audio-io (`--no-default-features`)
-      # to avoid cross-compiling ALSA — so this only covers the native x86_64 jobs.
+      # pulls cpal, which links libasound on Linux. Runs on every Linux job now,
+      # including the native aarch64 (ARM) runner — so the Pi binary ships converse.
       - name: Install OpenSSL + ALSA (Linux)
-        if: runner.os == 'Linux' && !matrix.zigbuild
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update -q
           sudo apt-get install -y pkg-config libssl-dev libasound2-dev
-
-      # Cross-compile aarch64-linux from the x86_64 runner via cargo-zigbuild (zig is
-      # the C cross-linker). Avoids the flaky native ARM runner pool. rustls means no
-      # openssl-sys to cross-build. cargo-zigbuild auto-detects the ziglang pip module
-      # (`python3 -m ziglang`), so no PATH setup is needed.
-      - name: Install zigbuild toolchain (cross aarch64-linux)
-        if: matrix.zigbuild
-        run: |
-          set -euo pipefail
-          rustup target add ${{ matrix.target }}
-          pip3 install ziglang==0.13.0
-          cargo install --locked cargo-zigbuild
 
       # MLX (the Metal GPU backend) is built from source by mlx-rs and needs CMake.
       - name: Install MLX build deps (macOS Metal)
@@ -165,8 +153,10 @@ jobs:
             cargo build --release -p sapient-cli --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }}
           }
 
+      # All non-Windows targets (incl. native aarch64-linux on the ARM runner)
+      # build with default features → `audio-io`/`converse` ships everywhere.
       - name: Build (native — Linux/macOS)
-        if: runner.os != 'Windows' && !matrix.zigbuild
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           FEATURES="${{ matrix.features }}"
@@ -176,28 +166,13 @@ jobs:
             cargo build --release -p sapient-cli --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }}
           fi
 
-      # `--no-default-features` drops `audio-io` (live `converse`) for the cross
-      # build only — cross-compiling cpal's ALSA dependency via zig is the one
-      # fiddly link, and a headless aarch64-linux target rarely needs live mic I/O.
-      # chat/transcribe/speak/serve are all unaffected. Build natively on the Pi
-      # with `--features audio-io` (+ libasound2-dev) to get converse there.
-      - name: Build (zigbuild — cross aarch64-linux)
-        if: matrix.zigbuild
-        shell: bash
-        run: cargo zigbuild --release -p sapient-cli --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }} --no-default-features
-
       # ── Strip binary (reduces size ~50-70%) ───────────────────────────────
-      # Use llvm-strip (ships with the zig toolchain via cargo-zigbuild's clang) for the
-      # cross-compiled aarch64 binary — the host `strip` can't handle a foreign arch.
+      # Every target now builds natively, so the host `strip` matches the arch.
       - name: Strip binary (Linux/macOS)
         if: runner.os != 'Windows'
         run: |
           BIN="target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}${{ matrix.ext || '' }}"
-          if [ "${{ matrix.zigbuild }}" = "true" ]; then
-            llvm-strip "$BIN" 2>/dev/null || aarch64-linux-gnu-strip "$BIN" 2>/dev/null || true
-          else
-            strip "$BIN" || true
-          fi
+          strip "$BIN" || true
 
       # ── Package ───────────────────────────────────────────────────────────
       - name: Package (tar.gz)
