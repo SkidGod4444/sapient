@@ -1636,9 +1636,9 @@ async fn converse_command(
     );
     let stt_pipe = stt_res?;
     let llm = llm_res?;
-    let tts: Box<dyn Tts> = match tts_res? {
-        Some(k) => Box::new(k),
-        None => Box::new(NoopTts),
+    let tts: std::sync::Arc<dyn Tts> = match tts_res? {
+        Some(k) => std::sync::Arc::new(k),
+        None => std::sync::Arc::new(NoopTts),
     };
     drop(loading);
 
@@ -1749,13 +1749,13 @@ async fn converse_command(
                             ui::converse_you(&transcript);
                             ui::converse_stt_stats(audio_secs, stt_elapsed);
                             ui::converse_assistant_prefix();
-                            // Stream the reply text token-by-token; play each reply
-                            // sentence once it's fully synthesized (no-op without
-                            // --speak). `respond_streaming` only emits complete
-                            // sentences here, so each `submit` queues a whole
-                            // sentence → the speaker plays it gap-free (no mid-word
-                            // underrun even though the codec LM is slower than
-                            // real-time); pauses fall only between sentences.
+                            // Stream the reply: text token-by-token, and audio
+                            // **sentence-by-sentence as it's generated** (no-op
+                            // without --speak). `respond_streaming` synthesizes
+                            // each sentence the moment it completes and emits it
+                            // here, so the speaker starts ~after the first sentence
+                            // instead of after the whole reply — time-to-first-audio
+                            // no longer scales with reply length.
                             let turn = converse
                                 .respond_streaming(
                                     &transcript,

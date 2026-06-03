@@ -76,14 +76,16 @@ pub struct Turn {
 pub struct ConversePipeline {
     stt: TranscribePipeline,
     llm: Pipeline,
-    tts: Box<dyn Tts>,
+    // `Arc` (not `Box`) so a background synthesis worker can hold the TTS while the
+    // LLM keeps generating on the main task — the streaming overlap in `respond_streaming`.
+    tts: Arc<dyn Tts>,
     history: Vec<ChatMessage>,
     stt_opts: TranscribeOptions,
 }
 
 impl ConversePipeline {
     /// Build from a loaded STT pipeline, LLM pipeline, and TTS backend.
-    pub fn new(stt: TranscribePipeline, mut llm: Pipeline, tts: Box<dyn Tts>) -> Self {
+    pub fn new(stt: TranscribePipeline, mut llm: Pipeline, tts: Arc<dyn Tts>) -> Self {
         // Each turn re-sends the whole conversation (system + history) as the
         // prompt, so its token prefix is identical to the previous turn's up to
         // the new user message. Prefix/prompt KV caching reuses that prefix
@@ -157,41 +159,103 @@ impl ConversePipeline {
 
         use futures::StreamExt;
 
-        self.history.push(ChatMessage::user(transcript.to_string()));
+        use crate::sentence::SentenceChunker;
 
-        let gen_start = Instant::now();
-        let mut stream = self.llm.chat_stream(&self.history).await;
+        self.history.push(ChatMessage::user(transcript.to_string()));
+        let sr = self.tts.sample_rate();
+
+        // ── streaming TTS pipeline ───────────────────────────────────────────
+        // A background worker synthesizes one sentence at a time while the LLM
+        // keeps generating the next on the main task and the speaker plays the
+        // previous — three stages overlapped. Time-to-first-audio collapses to
+        // "first sentence" (not the whole reply), and LLM generation no longer
+        // waits on synthesis. The `SentenceChunker` `min_chars` guard avoids
+        // splitting on abbreviations/decimals; short interjections merge forward.
+        let tts = Arc::clone(&self.tts);
+        let (sent_tx, mut sent_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (audio_tx, mut audio_rx) = tokio::sync::mpsc::unbounded_channel::<Result<Vec<f32>>>();
+        let worker = tokio::task::spawn_blocking(move || -> u128 {
+            let mut synth_ms = 0u128;
+            while let Some(sentence) = sent_rx.blocking_recv() {
+                let t = Instant::now();
+                let r = tts.synthesize(&sentence);
+                synth_ms += t.elapsed().as_millis();
+                let failed = r.is_err();
+                if audio_tx.send(r).is_err() || failed {
+                    break;
+                }
+            }
+            synth_ms
+        });
+
+        let total_start = Instant::now();
         let mut reply = String::new();
         let mut gen_tokens = 0usize;
-        while let Some(tok) = stream.next().await {
-            gen_tokens += 1;
-            reply.push_str(&tok);
-            on_token(&tok);
-        }
-        let gen_ms = gen_start.elapsed().as_millis();
-        self.history.push(ChatMessage::assistant(reply.clone()));
+        let gen_ms; // set exactly once, on the stream-end branch below
+        let mut all_audio: Vec<f32> = Vec::new();
+        let mut chunker = SentenceChunker::new(8, 200);
+        let mut stream = self.llm.chat_stream(&self.history).await;
 
-        // Synthesize the **whole reply as one clip**, then play it once. Splitting
-        // per sentence made the player run dry between sentences (the codec LM at
-        // ~17 tok/s is slower than real-time, so the next sentence isn't ready
-        // when the current finishes → a long mid-reply break). Decoding the full
-        // reply up front trades a bit more time-to-first-audio for **gap-free
-        // playback start-to-finish**. The brevity system prompt keeps `--speak`
-        // replies short so that upfront wait stays small. TTS is CPU-bound — keep
-        // it off the async reactor. (The streaming `Tts` path is retained for a
-        // future real-time-capable small model.)
-        let sr = self.tts.sample_rate();
-        let t = std::time::Instant::now();
-        let audio = tokio::task::block_in_place(|| self.tts.synthesize(&reply))?;
-        let tts_ms = t.elapsed().as_millis();
-        if !audio.is_empty() {
-            on_audio(&audio, sr);
+        // Drive the LLM stream and drain synthesized audio concurrently.
+        loop {
+            tokio::select! {
+                got = audio_rx.recv() => {
+                    match got {
+                        Some(Ok(audio)) => {
+                            if !audio.is_empty() {
+                                on_audio(&audio, sr);
+                                all_audio.extend_from_slice(&audio);
+                            }
+                        }
+                        Some(Err(e)) => return Err(e),
+                        None => {}
+                    }
+                }
+                tok = stream.next() => {
+                    match tok {
+                        Some(t) => {
+                            gen_tokens += 1;
+                            reply.push_str(&t);
+                            on_token(&t);
+                            for sentence in chunker.push(&t) {
+                                let _ = sent_tx.send(sentence);
+                            }
+                        }
+                        None => {
+                            gen_ms = total_start.elapsed().as_millis();
+                            break;
+                        }
+                    }
+                }
+            }
         }
+        drop(stream);
+
+        // LLM done: flush the tail, close the sentence channel (the worker exits
+        // once its queue drains), then drain any audio still in flight.
+        if let Some(rest) = chunker.flush() {
+            let _ = sent_tx.send(rest);
+        }
+        drop(sent_tx);
+        while let Some(got) = audio_rx.recv().await {
+            match got {
+                Ok(audio) => {
+                    if !audio.is_empty() {
+                        on_audio(&audio, sr);
+                        all_audio.extend_from_slice(&audio);
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        let tts_ms = worker.await.unwrap_or(0);
+
+        self.history.push(ChatMessage::assistant(reply.clone()));
 
         Ok(Turn {
             transcript: transcript.to_string(),
             reply,
-            audio,
+            audio: all_audio,
             audio_sample_rate: sr,
             gen_tokens,
             gen_ms,
