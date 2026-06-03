@@ -70,9 +70,11 @@ fn metal_capable() -> bool {
     std::env::consts::OS == "macos" && std::env::consts::ARCH == "aarch64"
 }
 
-/// Whether this machine can run the cross-platform GPU (`-gpu`) build: we publish it
-/// only for x86_64 Linux (Vulkan) and x86_64 Windows (DX12), and only offer it when an
-/// actual GPU is present (so CPU-only boxes are never nudged toward a GPU build).
+/// Whether this machine can run the cross-platform GPU (`-gpu`) build. We publish
+/// it for x86_64 Linux (wgpu/Vulkan), x86_64 Windows (wgpu/DX12), and **x86_64
+/// macOS** (wgpu/Metal — the GPU path for Intel Macs, where the Apple-Silicon-only
+/// MLX `-metal` build can't run). Linux/Windows are gated on an actual GPU being
+/// present; every Intel Mac has a Metal-capable GPU, so macOS x86_64 always qualifies.
 fn gpu_capable() -> bool {
     if std::env::consts::ARCH != "x86_64" {
         return false;
@@ -80,6 +82,10 @@ fn gpu_capable() -> bool {
     match std::env::consts::OS {
         "linux" => linux_has_gpu(),
         "windows" => windows_has_gpu(),
+        // Intel Macs always have a Metal GPU (discrete AMD/Nvidia or Intel iGPU);
+        // the wgpu build targets Metal there. Apple Silicon is aarch64 → uses the
+        // MLX `-metal` build instead and never reaches this arm.
+        "macos" => true,
         _ => false,
     }
 }
@@ -423,8 +429,8 @@ fn resolve_variant(explicit: Option<Variant>) -> Result<Variant> {
                 bail!("the Metal build is only available on Apple Silicon (macOS arm64)")
             }
             Variant::Gpu if !gpu_capable() => bail!(
-                "the GPU build is only available on x86_64 Linux/Windows with a GPU \
-                 (no GPU detected on this machine)"
+                "the GPU build is only available on x86_64 Linux/Windows (with a GPU) \
+                 and Intel macOS — no GPU build applies to this machine"
             ),
             v => return Ok(v),
         }

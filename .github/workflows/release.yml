@@ -38,6 +38,16 @@ jobs:
             os: macos-14
             archive: tar.gz
 
+          # macOS — Intel, cross-platform GPU build (wgpu → Metal). This is the GPU
+          # path for Intel Macs (e.g. AMD Radeon / Intel iGPU), where the
+          # Apple-Silicon-only MLX `-metal` build cannot run. wgpu uses Metal on
+          # macOS, so it accelerates discrete and integrated GPUs alike.
+          - target: x86_64-apple-darwin
+            os: macos-14
+            archive: tar.gz
+            features: wgpu
+            suffix: -gpu
+
           # Linux — x86_64 (glibc, covers Ubuntu/Debian/RHEL)
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04

@@ -64,7 +64,17 @@ detect_platform() {
     Darwin)
       case "$ARCH" in
         arm64)  PLATFORM="aarch64-apple-darwin" ;;
-        x86_64) PLATFORM="x86_64-apple-darwin" ;;
+        x86_64)
+          PLATFORM="x86_64-apple-darwin"
+          # Every Intel Mac has a Metal-capable GPU (discrete AMD/Nvidia or Intel
+          # iGPU); the wgpu build targets Metal, so pick the -gpu build by default.
+          # (Apple Silicon uses the MLX `-metal` build via `sapient update --metal`.)
+          case "${SAPIENT_VARIANT:-auto}" in
+            gpu) VARIANT="-gpu" ;;
+            cpu) VARIANT="" ;;
+            *)   VARIANT="-gpu" ;;
+          esac
+          ;;
         *)      error "Unsupported macOS architecture: $ARCH" ;;
       esac
       EXT="tar.gz"
