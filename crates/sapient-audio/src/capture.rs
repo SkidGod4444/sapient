@@ -25,9 +25,37 @@ impl MicCapture {
         let device = host
             .default_input_device()
             .ok_or_else(|| anyhow!("no default audio input device (is a mic connected?)"))?;
-        let supported = device
-            .default_input_config()
-            .context("querying default input config")?;
+        // Prefer the device's default config, but fall back to enumerating the
+        // supported ranges — on ALSA (e.g. a Raspberry Pi) `default_input_config()`
+        // often fails with "requested stream type not supported" even though the
+        // device advertises usable configs. Pick 16 kHz when it's in range (matches
+        // STT), else the range's max.
+        let supported = match device.default_input_config() {
+            Ok(c) => c,
+            Err(default_err) => {
+                let mut best: Option<cpal::SupportedStreamConfigRange> = None;
+                if let Ok(ranges) = device.supported_input_configs() {
+                    for r in ranges {
+                        let prefer = r.channels() == 1; // mono preferred
+                        if best.is_none()
+                            || (prefer && best.as_ref().map(|b| b.channels()) != Some(1))
+                        {
+                            best = Some(r);
+                        }
+                    }
+                }
+                let range = best.ok_or_else(|| {
+                    anyhow!("no usable input config (default_input_config: {default_err})")
+                })?;
+                let want = cpal::SampleRate(16_000);
+                let rate = if want >= range.min_sample_rate() && want <= range.max_sample_rate() {
+                    want
+                } else {
+                    range.max_sample_rate()
+                };
+                range.with_sample_rate(rate)
+            }
+        };
         let sample_rate = supported.sample_rate().0;
         let channels = supported.channels() as usize;
         let fmt = supported.sample_format();

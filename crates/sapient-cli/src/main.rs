@@ -147,6 +147,12 @@ enum Commands {
         /// separate speech-to-TEXT (Whisper) model.
         #[arg(long, default_value = "kokoro")]
         tts: String,
+
+        /// Run a single turn from a WAV/audio file instead of the live mic (no
+        /// microphone needed), printing per-stage timing (STT / LLM / TTS). Use it
+        /// to benchmark the converse pipeline on headless/mic-less devices.
+        #[arg(long)]
+        input: Option<PathBuf>,
     },
 
     /// Synthesise speech from text with a TTS model (text-to-speech).
@@ -457,6 +463,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             system,
             speak,
             tts,
+            input,
         } => {
             converse_command(
                 model.as_str(),
@@ -466,6 +473,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 system,
                 speak,
                 tts.as_str(),
+                input,
             )
             .await
         }
@@ -1578,6 +1586,7 @@ async fn converse_command(
     _system: Option<String>,
     _speak: bool,
     _tts: &str,
+    _input: Option<PathBuf>,
 ) -> Result<()> {
     anyhow::bail!(
         "this build was compiled without live audio I/O. Rebuild with the \
@@ -1597,6 +1606,7 @@ async fn converse_command(
     system: Option<String>,
     speak: bool,
     tts: &str,
+    input: Option<PathBuf>,
 ) -> Result<()> {
     use std::io::{IsTerminal, Write};
 
@@ -1632,16 +1642,19 @@ async fn converse_command(
 
     // Ask the OS for microphone access up front (macOS shows the consent prompt;
     // Windows/Linux have no per-app prompt → Unknown, handled by the level meter).
-    match tokio::task::block_in_place(request_microphone) {
-        MicPermission::Denied => {
-            eprintln!(
-                "⚠️  Microphone access is denied.\n   {}",
-                microphone_guidance()
-            );
-            open_privacy_settings();
-            return Ok(());
+    // Skipped for --input (WAV benchmark): no mic is touched in that path.
+    if input.is_none() {
+        match tokio::task::block_in_place(request_microphone) {
+            MicPermission::Denied => {
+                eprintln!(
+                    "⚠️  Microphone access is denied.\n   {}",
+                    microphone_guidance()
+                );
+                open_privacy_settings();
+                return Ok(());
+            }
+            MicPermission::Granted | MicPermission::Unknown => {}
         }
-        MicPermission::Granted | MicPermission::Unknown => {}
     }
 
     let loading = ui::spinner(if speak {
@@ -1692,6 +1705,63 @@ async fn converse_command(
     }
     if let Some(l) = language {
         converse = converse.with_language(l);
+    }
+
+    // ── --input: one-shot WAV turn (no mic) — benchmark the full pipeline ────
+    if let Some(wav) = input {
+        let utt = sapient_audio::io::load_audio(&wav, 16_000)
+            .with_context(|| format!("loading input audio {wav:?}"))?;
+        let utt_secs = utt.len() as f32 / 16_000.0;
+        println!("input: {} ({utt_secs:.2}s @ 16 kHz)", wav.display());
+
+        let t_stt = std::time::Instant::now();
+        let transcript = converse.transcribe_utterance(&utt)?;
+        let stt_ms = t_stt.elapsed().as_millis();
+        if transcript.is_empty() {
+            anyhow::bail!("transcript was empty — is the input speech?");
+        }
+        ui::converse_you(&transcript);
+
+        ui::converse_assistant_prefix();
+        let mut audio_len = 0usize;
+        let turn = converse
+            .respond_streaming(
+                &transcript,
+                |tok| {
+                    print!("{tok}");
+                    let _ = std::io::stdout().flush();
+                },
+                |samples, _rate| audio_len += samples.len(),
+            )
+            .await?;
+        println!();
+
+        let reply_secs = audio_len as f32 / turn.audio_sample_rate as f32;
+        let tps = if turn.gen_ms > 0 {
+            turn.gen_tokens as f32 / (turn.gen_ms as f32 / 1000.0)
+        } else {
+            0.0
+        };
+        println!("\n── converse benchmark (one turn, --input) ──");
+        println!(
+            "  STT   {:>6} ms   ({:.1}× realtime, {utt_secs:.2}s audio)",
+            stt_ms,
+            utt_secs / (stt_ms as f32 / 1000.0).max(1e-3)
+        );
+        println!(
+            "  LLM   {:>6} ms   ({} tok, {tps:.1} tok/s)",
+            turn.gen_ms, turn.gen_tokens
+        );
+        if speak {
+            let rtf = (turn.tts_ms as f32 / 1000.0) / reply_secs.max(1e-3);
+            println!(
+                "  TTS   {:>6} ms   ({tts_engine}: {reply_secs:.2}s audio, RTF {rtf:.2})",
+                turn.tts_ms
+            );
+        }
+        let total = stt_ms + turn.gen_ms + turn.tts_ms;
+        println!("  total {:>6} ms", total);
+        return Ok(());
     }
 
     // Mic stays on this thread (cpal Stream is !Send); the future runs on the
