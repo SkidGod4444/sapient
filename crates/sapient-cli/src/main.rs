@@ -81,6 +81,13 @@ enum Commands {
         /// terminal (rendering is on by default on interactive terminals).
         #[arg(long)]
         raw: bool,
+
+        /// Run a single chat turn for this prompt and exit (non-interactive).
+        /// Applies the model's chat template + end-of-turn stopping, so unlike
+        /// `run` the reply is a clean, bounded answer — and prints only the reply
+        /// to stdout, so it's easy to script (e.g. feed into `sapient speak`).
+        #[arg(short, long)]
+        prompt: Option<String>,
     },
 
     /// Transcribe an audio file to text with a Whisper model (speech-to-text).
@@ -427,6 +434,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             speculative,
             draft_model,
             raw,
+            prompt,
         } => {
             chat_command(
                 model.as_str(),
@@ -436,6 +444,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 speculative,
                 draft_model.as_deref(),
                 raw,
+                prompt.as_deref(),
             )
             .await
         }
@@ -624,9 +633,11 @@ async fn chat_command(
     speculative: bool,
     draft_model: Option<&str>,
     raw: bool,
+    prompt: Option<&str>,
 ) -> Result<()> {
     // If speculative decoding is requested, branch into the speculative path.
-    if speculative {
+    // (One-shot --prompt is handled by the standard path below.)
+    if speculative && prompt.is_none() {
         return chat_speculative_command(model, backend, verbose, draft_model, raw).await;
     }
 
@@ -713,6 +724,18 @@ async fn chat_command(
     }
     if let Some(pb) = load_spinner {
         pb.finish_and_clear();
+    }
+
+    // One-shot mode: run a single chat turn (chat template + end-of-turn EOS, so
+    // the reply is bounded and well-formed) and print ONLY the reply to stdout so
+    // it's clean to capture in a script. Status/spinners already go to stderr.
+    if let Some(p) = prompt {
+        let reply = pipeline
+            .chat(&[ChatMessage::user(p)])
+            .await
+            .context("one-shot chat generation failed")?;
+        println!("{}", reply.trim());
+        return Ok(());
     }
 
     let arch = format!("{:?}", pipeline.arch());
