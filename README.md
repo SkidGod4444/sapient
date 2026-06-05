@@ -95,8 +95,10 @@ sapient transcribe whisper-base long.wav --timestamps     # long-audio re-seek
 sapient transcribe whisper-base clip.wav --beam-size 5    # beam search
 
 # Text-to-speech — Kokoro-82M (real-time on CPU, non-autoregressive StyleTTS2 + ISTFTNet)
-sapient speak kokoro-82m "Hello, this is sapient speaking." -o hello.wav
+# Speaks aloud through the default output device AND writes the WAV. Add --no-play to only write.
+sapient speak kokoro-82m "Hello, this is sapient speaking."             # plays + writes speech.wav
 sapient speak kokoro-82m "The quick brown fox." --voice af_bella -o fox.wav
+sapient speak kokoro-82m "Save it, don't play it." --no-play -o out.wav  # write only
 #   54 voices (af_heart, af_bella, am_michael, bf_emma, …); pure-Rust G2P, no espeak
 
 # Text-to-speech — Orpheus-3B (Llama-3.2 → SNAC codec; richer voice, slow on CPU)

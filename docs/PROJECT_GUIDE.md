@@ -311,6 +311,9 @@ tokens, streams text, and stops at the right time.
   phonemes via the pure-Rust `misaki-rs` G2P (no espeak) → `KokoroModel` (one non-autoregressive
   forward pass) → 24 kHz WAV. `from_default()` pulls the converted safetensors mirror (or
   `SAPIENT_KOKORO_DIR`). Powers `sapient speak kokoro-82m` and is the default `converse --speak` TTS.
+  `sapient speak` **plays the synthesized audio through the speaker by default** (and still writes
+  the WAV); pass `--no-play` to write only. Playback uses the same `SpeakerPlayback` as `converse`
+  and degrades gracefully when there's no output device or the binary lacks the `audio-io` feature.
 - `sampler.rs` — **how to pick the next token**: greedy (highest score), temperature,
   top-k, top-p, and repetition penalty.
 - `kv_cache.rs` — the memory notebook (KV cache) helpers. As of v0.2.9 the cache is allocated

@@ -64,7 +64,7 @@ pub use sapient_audio::{
     microphone_guidance, open_privacy_settings, request_microphone, MicCapture, MicPermission,
     SpeakerPlayback,
 };
-pub use sapient_audio::{EnergyVad, VadConfig};
+pub use sapient_audio::{write_wav, EnergyVad, VadConfig};
 pub use sapient_models::{mac_gpu_support, LlmBackendKind as GenerationBackend, MacGpuSupport};
 pub use sentence::SentenceChunker;
 pub use speak::{SpeakPipeline, DEFAULT_ORPHEUS_VOICE, ORPHEUS_VOICES};

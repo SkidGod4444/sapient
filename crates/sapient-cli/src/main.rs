@@ -176,6 +176,10 @@ enum Commands {
         /// `auto` uses the binary's compiled accelerator (GPU build → GPU).
         #[arg(short, long, default_value = "auto")]
         backend: String,
+
+        /// Write the WAV but don't play it through the speaker.
+        #[arg(long)]
+        no_play: bool,
     },
 
     /// Download a model from HuggingFace Hub to the local cache.
@@ -483,7 +487,8 @@ async fn dispatch(cli: Cli) -> Result<()> {
             output,
             voice,
             backend,
-        } => speak_command(model.as_str(), &text, &output, &voice, &backend).await,
+            no_play,
+        } => speak_command(model.as_str(), &text, &output, &voice, &backend, no_play).await,
         Commands::Pull { model } => pull_command(model.as_str(), cli.verbose).await,
         Commands::List => list_command(),
         Commands::Models => models_command(),
@@ -1524,9 +1529,10 @@ async fn speak_command(
     output: &std::path::Path,
     voice: &str,
     backend: &str,
+    no_play: bool,
 ) -> Result<()> {
     if is_kokoro_model(model) {
-        return speak_kokoro_command(text, output, voice).await;
+        return speak_kokoro_command(text, output, voice, no_play).await;
     }
     // `speak` is text-to-SPEECH. A speech-to-text (Whisper) model has no TTS
     // weights and would otherwise fail cryptically ("architecture Whisper does
@@ -1565,29 +1571,93 @@ async fn speak_command(
     let synth = ui::spinner(format!("synthesising ({voice})…"));
     let text = text.to_owned();
     let voice = voice.to_owned();
-    let out_path = output.to_path_buf();
-    let (n, sample_rate) = tokio::task::spawn_blocking(move || {
-        let n = pipeline.speak_to_wav(&text, &voice, &out_path)?;
-        Ok::<_, anyhow::Error>((n, pipeline.sample_rate()))
+    let (samples, sample_rate) = tokio::task::spawn_blocking(move || {
+        let sr = pipeline.sample_rate();
+        let samples = pipeline.speak(&text, &voice)?;
+        Ok::<_, anyhow::Error>((samples, sr))
     })
     .await
     .context("speak task panicked")??;
     drop(synth);
 
-    let secs = n as f32 / sample_rate as f32;
+    write_and_play_speech(&samples, sample_rate, output, no_play).await
+}
+
+/// Write `samples` to `out` as a 16-bit WAV and — unless `no_play` — play them
+/// through the default output device. Playback needs the `audio-io` feature; a
+/// build without it (or a headless box with no output device) just writes the
+/// file and prints a note. Mirrors `converse`'s drain-then-tail wait so the
+/// last buffer finishes before the command returns.
+async fn write_and_play_speech(
+    samples: &[f32],
+    sample_rate: u32,
+    out: &std::path::Path,
+    no_play: bool,
+) -> Result<()> {
+    sapient_generate::write_wav(out, samples, sample_rate)?;
+    let secs = samples.len() as f32 / sample_rate.max(1) as f32;
     println!(
         "✓ wrote {} ({:.1}s, {} Hz)",
-        output.display(),
+        out.display(),
         secs,
         sample_rate
     );
+
+    if no_play || samples.is_empty() {
+        return Ok(());
+    }
+
+    #[cfg(feature = "audio-io")]
+    {
+        let samples = samples.to_vec();
+        tokio::task::spawn_blocking(move || play_samples_blocking(&samples, sample_rate))
+            .await
+            .context("playback task panicked")??;
+    }
+    #[cfg(not(feature = "audio-io"))]
+    {
+        ui::hint(
+            "this build has no audio output (compiled without `audio-io`); saved to file only",
+        );
+    }
+    Ok(())
+}
+
+/// Blocking playback of mono `samples` through the default output device, waiting
+/// for the queue to drain (+ a short tail) before returning. Runs inside
+/// `spawn_blocking` since it sleeps. A missing output device is a soft failure
+/// (the WAV is already written) — we print a hint instead of erroring.
+#[cfg(feature = "audio-io")]
+fn play_samples_blocking(samples: &[f32], sample_rate: u32) -> Result<()> {
+    use sapient_generate::SpeakerPlayback;
+    let player = match SpeakerPlayback::default_output() {
+        Ok(p) => p,
+        Err(e) => {
+            ui::hint(format!("no audio output device ({e}); saved to file only"));
+            return Ok(());
+        }
+    };
+    let spin = ui::spinner("playing…".to_string());
+    player.submit(samples, sample_rate)?;
+    // Wait for the device callback to consume the queue, then a small tail so the
+    // last buffer actually finishes on the hardware.
+    while player.pending_secs() > 0.05 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    drop(spin);
     Ok(())
 }
 
 /// Synthesize with Kokoro-82M (non-autoregressive, real-time). Pulls the
 /// converted safetensors mirror (or `SAPIENT_KOKORO_DIR`), runs the pure-Rust
 /// StyleTTS2 + ISTFTNet forward, and writes a 24 kHz WAV.
-async fn speak_kokoro_command(text: &str, output: &std::path::Path, voice: &str) -> Result<()> {
+async fn speak_kokoro_command(
+    text: &str,
+    output: &std::path::Path,
+    voice: &str,
+    no_play: bool,
+) -> Result<()> {
     use sapient_generate::converse::Tts;
     use sapient_generate::{KokoroTts, DEFAULT_KOKORO_VOICE};
     // `--voice` defaults to the Orpheus default ("tara"); map that to Kokoro's.
@@ -1603,18 +1673,16 @@ async fn speak_kokoro_command(text: &str, output: &std::path::Path, voice: &str)
 
     let synth = ui::spinner(format!("synthesising ({voice})…"));
     let text = text.to_owned();
-    let out_path = output.to_path_buf();
-    let (n, sr) = tokio::task::spawn_blocking(move || {
-        let n = tts.speak_to_wav(&text, &out_path)?;
-        Ok::<_, anyhow::Error>((n, tts.sample_rate()))
+    let (samples, sr) = tokio::task::spawn_blocking(move || {
+        let sr = tts.sample_rate();
+        let samples = tts.synthesize(&text)?;
+        Ok::<_, anyhow::Error>((samples, sr))
     })
     .await
     .context("kokoro speak task panicked")??;
     drop(synth);
 
-    let secs = n as f32 / sr as f32;
-    println!("✓ wrote {} ({:.1}s, {} Hz)", output.display(), secs, sr);
-    Ok(())
+    write_and_play_speech(&samples, sr, output, no_play).await
 }
 
 // ── converse (real-time speech-to-speech) ──────────────────────────────────────
