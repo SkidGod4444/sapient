@@ -43,10 +43,16 @@ pub fn albert_encode(
     let word = vget(w, "bert.embeddings.word_embeddings.weight")?;
     let pos = vget(w, "bert.embeddings.position_embeddings.weight")?;
     let tok_type = vget(w, "bert.embeddings.token_type_embeddings.weight")?; // [2, emb]
+    let word_rows = word.len() / emb_size;
+    let pos_rows = pos.len() / emb_size; // learned position-embedding capacity (~512)
     let mut emb = vec![0.0f32; l * emb_size];
     for (i, &id) in input_ids.iter().enumerate() {
-        let wbase = id as usize * emb_size;
-        let pbase = i * emb_size;
+        // Clamp both the token id and the sequence position to their tables — a
+        // stray out-of-range id or a sequence longer than the position embedding
+        // (callers should cap via `phonemes_to_ids`) must not index past the
+        // buffers and panic mid-synthesis.
+        let wbase = (id as usize).min(word_rows - 1) * emb_size;
+        let pbase = i.min(pos_rows - 1) * emb_size;
         for e in 0..emb_size {
             emb[i * emb_size + e] = word[wbase + e] + pos[pbase + e] + tok_type[e];
         }

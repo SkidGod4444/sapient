@@ -46,10 +46,13 @@ pub(super) fn text_encode(
     let l = input_ids.len();
     let h = cfg.hidden_dim; // 512
     let emb = get(w, "text_encoder.embedding.weight")?.to_f32_vec(); // [n_token, 512]
-                                                                     // embedding → [L, h] → transpose → [h, L]
+    let n_rows = emb.len() / h;
+    // embedding → [L, h] → transpose → [h, L]. Clamp the id so a stray out-of-range
+    // token (see `phonemes_to_ids`) can't index past the table and panic.
     let mut e = vec![0.0f32; l * h];
     for (i, &id) in input_ids.iter().enumerate() {
-        e[i * h..i * h + h].copy_from_slice(&emb[id as usize * h..id as usize * h + h]);
+        let row = (id as usize).min(n_rows - 1);
+        e[i * h..i * h + h].copy_from_slice(&emb[row * h..row * h + h]);
     }
     let mut x = transpose(&e, l, h); // [h, L]
 
@@ -118,14 +121,67 @@ impl KokoroModel {
         &self.config
     }
 
+    /// Largest token id the embedding tables can actually index. The two
+    /// embeddings keyed by `input_ids` — ALBERT's `word_embeddings` and the
+    /// text-encoder embedding — must both accept the id, so the safe bound is
+    /// the smaller row count. Used to drop ids the model can't embed.
+    fn embedding_vocab_len(&self) -> usize {
+        let rows = |k: &str| {
+            self.weights
+                .get(k)
+                .map(|t| t.shape().dims()[0])
+                .unwrap_or(usize::MAX)
+        };
+        rows("bert.embeddings.word_embeddings.weight").min(rows("text_encoder.embedding.weight"))
+    }
+
+    /// Max inner phoneme count a single forward pass can encode. ALBERT's learned
+    /// position embedding has a fixed capacity (~512 rows); the pad-wrapped id
+    /// sequence (`+2`) must fit inside it, so longer inputs are truncated rather
+    /// than indexing past the table and panicking. (The reference Kokoro chunks
+    /// long text into ≤510-phoneme segments — truncation is the minimal guard.)
+    fn max_inner_phonemes(&self) -> usize {
+        self.weights
+            .get("bert.embeddings.position_embeddings.weight")
+            .map(|t| t.shape().dims()[0].saturating_sub(2))
+            .unwrap_or(usize::MAX)
+    }
+
     /// Map a phoneme string to token ids: `[0, vocab[c]…, 0]` (pad-wrapped),
     /// skipping characters absent from the vocab. Returns the inner phoneme count
     /// too (for voice-pack indexing).
+    ///
+    /// Also drops any id the embedding tables can't index. A mirror's `config.json`
+    /// `vocab` can map a rare IPA symbol to an id ≥ the embedding row count
+    /// (observed: id 512 with a 512-row table), which previously panicked with
+    /// "index out of bounds" mid-synthesis; skipping it (like an unknown char)
+    /// just omits that one phoneme.
     pub fn phonemes_to_ids(&self, phonemes: &str) -> (Vec<u32>, usize) {
-        let inner: Vec<u32> = phonemes
+        let vocab_len = self.embedding_vocab_len() as u32;
+        let mut dropped = 0usize;
+        let mut inner: Vec<u32> = phonemes
             .chars()
             .filter_map(|c| self.config.vocab.get(&c.to_string()).copied())
+            .filter(|&id| {
+                let ok = id < vocab_len;
+                if !ok {
+                    dropped += 1;
+                }
+                ok
+            })
             .collect();
+        if dropped > 0 {
+            tracing::warn!("kokoro: dropped {dropped} phoneme id(s) ≥ embedding vocab {vocab_len}");
+        }
+        // Cap to the position-embedding capacity so a long reply can't overflow it.
+        let max_inner = self.max_inner_phonemes();
+        if inner.len() > max_inner {
+            tracing::warn!(
+                "kokoro: truncating {} phonemes to {max_inner} (position-embedding limit)",
+                inner.len()
+            );
+            inner.truncate(max_inner);
+        }
         let n = inner.len();
         let mut ids = Vec::with_capacity(n + 2);
         ids.push(0);
