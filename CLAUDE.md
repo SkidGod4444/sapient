@@ -154,6 +154,8 @@ Q6_K stores **16 int8 scales per 256-weight super-block** (one per 16-element gr
 ### Model registry (curated, not open)
 `sapient-hub/src/registry.rs` contains a hardcoded `CATALOG` of `SupportedModel` entries. Every model resolves through `resolve_model_alias` — unrecognised names error with the catalog list. Fuzzy matching (prefix + Levenshtein) handles near-miss typos. Add a model by: (1) verify its arch is supported in a forward engine, (2) add a `SupportedModel` row with `openhorizon/*` branding.
 
+**Capability category (`ModelCategory`).** `SupportedModel::category()` buckets each model by `family`: `Whisper`→`SpeechToText`, `Orpheus`/`Kokoro`→`TextToSpeech`, everything else→`Chat`. This drives two things: (1) `sapient models` prints **three grouped sections** (Text generation / Speech-to-text / Text-to-speech), each with its own run hint, instead of one flat table; (2) command validation — `speak_command` rejects a non-TTS model up front (e.g. `sapient speak whisper-small` → clear "is a speech-to-text model, use `sapient transcribe`" error, not the cryptic "architecture Whisper does not yet have a native forward engine"). Mirrors the existing `converse --stt` Whisper-family check. **Kokoro-82M is now a catalog entry** (`openhorizon/kokoro-82m` → `sai1974dev/kokoro-82m-safetensors`, family `Kokoro`) so it shows in `sapient models`; the CLI still routes it via `is_kokoro_model()` (it loads from the safetensors mirror, not the registry repo path).
+
 ### GGUF-only repos
 When `from_pretrained` downloads a GGUF-only repo (no `config.json`), the hub client sets `config_path` to the GGUF file itself. The pipeline detects this via extension and routes to `from_gguf_opts`, bypassing `ModelInfo::from_config_file`.
 

@@ -1077,40 +1077,65 @@ fn list_command() -> Result<()> {
 }
 
 fn models_command() -> Result<()> {
+    use sapient_hub::registry::ModelCategory;
+
     let catalog = sapient_hub::registry::catalog();
     let cached = hub::list_cached_models().unwrap_or_default();
 
-    let rows: Vec<Vec<String>> = catalog
-        .iter()
-        .map(|m| {
-            let status = if cached.iter().any(|c| c == m.alias) {
-                "downloaded".to_string()
-            } else if m.gated {
-                "gated".to_string()
-            } else {
-                "—".to_string()
-            };
-            // Show the real on-disk size if downloaded, else an estimate.
-            let cached_bytes = hub::cached_model_size(m.alias);
-            let download = if cached_bytes > 0 {
-                format!("{:.1} GB", cached_bytes as f64 / 1e9)
-            } else {
-                fmt_gb(estimate_download_gb(m.params))
-            };
-            vec![
-                m.alias.to_string(),
-                m.family.to_string(),
-                m.params.to_string(),
-                download,
-                status,
-            ]
-        })
-        .collect();
+    let row_for = |m: &sapient_hub::registry::SupportedModel| -> Vec<String> {
+        let status = if cached.iter().any(|c| c == m.alias) {
+            "downloaded".to_string()
+        } else if m.gated {
+            "gated".to_string()
+        } else {
+            "—".to_string()
+        };
+        // Show the real on-disk size if downloaded, else an estimate.
+        let cached_bytes = hub::cached_model_size(m.alias);
+        let download = if cached_bytes > 0 {
+            format!("{:.1} GB", cached_bytes as f64 / 1e9)
+        } else {
+            fmt_gb(estimate_download_gb(m.params))
+        };
+        vec![
+            m.alias.to_string(),
+            m.family.to_string(),
+            m.params.to_string(),
+            download,
+            status,
+        ]
+    };
 
-    println!("\nSupported models ({})\n", catalog.len());
-    ui::print_table(&["MODEL", "FAMILY", "SIZE", "DOWNLOAD", "STATUS"], &rows);
+    println!("\nSupported models ({})", catalog.len());
+
+    // Group into capability sections so STT/TTS models are clearly separated
+    // from chat models (and from each other).
+    let sections = [
+        (ModelCategory::Chat, "sapient chat <model>"),
+        (
+            ModelCategory::SpeechToText,
+            "sapient transcribe <model> <audio>",
+        ),
+        (
+            ModelCategory::TextToSpeech,
+            "sapient speak <model> \"<text>\"",
+        ),
+    ];
+
+    for (cat, run_hint) in sections {
+        let rows: Vec<Vec<String>> = catalog
+            .iter()
+            .filter(|m| m.category() == cat)
+            .map(row_for)
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        println!("\n{} ({})\n", cat.label(), rows.len());
+        ui::print_table(&["MODEL", "FAMILY", "SIZE", "DOWNLOAD", "STATUS"], &rows);
+        ui::hint(format!("run with:  {run_hint}"));
+    }
     println!();
-    ui::hint("run any of these with:  sapient chat <model>");
     Ok(())
 }
 
@@ -1502,6 +1527,28 @@ async fn speak_command(
 ) -> Result<()> {
     if is_kokoro_model(model) {
         return speak_kokoro_command(text, output, voice).await;
+    }
+    // `speak` is text-to-SPEECH. A speech-to-text (Whisper) model has no TTS
+    // weights and would otherwise fail cryptically ("architecture Whisper does
+    // not yet have a native forward engine"), so catch the mix-up here.
+    if let Some(m) = sapient_hub::registry::lookup(model) {
+        use sapient_hub::registry::ModelCategory;
+        match m.category() {
+            ModelCategory::TextToSpeech => {}
+            ModelCategory::SpeechToText => anyhow::bail!(
+                "'{model}' is a speech-to-text (Whisper) model, not a text-to-speech \
+                 model. To synthesize speech use a TTS model: sapient speak kokoro-82m \
+                 \"<text>\" (real-time) or sapient speak orpheus-3b \"<text>\". \
+                 To transcribe audio with '{model}', use: sapient transcribe."
+            ),
+            ModelCategory::Chat => anyhow::bail!(
+                "'{model}' is a {} text-generation model, not a text-to-speech model. \
+                 Use a TTS model: sapient speak kokoro-82m \"<text>\" or \
+                 sapient speak orpheus-3b \"<text>\". To chat with '{model}', use: \
+                 sapient chat {model}.",
+                m.family
+            ),
+        }
     }
     if !ORPHEUS_VOICES.contains(&voice) {
         anyhow::bail!(

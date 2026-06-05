@@ -228,7 +228,11 @@ let text = p.generate_with_config("Write a haiku about Rust", &cfg).await?;
 SAPIENT ships a **curated registry** — every model below is one whose architecture is
 implemented and verified in the native generation engine. Each `openhorizon/*` alias
 resolves to the upstream Hugging Face repository it downloads from. Run `sapient models`
-to see this list (and which models you've already downloaded) at any time.
+to see this list (and which models you've already downloaded) at any time — it's grouped
+into **Text generation (chat)**, **Speech-to-text (transcribe)**, and **Text-to-speech
+(speak)** sections so it's clear which command each model is for. Pointing a command at the
+wrong category fails fast with a clear hint (e.g. `sapient speak whisper-small …` → "that's
+a speech-to-text model, use `sapient transcribe`").
 
 | Alias | Family | Size | Notes |
 |---|---|---|---|

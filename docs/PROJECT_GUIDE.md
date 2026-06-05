@@ -217,7 +217,12 @@ Talks to Hugging Face, downloads model files, caches them, and keeps the **regis
 which models SAPIENT supports.
 - `lib.rs` — front door.
 - `registry.rs` — the **curated list** of supported models. Maps friendly `openhorizon/…`
-  aliases to real Hugging Face repos (e.g. `openhorizon/phi-2` → `microsoft/phi-2`).
+  aliases to real Hugging Face repos (e.g. `openhorizon/phi-2` → `microsoft/phi-2`). Each
+  entry also has a **capability category** (`SupportedModel::category()` → `Chat` /
+  `SpeechToText` / `TextToSpeech`, derived from `family`): `sapient models` groups its
+  output by category, and `sapient speak` uses it to reject a non-TTS model with a clear
+  hint instead of a cryptic load failure. Kokoro-82M is a catalog entry too
+  (`openhorizon/kokoro-82m`).
 - `client.rs` — the high-level "download this model" client.
 - `download.rs` — the fast downloader (parallel chunks); reads the `SAPIENT_HUB_*` env vars.
 - `cache.rs` — where downloaded files are stored on your disk.

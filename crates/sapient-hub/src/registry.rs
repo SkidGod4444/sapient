@@ -29,6 +29,40 @@ pub struct SupportedModel {
     pub extra_aliases: &'static [&'static str],
 }
 
+/// Broad capability bucket for a model — drives `sapient models` grouping and
+/// command-level validation (e.g. `speak` rejects a speech-to-text model).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelCategory {
+    /// Text generation / chat — the default `sapient chat` path.
+    Chat,
+    /// Speech-to-text (`sapient transcribe`) — Whisper.
+    SpeechToText,
+    /// Text-to-speech (`sapient speak`) — Orpheus, Kokoro.
+    TextToSpeech,
+}
+
+impl ModelCategory {
+    /// Short human label for display headers.
+    pub fn label(self) -> &'static str {
+        match self {
+            ModelCategory::Chat => "Text generation (chat)",
+            ModelCategory::SpeechToText => "Speech-to-text (transcribe)",
+            ModelCategory::TextToSpeech => "Text-to-speech (speak)",
+        }
+    }
+}
+
+impl SupportedModel {
+    /// Which capability bucket this model belongs to, derived from `family`.
+    pub fn category(&self) -> ModelCategory {
+        match self.family {
+            "Whisper" => ModelCategory::SpeechToText,
+            "Orpheus" | "Kokoro" => ModelCategory::TextToSpeech,
+            _ => ModelCategory::Chat,
+        }
+    }
+}
+
 /// The full catalog of supported models.
 ///
 /// Architectures in use:
@@ -290,6 +324,17 @@ pub const CATALOG: &[SupportedModel] = &[
         params: "3B",
         gated: false,
         extra_aliases: &["orpheus-3b", "orpheus", "orpheus-tts"],
+    },
+    // ── Kokoro-82M TTS (text-to-speech — `sapient speak`) ────────────────────
+    // Non-autoregressive StyleTTS2 + ISTFTNet; real-time on CPU. Converted
+    // safetensors mirror; the default voice for `converse --speak`.
+    SupportedModel {
+        alias: "openhorizon/kokoro-82m",
+        repo_id: "sai1974dev/kokoro-82m-safetensors",
+        family: "Kokoro",
+        params: "82M",
+        gated: false,
+        extra_aliases: &["kokoro-82m", "kokoro", "kokoro-tts"],
     },
 ];
 
