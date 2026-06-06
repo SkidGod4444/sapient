@@ -166,11 +166,11 @@ SAPIENT_HUB_MAX_PARALLEL=2 sapient pull <model>
 
 ## Rust API
 
-Add to `Cargo.toml`:
+SAPIENT is **not published to crates.io** — depend on it via git:
 
 ```toml
 [dependencies]
-sapient-generate = "0.2"
+sapient-generate = { git = "https://github.com/SkidGod4444/sapient" }
 tokio = { version = "1", features = ["full"] }
 ```
 

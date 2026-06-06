@@ -8,12 +8,16 @@
 > portability, curated registry, modern CLI, and edge-specific automation
 > (auto-pick quantization for available RAM, auto CPU/GPU offload, single static binary).
 
-## Where we are (v0.3.7)
+## Where we are (v0.4.4)
+- ✅ **On-device audio (Phase 6)** — `sapient transcribe` (Whisper STT), `sapient speak`
+  (Kokoro-82M real-time TTS + Orpheus-3B), and `sapient converse` (live mic→STT→LLM→reply, with
+  `--speak` voicing the reply via Kokoro). All pure-Rust, cross-platform, in the default binary.
+- ✅ **One-shot `sapient chat -p "<text>"`** — single templated turn, reply-only to stdout (scriptable).
 - ✅ **`MlxForwardEngine`** — native lazy-graph Metal forward pass for Llama/Qwen GGUF models. All activations stay on the GPU; one `eval()` per token; MLX fused SDPA. **~187 tok/s decode + 21 ms TTFT on Qwen2.5-0.5B Q4 (9.4× the CPU path); beats Ollama on 0.5B decode and has the lowest TTFT of any engine measured; within 1.3–1.5× of mlx-lm.** See [BENCHMARKS.md](BENCHMARKS.md).
 - ✅ RoPE-axis correctness fix (transpose to `[1, n_heads, seq, head_dim]` before `fast::rope`).
 - ✅ **Engine reuse** — pipeline holds the engine in `Arc<Mutex<…>>`; streaming no longer rebuilds/re-quantizes the model per call (**TTFT 30–44× faster**, 1.5B: 3 s → 70 ms).
 - ✅ Correct CPU + Metal inference for Phi & Llama/Qwen families (F16/BF16 safetensors + GGUF Q4/Q8).
-- ✅ Curated registry, modern CLI (`chat`, `pull`, `run`, `models`, `serve`, `reset`, `rm`, `update`, `devices`), self-update. Distributed as prebuilt GitHub release binaries (not crates.io).
+- ✅ Curated registry, modern CLI (`chat`, `transcribe`, `speak`, `converse`, `pull`, `run`, `models`, `serve`, `reset`, `rm`, `update`, `devices`, `stats`), self-update. Distributed as prebuilt GitHub release binaries (not crates.io).
 - ✅ GGUF Q4_0/Q8_0/K-quant loading with mmap support (models larger than RAM).
 - ✅ Flash-Edge attention (online-softmax, O(head_dim) memory, NEON).
 - ✅ Q8_0 KV cache (in-place, 4× RAM reduction vs F32, zero per-step allocation).
@@ -197,13 +201,15 @@ ONNX-wrapper crates (C++ dep) don't offer together.
   - Verified **end-to-end** via the speak→transcribe round-trip (Orpheus speech →
     Whisper STT → original text). (Orpheus 3B Apache-2.0; OuteTTS-1.0 1B Llama but
     CC-BY-NC; Kani 400M but non-Llama LFM2.) Kokoro dropped — worst fit on every axis.
-- **6e — STS** (voice-in/text-out DONE): ✅ `EnergyVad` + `SentenceChunker` +
+- **6e — STS** ✅ DONE: `EnergyVad` + `SentenceChunker` +
   `ConversePipeline` (STT→LLM→TTS, `Tts` trait) + `cpal` `MicCapture`/`SpeakerPlayback`
-  (behind the `audio-io` feature) + `sapient converse <llm> [--stt] [--language]
-  [--system]` (mic → VAD utterance → STT → LLM → printed reply; Ctrl-C to stop).
-  Remaining: wrap the now-shipped `SpeakPipeline` (6d) as a `Tts` impl so `converse`
-  speaks the reply (`turn.audio` → `SpeakerPlayback`); optional barge-in + `earshot`
-  VAD upgrade.
+  (the `audio-io` feature, **on by default**) + `sapient converse <llm> [--stt] [--tts]
+  [--language] [--system] [--speak]` (mic → VAD utterance → STT → streamed LLM reply → optional
+  spoken reply; Ctrl-C to stop). Live UX: TTY mic-level meter, OS mic-permission request,
+  token-by-token reply streaming, sentence-streamed TTS overlapped with generation, `--input`
+  WAV benchmark path. **`--speak` voices the reply** (Kokoro by default — real-time; `--tts
+  orpheus` for the richer 3B voice). `--stt` is validated to be a Whisper model.
+  Remaining (optional): barge-in + `earshot` VAD upgrade.
 - **6f — Kokoro-82M, the real-time TTS** ✅ DONE: the Orpheus/SNAC path (6d) is
   autoregressive (~0.18× real-time on Metal — too slow for live `converse`). Revisited
   Kokoro after a deep-research pass and **ported it pure-Rust** (`forward/kokoro/`):

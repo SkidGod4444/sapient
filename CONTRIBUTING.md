@@ -52,7 +52,7 @@ By contributing code, documentation, or other materials, you agree that your con
 
 | Tool | Version | Notes |
 |---|---|---|
-| Rust | **1.75+** | Install via [rustup](https://rustup.rs/) |
+| Rust | **1.82+** | Install via [rustup](https://rustup.rs/) — matches the workspace `rust-version` |
 | Git | any recent | |
 | ALSA dev headers | Linux only | `sudo apt-get install libasound2-dev` — needed because `sapient-cli`'s default `audio-io` feature (live `sapient converse`) links `cpal`/ALSA. macOS/Windows need nothing extra. |
 | [just](https://github.com/casey/just) | optional | Task runner — see `justfile` |

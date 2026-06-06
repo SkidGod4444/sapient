@@ -31,10 +31,27 @@ SAPIENT is written in a programming language called **Rust** 🦀, which is love
 
 ---
 
-## 1b. What's new in v0.2.9 (current release)
+## 1b. What's new since the first release
 
-A lot changed between the first public release and today! Here is a quick summary before we
-dive into the internals.
+A lot changed between the first public release and today (now **v0.4.x**)! Here is a quick
+summary before we dive into the internals.
+
+**On-device audio (v0.4.x) — the biggest recent addition.** SAPIENT is no longer text-only:
+- **Speech-to-text** — `sapient transcribe <whisper-model> <audio>` runs a native Whisper
+  encoder/decoder (streaming, language auto-detect, `--timestamps`, `--beam-size`).
+- **Text-to-speech** — `sapient speak`: **Kokoro-82M** (non-autoregressive StyleTTS2 + ISTFTNet,
+  **real-time on CPU**) and **Orpheus-3B** (Llama-3.2 → SNAC codec, richer but slow). Plays the
+  audio aloud by default; `--no-play` writes the WAV only.
+- **Speech-to-speech** — `sapient converse <llm> --stt <whisper>`: a live mic → STT → LLM → reply
+  loop with a TTY mic-level meter, streamed reply, and OS mic-permission request; `--speak` voices
+  the reply (Kokoro by default, real-time). Ships in the default binary on macOS/Windows/Linux/Pi.
+- **One-shot chat** — `sapient chat <model> -p "<text>"` runs a single templated turn and prints
+  only the reply to stdout (scriptable, e.g. piping into `sapient speak`).
+
+**Cross-platform GPU.** Beyond Apple's MLX/Metal (`MlxForwardEngine`), the portable
+`WgpuForwardEngine` (Vulkan/DX12/Metal via wgpu, `--features wgpu --backend wgpu`) accelerates
+Intel/AMD/Nvidia — and Intel Macs ship a `-gpu` (wgpu→Metal) build. There's also a live
+`sapient stats` resource monitor.
 
 **Performance leap (Sprint 1–3 engine overhaul):**
 - Flash-Edge attention: online-softmax tiled algorithm — O(head_dim) working memory, NEON `vfmaq_f32`.
@@ -211,6 +228,12 @@ model reads.
 - `mel.rs` — turns the waveform into a **log-mel spectrogram** (a heat-map of which pitches are
   loud over time), exactly the way OpenAI Whisper does, using a real FFT (`realfft`).
 - `config.rs` — the front-end settings (window size, hop, number of mel bands).
+- `write_wav` — writes synthesized TTS samples to a 24 kHz WAV file.
+- Live audio I/O (behind the **`audio-io`** feature, on by default in `sapient-cli`): `MicCapture`
+  and `SpeakerPlayback` (`cpal` 0.15 — CoreAudio/WASAPI/ALSA), an `EnergyVad` utterance segmenter,
+  and `permissions.rs` (the AVFoundation/TCC microphone-permission prompt on macOS). These power
+  `sapient converse` and audio playback for `sapient speak`. Linux needs `libasound2-dev` at build
+  time; macOS/Windows need no extra system libs.
 
 ### 🌐 `sapient-hub` — downloading & managing models
 Talks to Hugging Face, downloads model files, caches them, and keeps the **registry** of
@@ -256,7 +279,7 @@ The real generation math: how to run a Phi or Llama-style model layer by layer.
     Silicon + `--features mlx`). Runs the whole Llama/Qwen forward pass as one MLX
     lazy graph — every activation stays on the GPU, `eval()` runs once per token.
     Auto-selected for GGUF Llama/Qwen models when the Metal backend is active.
-    ~168 tok/s on Qwen2.5-0.5B Q4 (8.6× the CPU path). See `docs/BENCHMARKS.md`.
+    ~187 tok/s on Qwen2.5-0.5B Q4 (9.4× the CPU path). See `docs/BENCHMARKS.md`.
   - `forward/wgpu_engine.rs` — the **cross-platform GPU engine** (`WgpuForwardEngine`,
     `--features wgpu`, `--backend wgpu`). The same idea as the MLX engine but portable
     via wgpu/WGSL (Vulkan/DX12/Metal) so it runs on Intel/AMD/Nvidia too. Weights upload
@@ -381,10 +404,13 @@ Enabled with `--features wgpu` and selected via `--backend wgpu`.
 ### 🖥️ `sapient-cli` — the app you actually run
 The `sapient` command-line program: parses commands, shows the modern UI, and calls the
 libraries above.
-- `main.rs` — defines all commands (`chat`, `transcribe`, `pull`, `run`, `list`, `models`,
-  `info`, `serve`, `login`, `update`, `reset`, `rm`, …) and wires them up. `transcribe`
-  (aliases `stt`/`asr`) is speech-to-text: `sapient transcribe whisper-base clip.wav`.
-  The interactive chat
+- `main.rs` — defines all commands (`chat`, `transcribe`, `speak`, `converse`, `pull`, `run`,
+  `list`, `models`, `info`, `serve`, `login`, `update`, `reset`, `rm`, `stats`, `devices`,
+  `backend-info`, `bench-llm`, …) and wires them up. `transcribe` (aliases `stt`/`asr`) is
+  speech-to-text: `sapient transcribe whisper-base clip.wav`; `speak` is text-to-speech
+  (Kokoro/Orpheus, plays + writes a WAV); `converse` is the live mic→STT→LLM→reply voice loop;
+  `stats` (aliases `top`/`monitor`) is the live resource monitor. `chat -p "<text>"` runs a
+  single templated turn and exits (scriptable). The interactive chat
   REPL reads input with a `rustyline` line editor (`read_chat_line`) so pasting multi-line
   text no longer auto-submits — bracketed-paste mode inserts the paste into the buffer and
   only a real Enter sends it.
@@ -405,7 +431,11 @@ libraries above.
   `ServedModel::{Plain, Speculative}`; `--speculative [--draft-model <alias>]` serves every model
   with speculative decoding (reusing loaded engines, no per-request reload).
 - `update.rs` — `sapient update`: self-updates the binary from GitHub releases, with
-  GitHub API rate-limit fallback.
+  GitHub API rate-limit fallback. Knows the build variant (CPU / Metal / GPU) and offers the
+  accelerated build when the machine supports it.
+- `stats.rs` — `sapient stats` (aliases `top`/`monitor`): a ~1 Hz in-place TUI showing every
+  `sapient` process's CPU% + RSS, per-core bars, system memory, on-disk model-cache footprint,
+  and (on a GPU build) the detected accelerator. Ctrl-C to exit.
 
 ---
 
