@@ -21,7 +21,7 @@ pub mod registry;
 pub mod weights;
 
 pub use forward::{
-    mac_gpu_support, total_system_ram_bytes, AudioEngine, ForwardEngine, KokoroConfig, KokoroModel,
-    LlmBackendKind, MacGpuSupport, WhisperForward, KOKORO_SAMPLE_RATE,
+    mac_gpu_support, total_system_ram_bytes, AudioEngine, DecoderStreamInputs, ForwardEngine,
+    KokoroConfig, KokoroModel, LlmBackendKind, MacGpuSupport, WhisperForward, KOKORO_SAMPLE_RATE,
 };
 pub use registry::{build_graph, ModelGraph};

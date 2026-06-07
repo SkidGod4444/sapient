@@ -26,7 +26,7 @@ use sapient_hub::resolver::WeightFormat;
 use crate::gguf_weights::{load_gguf_hf_weights, load_gguf_hf_weights_mmap};
 
 pub use backend::{mac_gpu_support, total_system_ram_bytes, LlmBackendKind, MacGpuSupport};
-pub use kokoro::{KokoroConfig, KokoroModel, KOKORO_SAMPLE_RATE};
+pub use kokoro::{DecoderStreamInputs, KokoroConfig, KokoroModel, KOKORO_SAMPLE_RATE};
 pub use llama::LlamaForward;
 #[cfg(all(target_os = "macos", feature = "mlx"))]
 pub use mlx_engine::MlxForwardEngine;

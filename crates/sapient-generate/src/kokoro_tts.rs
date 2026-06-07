@@ -18,7 +18,7 @@ use anyhow::{anyhow, Context, Result};
 use misaki_rs::language::Language;
 use misaki_rs::G2P;
 use sapient_hub::HubClient;
-use sapient_models::{KokoroModel, KOKORO_SAMPLE_RATE};
+use sapient_models::{DecoderStreamInputs, KokoroModel, KOKORO_SAMPLE_RATE};
 
 use crate::converse::Tts;
 
@@ -138,6 +138,22 @@ impl KokoroTts {
             .g2p(text)
             .map_err(|e| anyhow!("kokoro G2P failed: {e:?}"))?;
         Ok(phonemes)
+    }
+
+    /// Streaming decoder-only path (duplex spike, gate 2): run the amortizable
+    /// backbone once for `text`, returning the decoder inputs. Decode time-slices
+    /// of it with [`Self::decode_prefix`].
+    pub fn prepare_stream(&self, text: &str) -> Result<DecoderStreamInputs> {
+        let phonemes = self.phonemize(text.trim())?;
+        self.model
+            .prepare_stream_phonemes(&phonemes, &self.voice, self.speed)
+    }
+
+    /// Decode only the first `frames` decoder time-steps of a prepared utterance
+    /// (the convolutional ISTFTNet decoder, the ~80% cost), returning the prefix
+    /// waveform. `frames` is clamped to the prepared length.
+    pub fn decode_prefix(&self, inp: &DecoderStreamInputs, frames: usize) -> Result<Vec<f32>> {
+        self.model.decode_prefix(inp, frames)
     }
 }
 

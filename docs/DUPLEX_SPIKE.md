@@ -91,6 +91,29 @@ but **~585 ms on the Pi** — at the very edge of the 600 ms budget *before* add
 look-ahead, and before the STT+LLM stages contend for the same 4 cores. So on the
 Pi, streaming-duplex non-AR is **borderline/NO-GO without decoder optimization**.
 
+## Gate 2 — decoder-only streaming (measured, M4)
+
+Implemented the decoder-only path: `KokoroModel::prepare_stream` runs the
+amortizable backbone once, `decode_prefix(frames)` runs **only** the convolutional
+ISTFTNet decoder over a time-slice (`crates/sapient-models/.../kokoro/model.rs`;
+surfaced on `KokoroTts`). The harness (`gate2_decoder_only`) measures the two
+quantities that turn the verdict from extrapolated to measured:
+
+- **Decoder-only latency for a ~0.3 s chunk: ~154 ms** (M4) — confirms the gate-1
+  extrapolation (~165 ms) directly.
+- **Minimum stable look-ahead** (decode prefix `[0..c]` vs growing right-context,
+  compared against full-context output):
+  - *strict* (<10⁻³): **does NOT converge within 128 frames (~3.2 s)**. The
+    max-diff trajectory falls $0.167\to\sim0.002$ but **non-monotonically** and
+    plateaus at $\sim$0.002–0.008 — evidence of a **global / length-dependent
+    component (likely the iSTFT boundary)**, so naive prefix-decoding is not
+    bit-stable. A streaming **overlap-add iSTFT** is required for bit-stable chunks.
+  - *perceptual* (<10⁻², ~1% full-scale): **16 frames (~400 ms audio)**.
+- **Verdict (M4): GO within 3× budget.** Latency-to-first-audio
+  $\approx 154\,\text{ms (decode)} + 400\,\text{ms (look-ahead)} = \mathbf{554\,ms}$
+  ($<600$\,ms; not within Moshi's 200 ms). The **look-ahead dominates** — cutting
+  it via a streaming overlap-add iSTFT is the highest-value next optimization.
+
 ## Refined verdict
 
 - **Whole-utterance chunking:** NO-GO on every device.
