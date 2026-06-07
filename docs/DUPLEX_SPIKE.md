@@ -67,12 +67,38 @@ Per-stage breakdown for "Hello there friend." (1.75 s audio,
    0.3 s chunk therefore extrapolates to **~165 ms** of decoder work — *within*
    the 600 ms budget, and approaching Moshi's 200 ms.
 
+## Device-class result: Raspberry Pi 5 (Cortex-A76)
+
+Same sentence ("Hello there friend.", 1.75 s audio), `sapient` 0.4.4 release
+binary, `SAPIENT_KOKORO_TIMING=1`:
+
+| stage         | M4 (ms) | Pi 5 (ms) | Pi/M4 |
+|---------------|---------|-----------|-------|
+| albert        | 50.7    | 184.0     | 3.6×  |
+| prosody       | 70.9    | 146.5     | 2.1×  |
+| f0/n          | 68.6    | 158.8     | 2.3×  |
+| text_encoder  | 17.3    | 40.1      | 2.3×  |
+| **decoder**   | 871.0   | **3410.3**| 3.9×  |
+| synth total   | ~1080   | ~3940     | 3.6×  |
+| **synth RTF** | **0.62**| **2.25**  | —     |
+
+**The "CPU-real-time" claim is device-class-dependent.** On a laptop-class M4 CPU
+non-AR synthesis is real-time (RTF 0.62); on a Pi 5 it is **2.25× too slow** even
+for whole-utterance non-AR synthesis. The decoder dominates on both (87% on Pi).
+Decoder cost: ~498 ms/s of audio on M4, **~1949 ms/s on Pi**. A 0.3 s streamed
+chunk with the backbone amortized extrapolates to ~165 ms on M4 (within budget)
+but **~585 ms on the Pi** — at the very edge of the 600 ms budget *before* adding
+look-ahead, and before the STT+LLM stages contend for the same 4 cores. So on the
+Pi, streaming-duplex non-AR is **borderline/NO-GO without decoder optimization**.
+
 ## Refined verdict
 
-- **Whole-utterance chunking:** NO-GO.
+- **Whole-utterance chunking:** NO-GO on every device.
 - **Streaming decoder on small (~0.3 s) chunks with amortized backbone:**
-  **PLAUSIBLE GO** by extrapolation (~165 ms/chunk), *pending* two unmeasured
-  quantities the next step must produce.
+  **device-class-dependent.** On laptop-class CPU (M4): **PLAUSIBLE GO** by
+  extrapolation (~165 ms/chunk). On a Pi 5: **borderline/NO-GO** (~585 ms/chunk
+  before look-ahead and before STT+LLM contention) — needs decoder optimization
+  first. Both pending the two unmeasured quantities below.
 
 ## Next steps (to convert PLAUSIBLE → measured GO/NO-GO)
 
