@@ -1111,6 +1111,232 @@ mod tests {
             .collect()
     }
 
+    // ---------------------------------------------------------------------
+    // Corruption-magnitude benchmark (differential-verification methodology).
+    //
+    // Each helper below RECONSTRUCTS a historical silent-correctness bug that
+    // SAPIENT shipped and later fixed (Q6_K scale mis-indexing, Q5_K 5th-bit
+    // mis-indexing, per-row activation quantization), so we can quantify the
+    // relative error each bug injects into a single matmul row vs the verified
+    // reference. The reconstructions are self-validated: the Q6_K variant must
+    // reproduce the documented magnitude (896 on the canonical block) before its
+    // error distribution is trusted. Run with:
+    //   cargo test -p sapient-backends-cpu --lib corruption_magnitude -- --nocapture
+    // ---------------------------------------------------------------------
+
+    // Deterministic LCG byte stream (no rand dependency).
+    fn lcg_bytes(seed: u64, n: usize) -> Vec<u8> {
+        let mut s = seed;
+        (0..n)
+            .map(|_| {
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (s >> 33) as u8
+            })
+            .collect()
+    }
+
+    fn rand_x(seed: u64, n: usize) -> Vec<f32> {
+        let mut s = seed;
+        (0..n)
+            .map(|_| {
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((s >> 33) as f32 / u32::MAX as f32) * 3.0 - 1.5
+            })
+            .collect()
+    }
+
+    // A realistic random Q6_K block: random ql/qh/scales, fixed small d.
+    fn rand_q6_k_block(seed: u64) -> Vec<u8> {
+        let mut blk = lcg_bytes(seed, Q6_K_BLOCK_BYTES);
+        blk[208..210].copy_from_slice(&f16::from_f32(0.04).to_le_bytes());
+        blk
+    }
+
+    fn rand_q5_k_block(seed: u64) -> Vec<u8> {
+        let mut blk = lcg_bytes(seed, Q5_K_BLOCK_BYTES);
+        blk[0..2].copy_from_slice(&f16::from_f32(0.05).to_le_bytes());
+        blk[2..4].copy_from_slice(&f16::from_f32(0.02).to_le_bytes());
+        blk
+    }
+
+    // Buggy Q6_K dot: one scale per 32-element sub-group (the shipped bug —
+    // sc[ib..ib+4], ib += 4 per 128-block), which only ever touches scales 0..7.
+    fn dot_q6_k_buggy(row_data: &[u8], x: &[f32]) -> f32 {
+        let mut acc = 0.0f32;
+        let mut x_off = 0usize;
+        for block in row_data.chunks_exact(Q6_K_BLOCK_BYTES) {
+            let ql = &block[0..128];
+            let qh = &block[128..192];
+            let sc = &block[192..208];
+            let d = f16::from_le_bytes([block[208], block[209]]).to_f32();
+            let (mut ql_off, mut qh_off, mut ib) = (0usize, 0usize, 0usize);
+            for _ in 0..(QK_K / 128) {
+                for l in 0..32 {
+                    let q1 = (((ql[ql_off + l] & 0x0F) | ((qh[qh_off + l] & 3) << 4)) as i32 - 32)
+                        as f32;
+                    let q2 = (((ql[ql_off + l + 32] & 0x0F) | (((qh[qh_off + l] >> 2) & 3) << 4))
+                        as i32
+                        - 32) as f32;
+                    let q3 = (((ql[ql_off + l] >> 4) | (((qh[qh_off + l] >> 4) & 3) << 4)) as i32
+                        - 32) as f32;
+                    let q4 = (((ql[ql_off + l + 32] >> 4) | (((qh[qh_off + l] >> 6) & 3) << 4))
+                        as i32
+                        - 32) as f32;
+                    acc += d * sc[ib] as i8 as f32 * q1 * x[x_off + l];
+                    acc += d * sc[ib + 1] as i8 as f32 * q2 * x[x_off + l + 32];
+                    acc += d * sc[ib + 2] as i8 as f32 * q3 * x[x_off + l + 64];
+                    acc += d * sc[ib + 3] as i8 as f32 * q4 * x[x_off + l + 96];
+                }
+                x_off += 128;
+                ql_off += 64;
+                qh_off += 32;
+                ib += 4;
+            }
+        }
+        acc
+    }
+
+    // Buggy Q5_K dot: read the 5th bit from a single qh[is/8] byte per 32-element
+    // sub-block (the shipped bug) instead of the per-element qh[l].
+    fn dot_q5_k_buggy(row_data: &[u8], x: &[f32]) -> f32 {
+        let mut acc = 0.0f32;
+        let mut x_off = 0usize;
+        for block in row_data.chunks_exact(Q5_K_BLOCK_BYTES) {
+            let d = f16::from_le_bytes([block[0], block[1]]).to_f32();
+            let dmin = f16::from_le_bytes([block[2], block[3]]).to_f32();
+            let scales = &block[4..16];
+            let qh = &block[16..48];
+            let ql = &block[48..Q5_K_BLOCK_BYTES];
+            let (mut ql_off, mut is) = (0usize, 0usize);
+            let (mut u1, mut u2): (u8, u8) = (1, 2);
+            for _ in 0..(QK_K / 64) {
+                let (sc1, m1) = get_scale_min_k4(is, scales);
+                let (d1, m1v) = (d * sc1 as f32, dmin * m1 as f32);
+                let (sc2, m2) = get_scale_min_k4(is + 1, scales);
+                let (d2, m2v) = (d * sc2 as f32, dmin * m2 as f32);
+                let qh_byte = qh[is / 8]; // BUG: one byte for all 32 elements
+                for l in 0..32 {
+                    let hi1 = if qh_byte & u1 != 0 { 16.0f32 } else { 0.0 };
+                    let hi2 = if qh_byte & u2 != 0 { 16.0f32 } else { 0.0 };
+                    acc += (d1 * ((ql[ql_off + l] & 0x0F) as f32 + hi1) - m1v) * x[x_off + l];
+                    acc += (d2 * ((ql[ql_off + l] >> 4) as f32 + hi2) - m2v) * x[x_off + l + 32];
+                }
+                x_off += 64;
+                ql_off += 32;
+                is += 2;
+                if is % 8 == 0 {
+                    u1 = 1;
+                    u2 = 2;
+                } else {
+                    u1 <<= 2;
+                    u2 <<= 2;
+                }
+            }
+        }
+        acc
+    }
+
+    fn rel_err(got: f32, reference: f32) -> f32 {
+        (got - reference).abs() / reference.abs().max(1e-6)
+    }
+
+    fn stats(v: &mut [f32]) -> (f32, f32, f32) {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mean = v.iter().sum::<f32>() / v.len() as f32;
+        let median = v[v.len() / 2];
+        let max = *v.last().unwrap();
+        (mean, median, max)
+    }
+
+    #[test]
+    fn corruption_magnitude_report() {
+        // --- Q6_K: self-validate the reconstruction reproduces the documented 896.
+        let mut canon = vec![0u8; Q6_K_BLOCK_BYTES];
+        for b in canon.iter_mut().take(128) {
+            *b = 0x11;
+        }
+        for b in canon.iter_mut().take(192).skip(128) {
+            *b = 0xAA;
+        }
+        for j in 0..16 {
+            canon[192 + j] = j as i8 as u8;
+        }
+        canon[208..210].copy_from_slice(&f16::from_f32(1.0).to_le_bytes());
+        let xo = vec![1.0f32; QK_K];
+        let buggy_canon = dot_q6_k_buggy(&canon, &xo);
+        assert!(
+            (buggy_canon - 896.0).abs() < 1e-3,
+            "Q6_K bug reconstruction infidelity: got {buggy_canon}, expected documented 896"
+        );
+        let correct_canon = dot_q6_k_row_f32(&canon, &xo);
+        println!("\n=== Corruption-magnitude benchmark (relative error vs verified reference) ===");
+        println!(
+            "[validate] Q6_K canonical block: correct={correct_canon} buggy={buggy_canon} \
+             rel_err={:.4}",
+            rel_err(buggy_canon, correct_canon)
+        );
+
+        // --- Q6_K: error distribution over 256 random super-blocks.
+        let nblk = 256;
+        let mut q6: Vec<f32> = (0..nblk)
+            .map(|i| {
+                let blk = rand_q6_k_block(0xC0DE_0000 + i as u64);
+                let x = rand_x(0xBEEF_0000 + i as u64, QK_K);
+                rel_err(dot_q6_k_buggy(&blk, &x), dot_q6_k_row_f32(&blk, &x))
+            })
+            .collect();
+        let (m, md, mx) = stats(&mut q6);
+        println!("Q6_K scale mis-index   (n={nblk}): mean={m:.3} median={md:.3} max={mx:.3}");
+
+        // --- Q5_K: error distribution over 256 random super-blocks.
+        let mut q5: Vec<f32> = (0..nblk)
+            .map(|i| {
+                let blk = rand_q5_k_block(0x5A5A_0000 + i as u64);
+                let x = rand_x(0x1357_0000 + i as u64, QK_K);
+                rel_err(dot_q5_k_buggy(&blk, &x), dot_q5_k_row_f32(&blk, &x))
+            })
+            .collect();
+        let (m, md, mx) = stats(&mut q5);
+        println!("Q5_K 5th-bit mis-index (n={nblk}): mean={m:.3} median={md:.3} max={mx:.3}");
+
+        // --- Activation quantization: per-row vs per-block as the outlier grows.
+        // Uses only the verified public kernels (no reconstruction).
+        #[cfg(target_arch = "aarch64")]
+        if std::arch::is_aarch64_feature_detected!("dotprod") {
+            let k = 4096;
+            let wf = rand_x(0xAAAA, k);
+            let w_blocks = q8_0_weight_row(&wf);
+            println!("Activation quant (Q8_0 W8A8, K={k}):  outlier   per-block   per-row");
+            for &mag in &[1.0f32, 5.0, 10.0, 20.0, 40.0, 80.0] {
+                let mut xf = rand_x(0xBBBB, k);
+                xf[k / 2] = mag; // single outlier channel
+                let reference = dot_q8_0_row_f32(&w_blocks, &xf);
+                let (x_i8, x_sc) = quantize_row_to_i8_blocks(&xf);
+                let block = unsafe { dot_q8_0_row_sdot(&w_blocks, &x_i8, &x_sc) };
+                let max_abs = xf.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+                let rs = max_abs / 127.0;
+                let inv = 1.0 / rs;
+                let x_row: Vec<i8> = xf
+                    .iter()
+                    .map(|v| (v * inv).round().clamp(-127.0, 127.0) as i8)
+                    .collect();
+                let perrow_sc = vec![rs; k / QK];
+                let perrow = unsafe { dot_q8_0_row_sdot(&w_blocks, &x_row, &perrow_sc) };
+                println!(
+                    "  {:>5.0}x outlier:                {:>10.4} {:>10.4}",
+                    mag,
+                    rel_err(block, reference),
+                    rel_err(perrow, reference)
+                );
+            }
+        }
+        println!("===========================================================================\n");
+    }
+
     // Helper: quantize an f32 row into packed Q8_0 weight blocks.
     // Only used by the aarch64 SDOT test below (dead code on other arches).
     #[cfg(target_arch = "aarch64")]
