@@ -255,4 +255,115 @@ impl KokoroModel {
             .with_context(|| format!("voice {voice}"))?;
         self.synthesize_ids(&ids, &ref_s, speed)
     }
+
+    // ------------------------------------------------------------------
+    // Streaming decoder-only path (Paper 1 duplex spike, gate 2).
+    //
+    // The full pipeline runs ALBERT/prosody/F0-N/text-encoder ONCE for the whole
+    // utterance (the amortizable ~20% backbone), producing the decoder inputs
+    // `asr [1,h,T]`, `f0 [2T]`, `n [2T]`. `decode_prefix` then runs ONLY the
+    // fully-convolutional ISTFTNet decoder (the ~80% cost) over a time-slice
+    // `[0..frames]`. This lets the spike measure (a) real decoder-only per-chunk
+    // latency and (b) the minimum stable look-ahead (the decoder's conv receptive
+    // field) — the two quantities that convert the GO/NO-GO from extrapolated to
+    // measured. `synthesize_ids` is unchanged.
+    // ------------------------------------------------------------------
+
+    /// Run the amortizable backbone once; returns the decoder inputs for a whole
+    /// utterance so the decoder can then be run per time-slice via
+    /// [`Self::decode_prefix`].
+    pub fn prepare_stream(
+        &self,
+        input_ids: &[u32],
+        ref_s: &[f32],
+        speed: f32,
+    ) -> Result<DecoderStreamInputs> {
+        let w = &self.weights;
+        let cfg = &self.config;
+        let l = input_ids.len();
+        let h = cfg.hidden_dim;
+
+        let bert = albert_encode(w, input_ids, &cfg.plbert)?;
+        let be_w = get(w, "bert_encoder.weight")?.to_f32_vec();
+        let be_b = get(w, "bert_encoder.bias")?.to_f32_vec();
+        let be = linear2d(&bert, l, cfg.plbert.hidden_size, &be_w, Some(&be_b), h);
+        let d_en = transpose(&be, l, h); // [h, L]
+
+        let s_pred = &ref_s[cfg.style_dim..]; // predictor style (128:)
+        let s_dec = ref_s[..cfg.style_dim].to_vec(); // decoder style (:128)
+
+        let prosody = predict_prosody(w, cfg, &d_en, l, s_pred, speed)?;
+        let (f0, n) = f0_n_train(w, cfg, &prosody.en, s_pred)?;
+
+        let t_en = text_encode(w, input_ids, cfg)?; // [h, L]
+        let t_en = Tensor::from_f32(&t_en, Shape::new([1, h, l])).map_err(|e| anyhow!("{e}"))?;
+        let asr = length_regulate(&t_en, &prosody.pred_dur)?; // [1, h, T]
+        let dims = asr.shape().dims().to_vec();
+        let t = dims[2];
+
+        Ok(DecoderStreamInputs {
+            asr: asr.to_f32_vec(), // [h*T], channel-major (T contiguous)
+            h,
+            t,
+            f0,
+            n,
+            s_dec,
+        })
+    }
+
+    /// Convenience: run the backbone for a phoneme string + voice (mirrors
+    /// [`Self::synthesize`] but stops after producing the decoder inputs).
+    pub fn prepare_stream_phonemes(
+        &self,
+        phonemes: &str,
+        voice: &str,
+        speed: f32,
+    ) -> Result<DecoderStreamInputs> {
+        let (ids, n) = self.phonemes_to_ids(phonemes);
+        let ref_s = self
+            .ref_s(voice, n)
+            .with_context(|| format!("voice {voice}"))?;
+        self.prepare_stream(&ids, &ref_s, speed)
+    }
+
+    /// Decode only the first `frames` time-steps of a prepared utterance through
+    /// the convolutional ISTFTNet decoder, returning the waveform for that prefix.
+    /// `frames` is clamped to the prepared length.
+    pub fn decode_prefix(&self, inp: &DecoderStreamInputs, frames: usize) -> Result<Vec<f32>> {
+        let k = frames.min(inp.t);
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+        // Slice asr [h, T] -> [h, k] (channels stay contiguous in T).
+        let mut asr_slice = vec![0.0f32; inp.h * k];
+        for c in 0..inp.h {
+            let src = &inp.asr[c * inp.t..c * inp.t + k];
+            asr_slice[c * k..c * k + k].copy_from_slice(src);
+        }
+        let asr =
+            Tensor::from_f32(&asr_slice, Shape::new([1, inp.h, k])).map_err(|e| anyhow!("{e}"))?;
+        // f0/n run at 2× the asr frame rate.
+        let f0 = &inp.f0[..(2 * k).min(inp.f0.len())];
+        let n = &inp.n[..(2 * k).min(inp.n.len())];
+        decode(&self.weights, &self.config, &asr, f0, n, &inp.s_dec)
+    }
+}
+
+/// Decoder inputs for a whole utterance, produced once by
+/// [`KokoroModel::prepare_stream`] so the convolutional decoder can be run per
+/// time-slice. `t` is the number of decoder frames; the waveform has a fixed
+/// samples-per-frame ratio (`decode_prefix(t).len() / t`).
+pub struct DecoderStreamInputs {
+    /// Length-regulated text features `[h*T]`, channel-major (T contiguous).
+    pub asr: Vec<f32>,
+    /// Hidden dim (channels) of `asr`.
+    pub h: usize,
+    /// Number of decoder frames `T`.
+    pub t: usize,
+    /// F0 curve, length `2T`.
+    pub f0: Vec<f32>,
+    /// Energy (N) curve, length `2T`.
+    pub n: Vec<f32>,
+    /// Decoder style vector (128-d).
+    pub s_dec: Vec<f32>,
 }

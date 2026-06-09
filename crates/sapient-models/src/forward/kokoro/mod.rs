@@ -25,7 +25,7 @@ mod ops;
 mod predictor;
 
 pub use loader::KokoroConfig;
-pub use model::{KokoroModel, KOKORO_SAMPLE_RATE};
+pub use model::{DecoderStreamInputs, KokoroModel, KOKORO_SAMPLE_RATE};
 
 #[cfg(test)]
 mod stage_tests;

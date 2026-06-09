@@ -41,3 +41,8 @@ audio-io = ["sapient-audio/audio-io"]
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio    = { workspace = true }
+
+# Paper 1 de-risking spike: non-AR streaming duplex-codec feasibility harness.
+[[example]]
+name = "duplex_spike"
+path = "examples/duplex_spike.rs"
