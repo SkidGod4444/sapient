@@ -353,6 +353,109 @@ fn embed_gather_matches_cpu() {
     }
 }
 
+/// Quantize f32 values into raw ggml Q8_0 blocks (34 bytes per 32 weights:
+/// little-endian f16 scale + 32 int8), returning the block bytes **and** the
+/// exact dequantized values (`f32(scale_f16) * f32(int8)`) the GPU kernel must
+/// reproduce. Mirrors ggml's `quantize_row_q8_0_ref`.
+fn quantize_q8_0_blocks(w: &[f32]) -> (Vec<u8>, Vec<f32>) {
+    assert_eq!(w.len() % 32, 0);
+    let mut blocks = Vec::with_capacity(w.len() / 32 * 34);
+    let mut dequant = Vec::with_capacity(w.len());
+    for chunk in w.chunks_exact(32) {
+        let amax = chunk.iter().fold(0.0f32, |a, &v| a.max(v.abs()));
+        let d = amax / 127.0;
+        let id = if d > 0.0 { 1.0 / d } else { 0.0 };
+        let d16 = half::f16::from_f32(d);
+        blocks.extend_from_slice(&d16.to_le_bytes());
+        let scale = d16.to_f32(); // the shader sees the f16-rounded scale
+        for &v in chunk {
+            let q = (v * id).round().clamp(-127.0, 127.0) as i8;
+            blocks.push(q as u8);
+            dequant.push(scale * q as f32);
+        }
+    }
+    (blocks, dequant)
+}
+
+#[test]
+fn matmul_nt_q8_0_resident_matches_dequant_reference() {
+    let Some(ctx) = ctx() else {
+        return;
+    };
+    // Decode-shaped (m=1, lm_head-ish k) and a small batch; k must be %32.
+    for (m, k, n) in [(1usize, 896usize, 1536usize), (3, 64, 48)] {
+        let mut next = lcg();
+        let x: Vec<f32> = (0..m * k).map(|_| next()).collect();
+        let w: Vec<f32> = (0..n * k).map(|_| next()).collect();
+        let (blocks, wd) = quantize_q8_0_blocks(&w);
+
+        let xg = ctx.upload_f32(&x, "x");
+        let wq = ctx.upload_q8_0(&blocks, n * k, "wq").expect("upload_q8_0");
+        let got = ctx
+            .download_f32(&ctx.matmul_nt_q8_0(&xg, &wq, m, k, n))
+            .unwrap();
+
+        // Reference: f32 matmul over the *dequantized* weights — the GPU kernel
+        // computes the identical products, so only reduction order differs.
+        let mut want = vec![0.0f32; m * n];
+        for r in 0..m {
+            for c in 0..n {
+                let mut acc = 0.0f32;
+                for i in 0..k {
+                    acc += x[r * k + i] * wd[c * k + i];
+                }
+                want[r * n + c] = acc;
+            }
+        }
+        let rel = got
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| (a - b).abs() / b.abs().max(1.0))
+            .fold(0.0f32, f32::max);
+        assert!(rel < 1e-4, "q8_0 matmul {m}x{k}x{n} rel={rel}");
+    }
+}
+
+#[test]
+fn embed_q8_0_matches_dequant_reference() {
+    let Some(ctx) = ctx() else {
+        return;
+    };
+    let (vocab, dim) = (100usize, 320usize);
+    let mut next = lcg();
+    let table: Vec<f32> = (0..vocab * dim).map(|_| next()).collect();
+    let (blocks, td) = quantize_q8_0_blocks(&table);
+    let ids: Vec<u32> = vec![7, 0, 99, 42];
+
+    let tq = ctx
+        .upload_q8_0(&blocks, vocab * dim, "table")
+        .expect("upload_q8_0");
+    let ig = ctx.upload_u32(&ids, "ids");
+    let got = ctx
+        .download_f32(&ctx.embed_q8_0(&ig, &tq, ids.len(), dim))
+        .unwrap();
+    for (t, &id) in ids.iter().enumerate() {
+        for i in 0..dim {
+            let want = td[id as usize * dim + i];
+            assert!(
+                (got[t * dim + i] - want).abs() < 1e-6,
+                "embed_q8_0 token {t} elem {i}"
+            );
+        }
+    }
+}
+
+#[test]
+fn upload_q8_0_rejects_bad_block_count() {
+    let Some(ctx) = ctx() else {
+        return;
+    };
+    // 64 elements need exactly 2 blocks (68 bytes) — hand it 67.
+    assert!(ctx.upload_q8_0(&[0u8; 67], 64, "bad").is_err());
+    // numel not a multiple of the 32-weight block size.
+    assert!(ctx.upload_q8_0(&[0u8; 34], 30, "bad").is_err());
+}
+
 /// CPU LayerNorm reference (f32) with weight + bias.
 fn cpu_layer_norm(
     x: &[f32],

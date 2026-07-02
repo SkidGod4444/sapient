@@ -5,41 +5,62 @@
 //! the final logits are read back. The KV cache lives in GPU buffers and grows by a
 //! per-token `copy_range` append — no CPU↔GPU round-trips in the hot loop.
 //!
-//! Scope (first cut): Llama-family architectures (Llama/Qwen/Mistral/SmolLM) — RMSNorm,
-//! full RoPE, GQA, SwiGLU MLP, optional q/k/v projection biases (Qwen2). Weights are
-//! dequantized to f32 on upload (P5 will add in-shader Q4_K/Q8_0 unpacking and an f16
-//! / quantized KV cache). Tokens are processed one at a time (`seq_q = 1`), so prefill
-//! is a sequential append — correct and simple; batched prefill is a later optimization.
+//! Scope: Llama-family architectures (Llama/Qwen/Mistral/SmolLM) — RMSNorm, full RoPE,
+//! GQA, SwiGLU MLP, optional q/k/v projection biases (Qwen2). **Q8_0 weights stay
+//! quantized on the GPU** (Phase 7.1): raw ggml blocks upload as packed int8 + f32
+//! scales and are dequantized inside the matmul/embed shaders — ~1.125 bytes/weight of
+//! VRAM instead of 4 (F16/BF16 linears are online-quantized to Q8_0 first, mirroring
+//! the CPU engine, so both engines see identical weight values). Other dtypes (F32,
+//! K-quants until Phase 7.2) dequantize to f32 on upload. Tokens are processed one at
+//! a time (`seq_q = 1`), so prefill is a sequential append — correct and simple;
+//! batched prefill is a later optimization (Phase 7.5).
 
 use std::collections::HashMap;
 
 use anyhow::{bail, Context, Result};
-use sapient_backends_wgpu::{GpuBuffer, WgpuContext};
-use sapient_core::Tensor;
+use sapient_backends_wgpu::{GpuBuffer, GpuQ8Buffer, WgpuContext};
+use sapient_core::{DType, Tensor};
 use sapient_hub::model_info::{ArchType, ModelInfo};
 
 use crate::weights::{detect_weight_prefix, resolve_bias, resolve_lm_head, resolve_weight};
 
-use super::common::kv_cache_ctx;
+use super::common::{kv_cache_ctx, quantize_tensor_to_q8_0, should_quantize_online};
 
 /// f32 KV cache is 4× a Q8_0 cache, so cap the wgpu first cut more conservatively than
 /// the CPU engine's 8192 to avoid OOMing modest GPUs at load (P5 adds a quantized cache).
 const WGPU_MAX_CTX: usize = 4096;
 
+/// A weight matrix resident on the GPU — either dense f32 or Q8_0 kept quantized
+/// (packed int8 + per-block scales, dequantized in-shader).
+enum GpuWeight {
+    F32(GpuBuffer),
+    Q8(GpuQ8Buffer),
+}
+
+impl GpuWeight {
+    /// GPU bytes this weight occupies.
+    fn byte_size(&self) -> usize {
+        match self {
+            GpuWeight::F32(b) => b.len * 4,
+            GpuWeight::Q8(q) => q.byte_size(),
+        }
+    }
+}
+
 struct LayerWeights {
     input_ln: GpuBuffer,
-    wq: GpuBuffer,
+    wq: GpuWeight,
     bq: Option<GpuBuffer>,
-    wk: GpuBuffer,
+    wk: GpuWeight,
     bk: Option<GpuBuffer>,
-    wv: GpuBuffer,
+    wv: GpuWeight,
     bv: Option<GpuBuffer>,
-    wo: GpuBuffer,
+    wo: GpuWeight,
     bo: Option<GpuBuffer>,
     post_ln: GpuBuffer,
-    wgate: GpuBuffer,
-    wup: GpuBuffer,
-    wdown: GpuBuffer,
+    wgate: GpuWeight,
+    wup: GpuWeight,
+    wdown: GpuWeight,
     /// KV cache, layout `[n_kv_heads, max_seq, head_dim]`.
     kcache: GpuBuffer,
     vcache: GpuBuffer,
@@ -48,9 +69,12 @@ struct LayerWeights {
 pub struct WgpuForwardEngine {
     ctx: WgpuContext,
     info: ModelInfo,
-    embed: GpuBuffer,
+    embed: GpuWeight,
     final_norm: GpuBuffer,
-    lm_head: GpuBuffer,
+    /// `None` when the output projection is tied to the embedding (the GGUF omits
+    /// `output.weight`) — the logits matmul then reuses the embed buffer, so tied
+    /// models don't pay for the same matrix twice in VRAM.
+    lm_head: Option<GpuWeight>,
     layers: Vec<LayerWeights>,
     max_seq: usize,
     cur_len: usize,
@@ -59,6 +83,42 @@ pub struct WgpuForwardEngine {
 
 fn up(ctx: &WgpuContext, t: &Tensor, label: &str) -> GpuBuffer {
     ctx.upload_f32(&t.to_f32_vec(), label)
+}
+
+/// Upload a weight matrix, keeping it quantized on the GPU whenever possible:
+/// Q8_0 tensors upload their raw ggml blocks directly (no f32 expansion);
+/// F16/BF16 linears are online-quantized to Q8_0 first — the same
+/// `should_quantize_online` rule (and therefore the same weight values) as the
+/// CPU engine. Everything else (F32, K-quants until Phase 7.2, rows not a
+/// multiple of the 32-weight block) dequantizes to f32 on upload.
+fn upload_weight(ctx: &WgpuContext, name: &str, t: &Tensor, label: &str) -> Result<GpuWeight> {
+    let k = t.shape().dims().last().copied().unwrap_or(0);
+    if t.dtype() == DType::Q8_0 && k % 32 == 0 {
+        return Ok(GpuWeight::Q8(ctx.upload_q8_0(
+            t.as_quant_blocks(),
+            t.numel(),
+            label,
+        )?));
+    }
+    if should_quantize_online(name, t) {
+        let q = quantize_tensor_to_q8_0(t.clone());
+        if q.dtype() == DType::Q8_0 {
+            return Ok(GpuWeight::Q8(ctx.upload_q8_0(
+                q.as_quant_blocks(),
+                q.numel(),
+                label,
+            )?));
+        }
+    }
+    Ok(GpuWeight::F32(up(ctx, t, label)))
+}
+
+/// Linear projection dispatching on the resident weight form.
+fn mm(ctx: &WgpuContext, x: &GpuBuffer, w: &GpuWeight, m: usize, k: usize, n: usize) -> GpuBuffer {
+    match w {
+        GpuWeight::F32(b) => ctx.matmul_nt(x, b, m, k, n),
+        GpuWeight::Q8(q) => ctx.matmul_nt_q8_0(x, q, m, k, n),
+    }
 }
 
 impl WgpuForwardEngine {
@@ -94,13 +154,19 @@ impl WgpuForwardEngine {
         let embed_t = weights
             .get(&embed_key)
             .with_context(|| format!("missing embedding weight '{embed_key}'"))?;
-        let embed = up(&ctx, embed_t, "embed");
+        // A Q8_0 embed table stays quantized on-GPU (dequantized per-row in the
+        // gather shader); F16/BF16 tables upload f32, matching the CPU engine.
+        let embed = upload_weight(&ctx, "embed_tokens", embed_t, "embed")?;
 
         let final_norm_t = resolve_weight(&weights, &prefix, "norm")?;
         let final_norm = up(&ctx, final_norm_t, "final_norm");
 
         let lm_head_t = resolve_lm_head(&weights, &prefix, false, &embed_key)?;
-        let lm_head = up(&ctx, lm_head_t, "lm_head");
+        let lm_head = if std::ptr::eq(lm_head_t, embed_t) {
+            None // tied output projection — logits reuse the embed buffer
+        } else {
+            Some(upload_weight(&ctx, "lm_head", lm_head_t, "lm_head")?)
+        };
 
         let mut layers = Vec::with_capacity(info.num_hidden_layers);
         for i in 0..info.num_hidden_layers {
@@ -112,33 +178,65 @@ impl WgpuForwardEngine {
                     suffix,
                 ))
             };
+            let gw = |suffix: &str| -> Result<GpuWeight> {
+                upload_weight(
+                    &ctx,
+                    suffix,
+                    resolve_weight(&weights, &prefix, &format!("{pfx}.{suffix}"))?,
+                    suffix,
+                )
+            };
             let gb = |suffix: &str| -> Option<GpuBuffer> {
                 resolve_bias(&weights, &prefix, &format!("{pfx}.{suffix}"))
                     .map(|t| up(&ctx, t, "bias"))
             };
             layers.push(LayerWeights {
                 input_ln: g("input_layernorm")?,
-                wq: g("self_attn.q_proj")?,
+                wq: gw("self_attn.q_proj")?,
                 bq: gb("self_attn.q_proj"),
-                wk: g("self_attn.k_proj")?,
+                wk: gw("self_attn.k_proj")?,
                 bk: gb("self_attn.k_proj"),
-                wv: g("self_attn.v_proj")?,
+                wv: gw("self_attn.v_proj")?,
                 bv: gb("self_attn.v_proj"),
-                wo: g("self_attn.o_proj")?,
+                wo: gw("self_attn.o_proj")?,
                 bo: gb("self_attn.o_proj"),
                 post_ln: g("post_attention_layernorm")?,
-                wgate: g("mlp.gate_proj")?,
-                wup: g("mlp.up_proj")?,
-                wdown: g("mlp.down_proj")?,
+                wgate: gw("mlp.gate_proj")?,
+                wup: gw("mlp.up_proj")?,
+                wdown: gw("mlp.down_proj")?,
                 kcache: ctx.alloc_f32(n_kv * max_seq * head_dim, "kcache"),
                 vcache: ctx.alloc_f32(n_kv * max_seq * head_dim, "vcache"),
             });
         }
 
+        let (mut weight_bytes, mut q8_matrices, mut total_matrices) = (0usize, 0usize, 0usize);
+        let mut tally = |w: &GpuWeight| {
+            weight_bytes += w.byte_size();
+            total_matrices += 1;
+            if matches!(w, GpuWeight::Q8(_)) {
+                q8_matrices += 1;
+            }
+        };
+        tally(&embed);
+        if let Some(lm) = &lm_head {
+            tally(lm);
+        }
+        for l in &layers {
+            for w in [&l.wq, &l.wk, &l.wv, &l.wo, &l.wgate, &l.wup, &l.wdown] {
+                tally(w);
+            }
+        }
         tracing::info!(
             "WgpuForwardEngine ready: {} layers, {hidden} hidden, {n_heads}/{n_kv} heads, \
-             head_dim {head_dim}, inter {inter}, ctx {max_seq} ({})",
+             head_dim {head_dim}, inter {inter}, ctx {max_seq}, weights {} MiB resident \
+             ({q8_matrices}/{total_matrices} matrices Q8_0{}) ({})",
             info.num_hidden_layers,
+            weight_bytes >> 20,
+            if lm_head.is_none() {
+                ", lm_head tied to embed"
+            } else {
+                ""
+            },
             ctx.adapter_label()
         );
 
@@ -191,20 +289,23 @@ impl WgpuForwardEngine {
         let ctx = &self.ctx;
 
         let ids = ctx.upload_u32(&[tok], "tok");
-        let mut x = ctx.embed(&ids, &self.embed, 1, hidden);
+        let mut x = match &self.embed {
+            GpuWeight::F32(t) => ctx.embed(&ids, t, 1, hidden),
+            GpuWeight::Q8(t) => ctx.embed_q8_0(&ids, t, 1, hidden),
+        };
 
         for layer in &self.layers {
             // ── Attention ───────────────────────────────────────────────────────
             let h = ctx.rms_norm(&x, &layer.input_ln, 1, hidden, eps);
-            let mut q = ctx.matmul_nt(&h, &layer.wq, 1, hidden, n_heads * head_dim);
+            let mut q = mm(ctx, &h, &layer.wq, 1, hidden, n_heads * head_dim);
             if let Some(b) = &layer.bq {
                 q = ctx.add(&q, b);
             }
-            let mut k = ctx.matmul_nt(&h, &layer.wk, 1, hidden, n_kv * head_dim);
+            let mut k = mm(ctx, &h, &layer.wk, 1, hidden, n_kv * head_dim);
             if let Some(b) = &layer.bk {
                 k = ctx.add(&k, b);
             }
-            let mut v = ctx.matmul_nt(&h, &layer.wv, 1, hidden, n_kv * head_dim);
+            let mut v = mm(ctx, &h, &layer.wv, 1, hidden, n_kv * head_dim);
             if let Some(b) = &layer.bv {
                 v = ctx.add(&v, b);
             }
@@ -232,7 +333,7 @@ impl WgpuForwardEngine {
                 scale,
                 true, // causal (decoder LLM)
             );
-            let mut o = ctx.matmul_nt(&attn, &layer.wo, 1, n_heads * head_dim, hidden);
+            let mut o = mm(ctx, &attn, &layer.wo, 1, n_heads * head_dim, hidden);
             if let Some(b) = &layer.bo {
                 o = ctx.add(&o, b);
             }
@@ -240,10 +341,10 @@ impl WgpuForwardEngine {
 
             // ── MLP (SwiGLU) ────────────────────────────────────────────────────
             let h2 = ctx.rms_norm(&x, &layer.post_ln, 1, hidden, eps);
-            let gate = ctx.matmul_nt(&h2, &layer.wgate, 1, hidden, inter);
-            let upp = ctx.matmul_nt(&h2, &layer.wup, 1, hidden, inter);
+            let gate = mm(ctx, &h2, &layer.wgate, 1, hidden, inter);
+            let upp = mm(ctx, &h2, &layer.wup, 1, hidden, inter);
             let act = ctx.swiglu(&gate, &upp);
-            let down = ctx.matmul_nt(&act, &layer.wdown, 1, inter, hidden);
+            let down = mm(ctx, &act, &layer.wdown, 1, inter, hidden);
             x = ctx.add(&x, &down);
         }
 
@@ -267,7 +368,8 @@ impl WgpuForwardEngine {
             last = Some(self.forward_token(tok)?);
         }
         let h = last.expect("non-empty");
-        let logits = self.ctx.matmul_nt(&h, &self.lm_head, 1, hidden, vocab);
+        let lm = self.lm_head.as_ref().unwrap_or(&self.embed);
+        let logits = mm(&self.ctx, &h, lm, 1, hidden, vocab);
         Ok(self.ctx.download_f32(&logits)?)
     }
 
@@ -284,7 +386,8 @@ impl WgpuForwardEngine {
         let mut out = Vec::with_capacity(input_ids.len());
         for &tok in input_ids {
             let h = self.forward_token(tok)?;
-            let logits = self.ctx.matmul_nt(&h, &self.lm_head, 1, hidden, vocab);
+            let lm = self.lm_head.as_ref().unwrap_or(&self.embed);
+            let logits = mm(&self.ctx, &h, lm, 1, hidden, vocab);
             out.push(self.ctx.download_f32(&logits)?);
         }
         Ok(out)

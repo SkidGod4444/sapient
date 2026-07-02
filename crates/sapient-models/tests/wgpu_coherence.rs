@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use sapient_core::{Shape, Tensor};
+use sapient_core::{DType, Shape, Tensor};
 use sapient_hub::model_info::{ArchType, ModelInfo};
 use sapient_models::forward::{LlamaForward, WgpuForwardEngine};
 
@@ -114,6 +114,44 @@ fn tiny_llama() -> (ModelInfo, HashMap<String, Tensor>) {
     (info, w)
 }
 
+/// Quantize an f32 matrix into a raw-ggml-block Q8_0 tensor (34-byte blocks:
+/// little-endian f16 scale + 32 int8) — the storage GGUF weights arrive in.
+fn q8_0_tensor(data: &[f32], shape: [usize; 2]) -> Tensor {
+    assert_eq!(data.len() % 32, 0);
+    let mut blocks = Vec::with_capacity(data.len() / 32 * 34);
+    for chunk in data.chunks_exact(32) {
+        let amax = chunk.iter().fold(0.0f32, |a, &v| a.max(v.abs()));
+        let d = amax / 127.0;
+        let id = if d > 0.0 { 1.0 / d } else { 0.0 };
+        blocks.extend_from_slice(&half::f16::from_f32(d).to_le_bytes());
+        for &v in chunk {
+            blocks.push((v * id).round().clamp(-127.0, 127.0) as i8 as u8);
+        }
+    }
+    Tensor::from_quant_bytes(&blocks, shape.to_vec(), DType::Q8_0).unwrap()
+}
+
+/// The tiny Llama with every 2-D weight stored as raw Q8_0 blocks (as a Q8_0 GGUF
+/// ships them) and **no explicit lm_head** — the output projection ties to the
+/// Q8_0 embedding, exercising the tied-buffer + Q8_0 embed-gather paths.
+fn tiny_llama_q8_0() -> (ModelInfo, HashMap<String, Tensor>) {
+    let (info, weights) = tiny_llama();
+    let quantized = weights
+        .into_iter()
+        .filter(|(name, _)| name != "lm_head.weight") // tied: fall back to embed
+        .map(|(name, t)| {
+            if t.shape().dims().len() == 2 {
+                let dims = t.shape().dims();
+                let q = q8_0_tensor(t.as_f32_slice(), [dims[0], dims[1]]);
+                (name, q)
+            } else {
+                (name, t) // norms stay f32
+            }
+        })
+        .collect();
+    (info, quantized)
+}
+
 fn argmax(v: &[f32]) -> usize {
     v.iter()
         .enumerate()
@@ -180,4 +218,61 @@ fn wgpu_logits_match_cpu_llama() {
         argmax(&gpu_step),
         "decode greedy must match"
     );
+}
+
+/// Phase 7.1 gate: the GPU-resident Q8_0 path (raw ggml blocks uploaded without f32
+/// expansion, dequantized in-shader) must agree with the CPU engine on the same
+/// quantized weights. Both engines dequantize identical blocks, so weight rounding
+/// cancels; the only expected divergence is the CPU's aarch64 W8A8 SDOT path, which
+/// quantizes *activations* per 32-block while the GPU keeps activations f32. Greedy
+/// agreement is the hard gate, with a bounded logit error on top.
+#[test]
+fn wgpu_q8_0_logits_match_cpu_llama() {
+    let (info, weights) = tiny_llama_q8_0();
+
+    let mut cpu = LlamaForward::from_weights(info.clone(), weights.clone())
+        .expect("build CPU LlamaForward (Q8_0)");
+    let mut gpu = match WgpuForwardEngine::from_weights(info, weights) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("no wgpu GPU adapter ({e}) — skipping Q8_0 coherence test");
+            return;
+        }
+    };
+
+    let tokens: Vec<u32> = vec![1, 5, 9, 3, 7, 2, 11];
+
+    let cpu_logits = cpu.forward_logits(&tokens, false).unwrap();
+    let gpu_logits = gpu.forward_logits(&tokens, false).unwrap();
+    assert_eq!(cpu_logits.len(), gpu_logits.len());
+
+    let max_err = cpu_logits
+        .iter()
+        .zip(&gpu_logits)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert_eq!(
+        argmax(&cpu_logits),
+        argmax(&gpu_logits),
+        "Q8_0 greedy next-token must match (max_err={max_err})"
+    );
+    assert!(max_err < 0.1, "Q8_0 wgpu vs cpu logits max_err={max_err}");
+
+    // Incremental decode through the GPU KV cache must stay coherent too.
+    let next_tok = argmax(&gpu_logits) as u32;
+    let gpu_step = gpu.forward_logits(&[next_tok], true).unwrap();
+    let mut full = tokens.clone();
+    full.push(next_tok);
+    let cpu_step = cpu.forward_logits(&full, false).unwrap();
+    let step_err = cpu_step
+        .iter()
+        .zip(&gpu_step)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert_eq!(
+        argmax(&cpu_step),
+        argmax(&gpu_step),
+        "Q8_0 decode greedy must match (max_err={step_err})"
+    );
+    assert!(step_err < 0.1, "Q8_0 decode logits max_err={step_err}");
 }
