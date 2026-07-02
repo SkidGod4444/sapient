@@ -324,9 +324,17 @@ cargo build --release -p sapient-cli --features wgpu
 ./target/release/sapient chat openhorizon/qwen2.5-0.5b --backend wgpu
 ```
 
-First cut: Llama-family models, f32 weights/KV cache, one token per submission.
-In-shader Q4_K/Q8_0 dequant, an f16/quantized KV cache, kernel fusion, and batched
-prefill are tracked in [ROADMAP Phase 3b](docs/ROADMAP.md).
+**Q8_0 weights stay quantized on the GPU**: raw ggml blocks upload as packed int8 +
+scales and are dequantized inside the shader — no f32 expansion, ~1.125 bytes/weight
+of VRAM instead of 4. Measured on SmolLM2-360M Q8_0 (Apple M4 via wgpu→Metal):
+weights resident 1.6 GiB → **388 MiB** (≈ the GGUF file size), peak RSS 2.65 → 1.27 GB,
+with greedy output token-identical to the f32 path. F16/BF16 safetensors linears are
+online-quantized to Q8_0 on upload, same as the CPU engine.
+
+Current scope: Llama-family models; K-quants (Q4_K/Q6_K) still expand to f32 on
+upload, KV cache is f32, one token per submission. In-shader Q4_K dequant, an
+f16/quantized KV cache, kernel fusion, and batched prefill are tracked in
+[ROADMAP Phase 3b](docs/ROADMAP.md).
 
 **Benchmark it on your machine.** `scripts/bench_wgpu.py` times TTFT and decode tok/s
 across backends so you can see what your GPU buys you — works on any OS/vendor, needs

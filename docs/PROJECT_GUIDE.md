@@ -283,8 +283,9 @@ The real generation math: how to run a Phi or Llama-style model layer by layer.
   - `forward/wgpu_engine.rs` — the **cross-platform GPU engine** (`WgpuForwardEngine`,
     `--features wgpu`, `--backend wgpu`). The same idea as the MLX engine but portable
     via wgpu/WGSL (Vulkan/DX12/Metal) so it runs on Intel/AMD/Nvidia too. Weights upload
-    once, the KV cache stays on the GPU, each token decodes on-device; only logits read
-    back. Llama-family, f32 first cut — see the wgpu invariants in `CLAUDE.md`.
+    once (Q8_0 stays quantized on-device, dequantized in-shader; K-quants expand to f32
+    until Phase 7.2), the KV cache stays on the GPU, each token decodes on-device; only
+    logits read back. Llama-family — see the wgpu invariants in `CLAUDE.md`.
   - `forward/whisper.rs` — the **Whisper speech-to-text engine** (`WhisperForward`,
     wrapped in `AudioEngine`). An encoder turns the mel spectrogram into an "audio
     understanding," then a decoder writes out the words one token at a time, *listening
@@ -396,10 +397,17 @@ Enabled with `--features wgpu` and selected via `--backend wgpu`.
   the forward pass needs: RMSNorm, GEMV matmul, RoPE, causal grouped-query FlashDecoding
   attention, SwiGLU/add, embedding gather, and a KV-cache append copy. Every kernel has a
   CPU-reference test (`tests/resident.rs`).
+- `quant.rs` + `matmul_nt_q8_0.wgsl` / `embed_q8_0.wgsl` — **quantized-resident weights**
+  (Phase 7.1): raw ggml Q8_0 blocks upload as packed int8 words + f32 scales
+  (`GpuQ8Buffer`, no f32 expansion) and are dequantized *inside* the matmul/embed
+  shaders. ~1.125 bytes/weight of VRAM instead of 4 — a 360M Q8_0 model drops from
+  1.6 GiB resident to 388 MiB (≈ the GGUF file size).
 - The engine that drives them lives in `sapient-models` as `WgpuForwardEngine`
-  (`forward/wgpu_engine.rs`): weights upload once, the KV cache stays on the GPU, each
-  token decodes fully on-device, and only the logits are read back. Its output is
-  checked against the CPU engine in `sapient-models/tests/wgpu_coherence.rs`.
+  (`forward/wgpu_engine.rs`): weights upload once (Q8_0 stays quantized; F16/BF16
+  linears online-quantize to Q8_0 like the CPU engine; tied output projections reuse
+  the embed buffer), the KV cache stays on the GPU, each token decodes fully on-device,
+  and only the logits are read back. Its output is checked against the CPU engine in
+  `sapient-models/tests/wgpu_coherence.rs` (f32 and Q8_0 variants).
 
 ### 🖥️ `sapient-cli` — the app you actually run
 The `sapient` command-line program: parses commands, shows the modern UI, and calls the

@@ -128,6 +128,31 @@ would close most of the gap — it's the top open item on the [roadmap](../ROADM
 
 ---
 
+## wgpu backend: Q8_0 GPU-resident weights (Phase 7.1)
+
+The cross-platform wgpu path now keeps Q8_0 weights **quantized on the GPU** (raw
+ggml blocks as packed int8 + scales, dequantized in-shader) instead of expanding to
+f32 on upload. Measured with `scripts/bench_wgpu.py` + `/usr/bin/time -l`,
+SmolLM2-360M-Instruct **Q8_0 GGUF**, Apple M4 (wgpu→Metal), 64 tokens, same model /
+same quant / same hardware for both builds:
+
+| Metric | f32 upload (before) | Q8_0 resident (after) |
+|---|---|---|
+| Weights resident on GPU | ~1.6 GiB | **388 MiB** (≈ GGUF file size; 225/225 matrices Q8_0, tied lm_head shares the embed buffer) |
+| Peak RSS (one-shot chat) | 2.65 GB | **1.27 GB** |
+| Peak memory footprint | 3.86 GB | **1.72 GB** |
+| Decode | 20.5 tok/s | **21.4 tok/s** |
+| TTFT | 51 ms | **46 ms** |
+
+Greedy decode output is **token-identical** to the f32 path (same dequant values,
+different reduction order). On UMA Apple silicon decode is dispatch-bound for a
+model this small, so throughput moves little; the ≥2× decode target of Phase 7
+is expected from discrete cards (Arc/AMD/Nvidia), where the 3.6× smaller weight
+reads directly cut the memory-bandwidth bottleneck — those runs are still open
+(Phase 7.6). K-quants (Q4_K/Q6_K) still expand to f32 until Phase 7.2.
+
+---
+
 ## Binary & deployment
 
 | Metric | SAPIENT | Ollama | mlx-lm |

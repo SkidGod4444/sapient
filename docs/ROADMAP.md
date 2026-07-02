@@ -94,20 +94,29 @@ Bring GPU acceleration to the machines Metal can't reach, via a portable compute
 (`wgpu` → Vulkan / DX12 / Metal). The **same WGSL kernels** run on Intel Arc, AMD
 Radeon, Nvidia, and Apple — and are dev-tested on Apple Silicon (Metal under wgpu).
 - ✅ **Foundation** (`crates/sapient-backends/wgpu`): `WgpuContext` device acquisition
-  (adapter-max limits past the 128 MiB binding cap, `SHADER_F16`, pipeline cache) +
-  `matmul_nt_f32` / `matmul_nt_q8_0` kernels, validated on GPU against a host reference.
+  (adapter-max limits past the 128 MiB binding cap, `SHADER_F16`, pipeline cache).
 - ✅ **Resident kernels** (`resident.rs` + `shaders/*.wgsl`): GPU-resident `GpuBuffer`,
   RMSNorm, GEMV `matmul_nt`, RoPE (NEOX partial-rotary), SwiGLU, residual add, embedding
   gather, causal GQA **FlashDecoding attention** (online softmax, `kv_stride`), and a
   `copy_range` KV-cache append — each validated bit-close to a CPU reference.
-- ✅ **`WgpuForwardEngine`** in `sapient-models` (`--features wgpu`): weights upload once
-  (dequant→f32), GPU-resident KV cache, decode runs fully on-device, only logits read
+- ✅ **`WgpuForwardEngine`** in `sapient-models` (`--features wgpu`): weights upload once,
+  GPU-resident KV cache, decode runs fully on-device, only logits read
   back. Wired into `ForwardEngine::Wgpu` + `LlmBackendKind::Wgpu` (`--backend wgpu`) for
   Llama/Qwen/Mistral (GGUF + safetensors). **Coherence proven**: logits match the CPU
   `LlamaForward` on a synthetic model (prompt + incremental decode, argmax + max_err<5e-3).
-- [ ] **P5**: in-shader Q4_K/Q8_0 dequant (flat-u32 buffers, no f32 expansion at upload),
-  f16 / quantized KV cache, kernel fusion (cut per-token dispatches), batched prefill
-  (`seq_q>1`), discrete-adapter pick, `sapient devices` listing, Linux/Windows CI.
+- ✅ **In-shader Q8_0 dequant** (Phase 7.1, `quant.rs` + `matmul_nt_q8_0.wgsl` /
+  `embed_q8_0.wgsl`): raw ggml Q8_0 blocks upload as packed int8 `u32` words + f32
+  scales (`GpuQ8Buffer`) — **no f32 expansion**; matmul/embed dequantize in-shader.
+  F16/BF16 linears online-quantize to Q8_0 (same rule as the CPU engine); tied output
+  projections reuse the embed buffer. Measured (SmolLM2-360M Q8_0, Apple M4 via
+  wgpu→Metal): weights resident 1.6 GiB→**388 MiB** (≈ GGUF file size), peak RSS
+  2.65→1.27 GB, decode 20.5→21.4 tok/s, TTFT 51→46 ms; greedy output token-identical
+  to the f32 path. Gated by `wgpu_q8_0_logits_match_cpu_llama` + per-kernel dequant
+  reference tests.
+- [ ] **P5 (remaining)**: in-shader **Q4_K** dequant (mind the 16-scale super-block
+  layout — see the Q6_K postmortem), f16 / quantized KV cache, kernel fusion (cut
+  per-token dispatches), batched prefill (`seq_q>1`), discrete-adapter pick,
+  `sapient devices` listing, Linux/Windows CI, bench on real Arc/AMD/Nvidia cards.
 - **Success metric:** a Q4 model on an Intel Arc / AMD Radeon card decoding several×
   faster than that machine's CPU path, from the same single binary.
 
