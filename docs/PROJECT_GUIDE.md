@@ -373,6 +373,11 @@ The fast math that runs on any CPU. This is where most of the real work happens 
 - `lib.rs` — front door.
 - `backend.rs` — dispatches each operation to the right kernel.
 - `pool.rs` — reuses memory buffers so we don't constantly allocate/free (faster).
+- `thermal.rs` — **thermal governor** (Phase 8.4): on passively-cooled boards
+  (Raspberry Pi) it watches `/sys/class/thermal` during decode and quietly uses
+  fewer cores from 80 °C so the chip never hits the 85 °C hard-throttle cliff —
+  sustained speed degrades gracefully instead of collapsing. Inert on machines
+  without thermal zones; `SAPIENT_THERMAL=off` disables.
 - `kernels/` — the individual math routines ("kernels"):
   - `kernels/mod.rs` — lists the kernels.
   - `kernels/matmul.rs` — **matrix multiply** + `matmul_nt` (the linear-layer core) + `gemm`.

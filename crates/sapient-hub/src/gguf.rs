@@ -4,6 +4,12 @@
 ///
 /// Prefers Q4_K_M (the edge sweet spot — small + near-lossless) over Q8_0 and other
 /// quants, falls back to Q8_0/K-quants/float, and avoids ultra-low-bit Q2_K.
+///
+/// **`SAPIENT_GGUF_QUANT`** overrides the preference (Phase 8.2, low-RAM boards):
+/// e.g. `SAPIENT_GGUF_QUANT=Q4_K_S sapient pull llama-3.2-3b` picks the smaller
+/// Q4_K_S file on a 4 GB Pi where the default Q4_K_M would squeeze RAM. Matched
+/// case-insensitively against the filename; falls back to the normal scoring
+/// (with a warning) when no file matches.
 pub fn select_best_gguf(filenames: &[String]) -> Option<&str> {
     let ggufs: Vec<&str> = filenames
         .iter()
@@ -13,6 +19,30 @@ pub fn select_best_gguf(filenames: &[String]) -> Option<&str> {
 
     if ggufs.is_empty() {
         return None;
+    }
+
+    let want = std::env::var("SAPIENT_GGUF_QUANT").ok();
+    select_gguf_with_override(&ggufs, want.as_deref())
+}
+
+/// Pure selection core (unit-testable without touching process env): pick the
+/// override-matching file when `want` is set and matches, else the best-scoring
+/// one.
+fn select_gguf_with_override<'a>(ggufs: &[&'a str], want: Option<&str>) -> Option<&'a str> {
+    if let Some(want) = want.map(|w| w.trim().to_ascii_uppercase()) {
+        if !want.is_empty() {
+            if let Some(hit) = ggufs
+                .iter()
+                .filter(|n| n.to_ascii_uppercase().contains(&want))
+                .max_by_key(|name| gguf_preference_score(name))
+            {
+                return Some(hit);
+            }
+            tracing::warn!(
+                "SAPIENT_GGUF_QUANT={want}: no matching .gguf in this repo — \
+                 falling back to the default quant preference"
+            );
+        }
     }
 
     ggufs
@@ -175,6 +205,36 @@ pub fn tokenizer_fallback_model(model_id: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quant_override_picks_matching_file() {
+        let files = vec!["model-Q4_K_M.gguf", "model-Q4_K_S.gguf", "model-Q8_0.gguf"];
+        // Default preference: Q4_K_M wins.
+        assert_eq!(
+            select_gguf_with_override(&files, None),
+            Some("model-Q4_K_M.gguf")
+        );
+        // Low-RAM override (Phase 8.2): case-insensitive substring match.
+        assert_eq!(
+            select_gguf_with_override(&files, Some("q4_k_s")),
+            Some("model-Q4_K_S.gguf")
+        );
+        // Ambiguous override resolves by score among the matches.
+        assert_eq!(
+            select_gguf_with_override(&files, Some("Q4_K")),
+            Some("model-Q4_K_M.gguf")
+        );
+        // Non-matching override falls back to the default preference.
+        assert_eq!(
+            select_gguf_with_override(&files, Some("Q2_K")),
+            Some("model-Q4_K_M.gguf")
+        );
+        // Blank override is ignored.
+        assert_eq!(
+            select_gguf_with_override(&files, Some("  ")),
+            Some("model-Q4_K_M.gguf")
+        );
+    }
 
     #[test]
     fn prefers_q4_k_m_over_q8_and_q2() {

@@ -168,12 +168,27 @@ Radeon, Nvidia, and Apple — and are dev-tested on Apple Silicon (Metal under w
 - **Success metric:** a Q4 model on an Intel Arc / AMD Radeon card decoding several×
   faster than that machine's CPU path, from the same single binary.
 
-## Phase 4 — Raspberry Pi / small ARM SBC  → **`v0.3.x`** (partially done)
-The hardest, most differentiating CPU target (2–8 GB RAM).
+## Phase 4 — Raspberry Pi / small ARM SBC  → **`v0.3.x` – `v0.4.x`** (mostly done)
+The hardest, most differentiating CPU target (2–8 GB RAM). (Continues as the
+Notion roadmap's Phase 8 — "Own the Raspberry Pi".)
 - ✅ Bigger-than-RAM support via mmap paging.
-- ✅ `aarch64` validation; NEON SIMD applies to Pi 4/5.
-- [ ] Low-RAM tuning: minimal activation buffers, optional `Q4_K_S`.
-- [ ] Document Pi 4/5 setup and expected tok/s.
+- ✅ `aarch64` validation; NEON SIMD applies to Pi 4/5. All hot dot-product paths
+  are NEON (Q8_0 SDOT, Q4_K W4A8 SDOT, Q5_K/Q6_K 16-lane) — the v0.3.9 Pi perf
+  hunt established "no scalar K-quant kernels" as the practical kernel ceiling
+  (decode is memory-latency-bound; further SDOT conversions measured ~0).
+- ✅ Low-RAM quant selection: **`SAPIENT_GGUF_QUANT=Q4_K_S`** (or any quant tag)
+  overrides the Q4_K_M default when a 4 GB board needs the smaller file.
+- ✅ **Thermal-aware sustained decode** (`sapient-backends-cpu/src/thermal.rs`):
+  a hysteresis governor samples `/sys/class/thermal` (rate-limited, from the
+  matmul dispatcher) and steps the GEMV parallelism target down one core at a
+  time from 80 °C (floor: half the cores), restoring below 70 °C — backs off
+  *before* the 85 °C firmware trip so passive boards degrade gracefully instead
+  of collapsing. `SAPIENT_THERMAL=off|_HOT|_COOL|_PATH` to tune; inert on
+  machines without thermal zones. Unit-tested against a fake sysfs; on-device
+  Pi validation pending.
+- 🔶 `docs/PI.md`: setup, per-RAM model guidance, thermal + voice-loop docs are
+  in; the measured tok/s table still has TBDs pending a Pi 5 bench session.
+- [ ] Minimal activation buffers (per-step allocation audit / scratch reuse).
 - **Success metric:** run a 3B Q4 model on a 4 GB Pi 5 without OOM.
 
 ## Phase 4b — Multi-model server  → **`v0.3.x`**

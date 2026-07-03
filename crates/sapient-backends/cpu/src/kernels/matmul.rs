@@ -123,6 +123,10 @@ pub fn matmul_nt(x: &Tensor, w: &Tensor) -> Result<Tensor> {
         });
     }
 
+    // Thermal governor sample point (Phase 8.4): rate-limited to one sysfs read
+    // per 500 ms — every other call is a single atomic compare.
+    crate::thermal::tick();
+
     // Dispatch on weight dtype. All quantized paths dequantize on-the-fly block
     // by block — no F32 expansion in memory.
     match w.dtype() {
@@ -383,8 +387,13 @@ fn matmul_nt_float(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resu
 // can balance load without excess overhead.  Clamped to [16, 512] so tiny
 // matrices still get at least 16 rows per task and huge matrices (lm_head
 // n=151936) don't create thousands of micro-tasks.
+//
+// Thermal-governed (Phase 8.4): while the board runs hot, the effective thread
+// target drops below the pool size, so work splits into fewer, larger tasks and
+// the surplus cores idle — less package power, sustained clocks. Inert
+// (== rayon::current_num_threads) when no thermal zones exist.
 fn gemv_chunk(n: usize) -> usize {
-    let ncpus = rayon::current_num_threads().max(1);
+    let ncpus = crate::thermal::effective_threads();
     let target_tasks = ncpus * 4;
     (n / target_tasks).clamp(16, 512)
 }
