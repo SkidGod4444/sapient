@@ -366,6 +366,13 @@ impl WgpuForwardEngine {
         let positions = [pos as u32];
         let ctx = &self.ctx;
 
+        // Record this token's ~16 kernels/layer into ONE queue submission instead
+        // of one per kernel (Phase 7.4). Flushed at the end of this function: one
+        // submission per token keeps the encoder bounded — letting a whole prompt
+        // accumulate (prompt_len × ~450 passes) stalls Metal, since each compute
+        // pass is a Metal command encoder inside a single command buffer.
+        ctx.begin_batch();
+
         let ids = ctx.upload_u32(&[tok], "tok");
         let mut x = match &self.embed {
             GpuWeight::F32(t) => ctx.embed(&ids, t, 1, hidden),
@@ -460,7 +467,9 @@ impl WgpuForwardEngine {
         }
 
         self.cur_len += 1;
-        Ok(ctx.rms_norm(&x, &self.final_norm, 1, hidden, eps))
+        let out = ctx.rms_norm(&x, &self.final_norm, 1, hidden, eps);
+        ctx.flush_batch();
+        Ok(out)
     }
 
     /// Logits for the final token. Appends `input_ids` to the KV cache when

@@ -109,8 +109,10 @@ impl WgpuContext {
     }
 
     /// Read a GPU buffer back to host (blocking). Used only for final logits in the
-    /// hot path; freely in tests.
+    /// hot path; freely in tests. Flushes any open command batch first, so the
+    /// readback observes every kernel recorded so far.
     pub fn download_f32(&self, b: &GpuBuffer) -> Result<Vec<f32>, WgpuError> {
+        self.flush_batch();
         let size = (b.len * 4) as u64;
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("download-staging"),
@@ -151,19 +153,15 @@ impl WgpuContext {
         src_off: usize,
         len: usize,
     ) {
-        let mut enc = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("copy_range"),
-            });
-        enc.copy_buffer_to_buffer(
-            &src.buf,
-            (src_off * 4) as u64,
-            &dst.buf,
-            (dst_off * 4) as u64,
-            (len * 4) as u64,
-        );
-        self.queue.submit(Some(enc.finish()));
+        self.with_encoder(|enc| {
+            enc.copy_buffer_to_buffer(
+                &src.buf,
+                (src_off * 4) as u64,
+                &dst.buf,
+                (dst_off * 4) as u64,
+                (len * 4) as u64,
+            );
+        });
     }
 
     /// Small uniform buffer from a `#[repr(C)]` Pod struct (kernel params).
@@ -213,10 +211,7 @@ impl WgpuContext {
             layout: &layout,
             entries: &entries,
         });
-        let mut enc = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
-        {
+        self.with_encoder(|enc| {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some(label),
                 timestamp_writes: None,
@@ -224,8 +219,7 @@ impl WgpuContext {
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(gx, gy, 1);
-        }
-        self.queue.submit(Some(enc.finish()));
+        });
     }
 
     // ── Kernels ────────────────────────────────────────────────────────────────

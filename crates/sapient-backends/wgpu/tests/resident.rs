@@ -415,6 +415,46 @@ fn kv_append_then_decode_matches_cpu_f32_and_f16() {
 }
 
 #[test]
+fn batched_recording_matches_immediate() {
+    // A chain of dependent kernels (norm → matmul → swiglu → add) recorded into
+    // one begin_batch/flush_batch submission must produce exactly what per-kernel
+    // submissions produce — WebGPU executes commands in recording order, and
+    // download_f32 flushes the open batch before reading.
+    let Some(ctx) = ctx() else {
+        return;
+    };
+    let (dim, n) = (256usize, 128usize);
+    let mut next = lcg();
+    let x: Vec<f32> = (0..dim).map(|_| next()).collect();
+    let w_norm: Vec<f32> = (0..dim).map(|_| 0.5 + next().abs()).collect();
+    let w_a: Vec<f32> = (0..n * dim).map(|_| next()).collect();
+    let w_b: Vec<f32> = (0..n * dim).map(|_| next()).collect();
+
+    let run = |batched: bool| -> Vec<f32> {
+        if batched {
+            ctx.begin_batch();
+        }
+        let xg = ctx.upload_f32(&x, "x");
+        let ng = ctx.upload_f32(&w_norm, "wn");
+        let ag = ctx.upload_f32(&w_a, "wa");
+        let bg = ctx.upload_f32(&w_b, "wb");
+        let h = ctx.rms_norm(&xg, &ng, 1, dim, 1e-5);
+        let ga = ctx.matmul_nt(&h, &ag, 1, dim, n);
+        let gb = ctx.matmul_nt(&h, &bg, 1, dim, n);
+        let s = ctx.swiglu(&ga, &gb);
+        let out = ctx.add(&s, &gb);
+        ctx.download_f32(&out).unwrap() // flushes the batch when one is open
+    };
+
+    let immediate = run(false);
+    let batched = run(true);
+    assert_eq!(immediate.len(), batched.len());
+    for (i, (a, b)) in immediate.iter().zip(&batched).enumerate() {
+        assert!((a - b).abs() < 1e-6, "batched vs immediate diverge at {i}");
+    }
+}
+
+#[test]
 fn embed_gather_matches_cpu() {
     let Some(ctx) = ctx() else {
         return;

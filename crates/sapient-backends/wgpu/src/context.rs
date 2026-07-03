@@ -38,6 +38,12 @@ pub struct WgpuContext {
     /// Compiled compute pipelines, keyed by a stable label, so each WGSL kernel is
     /// compiled once and reused across every decode step.
     pipelines: Mutex<HashMap<String, Arc<wgpu::ComputePipeline>>>,
+    /// Open command batch (Phase 7.4). While `Some`, kernels record into this
+    /// encoder instead of submitting one queue submission each; `flush_batch`
+    /// (called automatically by `download_f32`) submits the whole batch at once.
+    /// A decode step is ~450 kernels — batching them cuts ~450 submissions per
+    /// token to 1, removing the fixed per-submission CPU cost from the hot loop.
+    batch: Mutex<Option<wgpu::CommandEncoder>>,
 }
 
 impl WgpuContext {
@@ -106,7 +112,49 @@ impl WgpuContext {
             has_f16,
             max_binding_bytes,
             pipelines: Mutex::new(HashMap::new()),
+            batch: Mutex::new(None),
         })
+    }
+
+    /// Start (or continue) a command batch: until [`Self::flush_batch`], every
+    /// kernel dispatch and buffer copy records into one shared command encoder
+    /// instead of paying a queue submission each. Execution order is identical —
+    /// WebGPU guarantees commands execute in recording order. Idempotent.
+    pub fn begin_batch(&self) {
+        let mut batch = self.batch.lock().unwrap();
+        if batch.is_none() {
+            *batch = Some(
+                self.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("batch"),
+                    }),
+            );
+        }
+    }
+
+    /// Submit the open batch as a single queue submission (no-op when none is
+    /// open). [`WgpuContext::download_f32`] calls this automatically, so readbacks
+    /// always observe every recorded kernel.
+    pub fn flush_batch(&self) {
+        if let Some(enc) = self.batch.lock().unwrap().take() {
+            self.queue.submit(Some(enc.finish()));
+        }
+    }
+
+    /// Record commands via `f`: into the open batch when one exists, otherwise
+    /// into an ephemeral encoder submitted immediately (the pre-batching
+    /// behaviour, still used by tests and the Whisper engine).
+    pub(crate) fn with_encoder(&self, f: impl FnOnce(&mut wgpu::CommandEncoder)) {
+        let mut batch = self.batch.lock().unwrap();
+        if let Some(enc) = batch.as_mut() {
+            f(enc);
+        } else {
+            let mut enc = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            f(&mut enc);
+            self.queue.submit(Some(enc.finish()));
+        }
     }
 
     /// Get-or-compile a compute pipeline for `label` from `wgsl` source (entry
