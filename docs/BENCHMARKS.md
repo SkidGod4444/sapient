@@ -71,8 +71,16 @@ per 16-element scale group):
 accuracy is the same class as the accepted Q4_K W4A8 path (per-32-block int8
 activations; greedy outputs verified). Q6_K-R4 remains opt-in: it adds +13% on
 M4/llama-1B but is slightly negative on the Pi — `SAPIENT_REPACK_Q6K=1` to
-enable. Remaining ladder: **i8mm/SMMLA** kernels on v8.6+ cores (M4/Grace) —
-the last structural llama.cpp edge.
+enable. The **i8mm/SMMLA rung** then landed for prefill:
+`smmla`'s 2×2 int8 tile needs two distinct activation rows, so it cannot help
+m=1 decode (half the lanes waste) — but for CPU **prefill** (m ≥ 2) one `smmla`
+replaces four `sdot`s and each R4 weight group is read once per PAIR of prompt
+tokens. Measured (600-token prompt, qwen-1.5B, warm model): **M4 17.6→13.6 s
+(1.29×)**, **Thor 40.5→24.0 s (1.68× cumulative vs v0.5.0)**; Thor decode also
++24% cumulative (22.4→27.7 tok/s). Pi 5 (Cortex-A76, no i8mm) is unaffected.
+Decode-side parity items left: Q6_K-x2 prefill treatment, deeper output tiling
+(llama.cpp pp512 remains well ahead), and Q8_K-style precomputed activation
+block-sums.
 
 **The honest read:**
 - On **Apple Metal** SAPIENT is competitive with llama.cpp (−7% on qwen-1.5B,

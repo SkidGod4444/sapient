@@ -540,6 +540,55 @@ fn matmul_nt_q4_k_r4(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Re
     let group_bytes = 4 * row_bytes;
     let mut out = vec![0.0f32; m * n];
 
+    // ── i8mm SMMLA prefill path (m ≥ 2, ARMv8.6) ────────────────────────────
+    // Two activation rows per pass through each weight group: one `smmla`
+    // (32 MACs) replaces four `sdot`s, and the weight stream is read once per
+    // PAIR of prompt tokens instead of once per token. Output is built
+    // group-major (transposed) so rayon tasks own contiguous chunks.
+    #[cfg(target_arch = "aarch64")]
+    if m >= 2 && std::arch::is_aarch64_feature_detected!("i8mm") {
+        let quantized: Vec<(Vec<i8>, Vec<f32>)> = (0..m)
+            .map(|i| quant::quantize_row_to_i8_blocks(&x_data[i * k..(i + 1) * k]))
+            .collect();
+        let groups = n / 4;
+        let mut out_t = vec![0.0f32; n * m]; // [group-rows][m]
+        out_t
+            .par_chunks_mut(4 * m)
+            .enumerate()
+            .for_each(|(g, chunk)| {
+                let group = &w_blocks[g * group_bytes..(g + 1) * group_bytes];
+                let mut xi = 0usize;
+                while xi + 2 <= m {
+                    let (x0, s0) = &quantized[xi];
+                    let (x1, s1) = &quantized[xi + 1];
+                    // SAFETY: i8mm verified above; slice is one R4 group.
+                    let v = unsafe { quant::dot_q4_k_4rows_r4_x2_smmla(group, x0, s0, x1, s1) };
+                    for r in 0..4 {
+                        chunk[r * m + xi] = v[r][0];
+                        chunk[r * m + xi + 1] = v[r][1];
+                    }
+                    xi += 2;
+                }
+                if xi < m {
+                    let (x0, s0) = &quantized[xi];
+                    // SAFETY: FEAT_I8MM implies dotprod-era NEON.
+                    let v = unsafe { quant::dot_q4_k_4rows_r4_neon(group, x0, s0) };
+                    for r in 0..4 {
+                        chunk[r * m + xi] = v[r];
+                    }
+                }
+            });
+        debug_assert_eq!(groups * 4, n);
+        for g in 0..groups {
+            for r in 0..4 {
+                for i in 0..m {
+                    out[i * n + g * 4 + r] = out_t[(g * 4 + r) * m + i];
+                }
+            }
+        }
+        return Tensor::from_f32_vec(out, Shape::new([m, n]));
+    }
+
     #[cfg(target_arch = "aarch64")]
     if std::arch::is_aarch64_feature_detected!("dotprod") {
         for i in 0..m {
