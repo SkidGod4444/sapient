@@ -6,19 +6,20 @@
 //! per-token `copy_range` append — no CPU↔GPU round-trips in the hot loop.
 //!
 //! Scope: Llama-family architectures (Llama/Qwen/Mistral/SmolLM) — RMSNorm, full RoPE,
-//! GQA, SwiGLU MLP, optional q/k/v projection biases (Qwen2). **Q8_0 weights stay
-//! quantized on the GPU** (Phase 7.1): raw ggml blocks upload as packed int8 + f32
-//! scales and are dequantized inside the matmul/embed shaders — ~1.125 bytes/weight of
+//! GQA, SwiGLU MLP, optional q/k/v projection biases (Qwen2). **Q8_0 and Q4_K weights
+//! stay quantized on the GPU** (Phases 7.1/7.2): raw ggml blocks upload without f32
+//! expansion (Q8_0 as packed int8 + f32 scales, Q4_K super-blocks verbatim) and are
+//! dequantized inside the matmul/embed shaders — 1.125 / 0.5625 bytes per weight of
 //! VRAM instead of 4 (F16/BF16 linears are online-quantized to Q8_0 first, mirroring
 //! the CPU engine, so both engines see identical weight values). Other dtypes (F32,
-//! K-quants until Phase 7.2) dequantize to f32 on upload. Tokens are processed one at
-//! a time (`seq_q = 1`), so prefill is a sequential append — correct and simple;
+//! Q5_K/Q6_K until they get shaders) dequantize to f32 on upload. Tokens are processed
+//! one at a time (`seq_q = 1`), so prefill is a sequential append — correct and simple;
 //! batched prefill is a later optimization (Phase 7.5).
 
 use std::collections::HashMap;
 
 use anyhow::{bail, Context, Result};
-use sapient_backends_wgpu::{GpuBuffer, GpuQ8Buffer, WgpuContext};
+use sapient_backends_wgpu::{GpuBuffer, GpuQ4KBuffer, GpuQ8Buffer, WgpuContext};
 use sapient_core::{DType, Tensor};
 use sapient_hub::model_info::{ArchType, ModelInfo};
 
@@ -30,11 +31,13 @@ use super::common::{kv_cache_ctx, quantize_tensor_to_q8_0, should_quantize_onlin
 /// the CPU engine's 8192 to avoid OOMing modest GPUs at load (P5 adds a quantized cache).
 const WGPU_MAX_CTX: usize = 4096;
 
-/// A weight matrix resident on the GPU — either dense f32 or Q8_0 kept quantized
-/// (packed int8 + per-block scales, dequantized in-shader).
+/// A weight matrix resident on the GPU — dense f32, or kept quantized and
+/// dequantized in-shader: Q8_0 (packed int8 + per-block scales) or Q4_K (raw
+/// ggml super-blocks verbatim).
 enum GpuWeight {
     F32(GpuBuffer),
     Q8(GpuQ8Buffer),
+    Q4K(GpuQ4KBuffer),
 }
 
 impl GpuWeight {
@@ -43,7 +46,12 @@ impl GpuWeight {
         match self {
             GpuWeight::F32(b) => b.len * 4,
             GpuWeight::Q8(q) => q.byte_size(),
+            GpuWeight::Q4K(q) => q.byte_size(),
         }
+    }
+
+    fn is_quantized(&self) -> bool {
+        !matches!(self, GpuWeight::F32(_))
     }
 }
 
@@ -86,15 +94,23 @@ fn up(ctx: &WgpuContext, t: &Tensor, label: &str) -> GpuBuffer {
 }
 
 /// Upload a weight matrix, keeping it quantized on the GPU whenever possible:
-/// Q8_0 tensors upload their raw ggml blocks directly (no f32 expansion);
-/// F16/BF16 linears are online-quantized to Q8_0 first — the same
+/// Q8_0 and Q4_K tensors upload their raw ggml blocks directly (no f32
+/// expansion — Q4_K uploads verbatim, Q8_0 with a byte repack); F16/BF16
+/// linears are online-quantized to Q8_0 first — the same
 /// `should_quantize_online` rule (and therefore the same weight values) as the
-/// CPU engine. Everything else (F32, K-quants until Phase 7.2, rows not a
-/// multiple of the 32-weight block) dequantizes to f32 on upload.
+/// CPU engine. Everything else (F32, Q5_K/Q6_K until they get shaders, rows
+/// not a multiple of the block size) dequantizes to f32 on upload.
 fn upload_weight(ctx: &WgpuContext, name: &str, t: &Tensor, label: &str) -> Result<GpuWeight> {
     let k = t.shape().dims().last().copied().unwrap_or(0);
     if t.dtype() == DType::Q8_0 && k % 32 == 0 {
         return Ok(GpuWeight::Q8(ctx.upload_q8_0(
+            t.as_quant_blocks(),
+            t.numel(),
+            label,
+        )?));
+    }
+    if t.dtype() == DType::Q4_K && k % 256 == 0 {
+        return Ok(GpuWeight::Q4K(ctx.upload_q4_k(
             t.as_quant_blocks(),
             t.numel(),
             label,
@@ -118,6 +134,7 @@ fn mm(ctx: &WgpuContext, x: &GpuBuffer, w: &GpuWeight, m: usize, k: usize, n: us
     match w {
         GpuWeight::F32(b) => ctx.matmul_nt(x, b, m, k, n),
         GpuWeight::Q8(q) => ctx.matmul_nt_q8_0(x, q, m, k, n),
+        GpuWeight::Q4K(q) => ctx.matmul_nt_q4_k(x, q, m, k, n),
     }
 }
 
@@ -209,12 +226,12 @@ impl WgpuForwardEngine {
             });
         }
 
-        let (mut weight_bytes, mut q8_matrices, mut total_matrices) = (0usize, 0usize, 0usize);
+        let (mut weight_bytes, mut quant_matrices, mut total_matrices) = (0usize, 0usize, 0usize);
         let mut tally = |w: &GpuWeight| {
             weight_bytes += w.byte_size();
             total_matrices += 1;
-            if matches!(w, GpuWeight::Q8(_)) {
-                q8_matrices += 1;
+            if w.is_quantized() {
+                quant_matrices += 1;
             }
         };
         tally(&embed);
@@ -229,7 +246,7 @@ impl WgpuForwardEngine {
         tracing::info!(
             "WgpuForwardEngine ready: {} layers, {hidden} hidden, {n_heads}/{n_kv} heads, \
              head_dim {head_dim}, inter {inter}, ctx {max_seq}, weights {} MiB resident \
-             ({q8_matrices}/{total_matrices} matrices Q8_0{}) ({})",
+             ({quant_matrices}/{total_matrices} matrices quantized{}) ({})",
             info.num_hidden_layers,
             weight_bytes >> 20,
             if lm_head.is_none() {
@@ -292,6 +309,7 @@ impl WgpuForwardEngine {
         let mut x = match &self.embed {
             GpuWeight::F32(t) => ctx.embed(&ids, t, 1, hidden),
             GpuWeight::Q8(t) => ctx.embed_q8_0(&ids, t, 1, hidden),
+            GpuWeight::Q4K(t) => ctx.embed_q4_k(&ids, t, 1, hidden),
         };
 
         for layer in &self.layers {

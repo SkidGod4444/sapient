@@ -17,11 +17,12 @@
 //! [`WgpuContext`] acquires the device (adapter-max limits, `SHADER_F16` when
 //! available, a compute-pipeline cache). On top of it sits the GPU-resident
 //! compute layer the `WgpuForwardEngine` drives: [`GpuBuffer`] (f32 tensors in
-//! storage buffers) and [`GpuQ8Buffer`] (Q8_0 tensors kept quantized on-device,
-//! dequantized inside the shader — no host-side f32 expansion), plus the kernels
-//! `rms_norm`, `layer_norm`, `matmul_nt`, `matmul_nt_q8_0`, `rope`, `attention`
-//! (causal + non-causal GQA FlashDecoding), `swiglu`/`add`/`add_bias`/`gelu_erf`,
-//! `embed`/`embed_q8_0`, `transpose_heads`, and the KV-cache append `copy_range`.
+//! storage buffers), [`GpuQ8Buffer`] and [`GpuQ4KBuffer`] (Q8_0 / Q4_K tensors kept
+//! quantized on-device, dequantized inside the shader — no host-side f32 expansion),
+//! plus the kernels `rms_norm`, `layer_norm`, `matmul_nt`, `matmul_nt_q8_0`,
+//! `matmul_nt_q4_k`, `rope`, `attention` (causal + non-causal GQA FlashDecoding),
+//! `swiglu`/`add`/`add_bias`/`gelu_erf`, `embed`/`embed_q8_0`/`embed_q4_k`,
+//! `transpose_heads`, and the KV-cache append `copy_range`.
 //! Each kernel is validated against a CPU reference in `tests/resident.rs`.
 //!
 //! # Example
@@ -44,5 +45,5 @@ mod quant;
 mod resident;
 
 pub use context::{WgpuContext, WgpuError};
-pub use quant::GpuQ8Buffer;
+pub use quant::{GpuQ4KBuffer, GpuQ8Buffer};
 pub use resident::GpuBuffer;
