@@ -136,6 +136,7 @@ pub fn matmul_nt(x: &Tensor, w: &Tensor) -> Result<Tensor> {
         DType::Q4_K_R4 => matmul_nt_q4_k_r4(x, w, m, k, n),
         DType::Q5_K => matmul_nt_q5_k(x, w, m, k, n),
         DType::Q6_K => matmul_nt_q6_k(x, w, m, k, n),
+        DType::Q6_K_R4 => matmul_nt_q6_k_r4(x, w, m, k, n),
         _ => matmul_nt_float(x, w, m, k, n),
     }
 }
@@ -688,6 +689,70 @@ fn matmul_nt_q5_k(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
         );
     }
     Tensor::from_f32_vec(out, Shape::new([m, n]))
+}
+
+/// Q6_K_R4 (row-interleaved) GEMV — same scheme as `matmul_nt_q4_k_r4`: one
+/// contiguous packed stream per 4-row group (aarch64 NEON), with a portable
+/// de-interleaving scalar fallback for correctness everywhere else.
+fn matmul_nt_q6_k_r4(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Result<Tensor> {
+    if k % 256 != 0 || n % 4 != 0 {
+        return Err(SapientError::internal(
+            "Q6_K_R4: k must be a multiple of 256 and rows a multiple of 4",
+        ));
+    }
+    let x_cow = x.to_f32_cow();
+    let x_data = x_cow.as_ref();
+    let w_blocks = w.as_quant_blocks();
+    let row_bytes = k / 256 * Q6_K_BLOCK_BYTES;
+    let group_bytes = 4 * row_bytes;
+    let mut out = vec![0.0f32; m * n];
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        for i in 0..m {
+            let x_row = &x_data[i * k..(i + 1) * k];
+            let gchunk = (gemv_chunk(n) / 4).max(1);
+            out[i * n..(i + 1) * n]
+                .par_chunks_mut(gchunk * 4)
+                .enumerate()
+                .for_each(|(ci, cs)| {
+                    let g0 = ci * gchunk;
+                    for (gl, slots) in cs.chunks_mut(4).enumerate() {
+                        let g = g0 + gl;
+                        // SAFETY: NEON is baseline on aarch64; slice is one group.
+                        let v = unsafe {
+                            quant::dot_q6_k_4rows_r4_neon(
+                                &w_blocks[g * group_bytes..(g + 1) * group_bytes],
+                                x_row,
+                            )
+                        };
+                        slots.copy_from_slice(&v[..slots.len()]);
+                    }
+                });
+        }
+        return Tensor::from_f32_vec(out, Shape::new([m, n]));
+    }
+
+    // Portable fallback: de-interleave each group and use the scalar dot.
+    #[allow(unreachable_code)]
+    {
+        for i in 0..m {
+            let x_row = &x_data[i * k..(i + 1) * k];
+            let nb = k / 256;
+            let mut row_buf = vec![0u8; row_bytes];
+            for g in 0..n / 4 {
+                for r in 0..4 {
+                    for b in 0..nb {
+                        let src = (g * 4 * nb + b * 4 + r) * Q6_K_BLOCK_BYTES;
+                        row_buf[b * Q6_K_BLOCK_BYTES..(b + 1) * Q6_K_BLOCK_BYTES]
+                            .copy_from_slice(&w_blocks[src..src + Q6_K_BLOCK_BYTES]);
+                    }
+                    out[i * n + g * 4 + r] = quant::dot_q6_k_row_f32(&row_buf, x_row);
+                }
+            }
+        }
+        Tensor::from_f32_vec(out, Shape::new([m, n]))
+    }
 }
 
 fn matmul_nt_q6_k(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Result<Tensor> {

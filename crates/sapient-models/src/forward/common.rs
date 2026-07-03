@@ -99,16 +99,31 @@ pub fn repack_q4_k_weights(
         .into_iter()
         .map(|(name, t)| {
             let dims = t.shape().dims().to_vec();
-            let eligible = t.dtype() == DType::Q4_K
+            // Q4_K repacks by default (measured: Pi +7%, M4 +5% over plain
+            // multi-row). Q6_K repack measured NEUTRAL on both Pi and M4 with
+            // the f32-activation kernel (A/B/A within ±2% noise), so it is
+            // OPT-IN (SAPIENT_REPACK_Q6K=1) — the layout + kernels stay as
+            // tested groundwork for a future W6A8 SDOT Q6_K kernel, where a
+            // single weight stream should actually pay.
+            let q6_opt_in = std::env::var("SAPIENT_REPACK_Q6K").is_ok_and(|v| v == "1");
+            let eligible = (t.dtype() == DType::Q4_K || (t.dtype() == DType::Q6_K && q6_opt_in))
                 && !t.is_mmap()
                 && dims.len() == 2
                 && dims[0] % 4 == 0
                 && dims[1] % 256 == 0
                 && name != embed_key;
             if eligible {
-                let packed =
-                    kernels::quant::repack_q4_k_rows4(t.as_quant_blocks(), dims[0], dims[1]);
-                if let Ok(r4) = Tensor::from_quant_bytes(&packed, dims, DType::Q4_K_R4) {
+                let (packed, r4_dtype) = match t.dtype() {
+                    DType::Q4_K => (
+                        kernels::quant::repack_q4_k_rows4(t.as_quant_blocks(), dims[0], dims[1]),
+                        DType::Q4_K_R4,
+                    ),
+                    _ => (
+                        kernels::quant::repack_q6_k_rows4(t.as_quant_blocks(), dims[0], dims[1]),
+                        DType::Q6_K_R4,
+                    ),
+                };
+                if let Ok(r4) = Tensor::from_quant_bytes(&packed, dims, r4_dtype) {
                     repacked += 1;
                     return (name, r4);
                 }
@@ -175,8 +190,8 @@ fn gather_row_f32(weight: &Tensor, row: usize, hidden: usize, dst: &mut [f32]) -
                 *d = half::bf16::from_le_bytes([b[0], b[1]]).to_f32();
             }
         }
-        DType::Q4_K_R4 => anyhow::bail!(
-            "embedding table is Q4_K_R4 (row-interleaved) — repacking must skip embeddings"
+        DType::Q4_K_R4 | DType::Q6_K_R4 => anyhow::bail!(
+            "embedding table is row-interleaved (R4) — repacking must skip embeddings"
         ),
         dt if dt.is_quantized() => {
             let row_bytes = dt.byte_count(hidden);

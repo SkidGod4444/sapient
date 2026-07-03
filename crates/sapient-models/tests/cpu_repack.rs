@@ -22,6 +22,23 @@ fn lcg(seed: u64) -> impl FnMut() -> f32 {
 }
 
 /// Random-but-valid raw Q4_K blocks with small positive d/dmin (magnitudes ~0.1).
+fn q6_k_random_tensor(shape: [usize; 2], next: &mut dyn FnMut() -> f32) -> Tensor {
+    let numel = shape[0] * shape[1];
+    assert_eq!(numel % 256, 0);
+    let mut blocks = Vec::with_capacity(numel / 256 * 210);
+    for _ in 0..numel / 256 {
+        for _ in 0..192 {
+            blocks.push((next().abs() * 255.0) as u8);
+        }
+        for _ in 0..16 {
+            blocks.push((next() * 127.0) as i8 as u8);
+        }
+        let d = half::f16::from_f32(2.0e-5 * (1.0 + next().abs()));
+        blocks.extend_from_slice(&d.to_le_bytes());
+    }
+    Tensor::from_quant_bytes(&blocks, shape.to_vec(), DType::Q6_K).unwrap()
+}
+
 fn q4_k_random_tensor(shape: [usize; 2], next: &mut dyn FnMut() -> f32) -> Tensor {
     let numel = shape[0] * shape[1];
     assert_eq!(numel % 256, 0);
@@ -83,7 +100,7 @@ fn tiny_q4_k_llama() -> (ModelInfo, HashMap<String, Tensor>) {
     w.insert("model.norm.weight".into(), norm(hidden, &mut next));
     w.insert(
         "lm_head.weight".into(),
-        q4_k_random_tensor([vocab, hidden], &mut next),
+        q6_k_random_tensor([vocab, hidden], &mut next),
     );
     for i in 0..layers {
         let p = format!("model.layers.{i}");
@@ -98,13 +115,17 @@ fn tiny_q4_k_llama() -> (ModelInfo, HashMap<String, Tensor>) {
         for (suffix, rows, cols) in [
             ("self_attn.q_proj", qd, hidden),
             ("self_attn.k_proj", kvd, hidden),
-            ("self_attn.v_proj", kvd, hidden),
         ] {
             w.insert(
                 format!("{p}.{suffix}.weight"),
                 q4_k_random_tensor([rows, cols], &mut next),
             );
         }
+        // v_proj as Q6_K — exactly where Q4_K_M files use it; exercises Q6_K_R4.
+        w.insert(
+            format!("{p}.self_attn.v_proj.weight"),
+            q6_k_random_tensor([kvd, hidden], &mut next),
+        );
         // o_proj has k = 96 (not %256) → stays plain Q4_K? No — k must be %256
         // for Q4_K at all; use f32 for o_proj like real mixed files use other
         // quants there.

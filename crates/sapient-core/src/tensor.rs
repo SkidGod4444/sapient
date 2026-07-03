@@ -462,46 +462,27 @@ impl Tensor {
                 let numel = self.numel();
                 let bytes = self.as_bytes();
                 let mut out = vec![0.0f32; numel];
-                let mut out_idx = 0usize;
-                for block in bytes.chunks_exact(Q6_K_BLOCK_BYTES) {
-                    let ql = &block[0..128];
-                    let qh = &block[128..192];
-                    let sc = &block[192..208];
-                    let d = half::f16::from_le_bytes([block[208], block[209]]).to_f32();
-                    let mut ql_off = 0usize;
-                    let mut qh_off = 0usize;
-                    // 16 i8 scales per super-block; within each 128-element half the
-                    // 4 sub-groups use scale offsets +0/+2/+4/+6 with a split at
-                    // l==16 (`is = l/16`), base advancing by 8 per 128-block. Matches
-                    // ggml dequantize_row_q6_K.
-                    let mut sc_base = 0usize;
-                    for _ in 0..(K_QUANT_BLOCK_SIZE / 128) {
-                        for l in 0..32usize {
-                            let is = l / 16;
-                            let q1 = (((ql[ql_off + l] & 0x0F) | ((qh[qh_off + l] & 3) << 4))
-                                as i32
-                                - 32) as f32;
-                            let q2 = (((ql[ql_off + l + 32] & 0x0F)
-                                | (((qh[qh_off + l] >> 2) & 3) << 4))
-                                as i32
-                                - 32) as f32;
-                            let q3 = (((ql[ql_off + l] >> 4) | (((qh[qh_off + l] >> 4) & 3) << 4))
-                                as i32
-                                - 32) as f32;
-                            let q4 = (((ql[ql_off + l + 32] >> 4)
-                                | (((qh[qh_off + l] >> 6) & 3) << 4))
-                                as i32
-                                - 32) as f32;
-                            out[out_idx + l] = d * sc[sc_base + is] as i8 as f32 * q1;
-                            out[out_idx + l + 32] = d * sc[sc_base + is + 2] as i8 as f32 * q2;
-                            out[out_idx + l + 64] = d * sc[sc_base + is + 4] as i8 as f32 * q3;
-                            out[out_idx + l + 96] = d * sc[sc_base + is + 6] as i8 as f32 * q4;
-                        }
-                        out_idx += 128;
-                        ql_off += 64;
-                        qh_off += 32;
-                        sc_base += 8;
-                    }
+                for (b, block) in bytes.chunks_exact(Q6_K_BLOCK_BYTES).enumerate() {
+                    Self::dequant_q6_k_block(block, &mut out[b * K_QUANT_BLOCK_SIZE..]);
+                }
+                out
+            }
+            DType::Q6_K_R4 => {
+                // Row-interleaved Q6_K — identical permutation to Q4_K_R4 (see
+                // that arm) over 210-byte blocks.
+                let numel = self.numel();
+                let dims = self.shape.dims();
+                let k = *dims.last().expect("Q6_K_R4 tensor must be 2-D");
+                let nb = k / K_QUANT_BLOCK_SIZE;
+                let bytes = self.as_bytes();
+                let mut out = vec![0.0f32; numel];
+                for (p, block) in bytes.chunks_exact(Q6_K_BLOCK_BYTES).enumerate() {
+                    let g = p / (4 * nb);
+                    let rem = p % (4 * nb);
+                    let b = rem / 4;
+                    let r = rem % 4;
+                    let off = ((g * 4 + r) * nb + b) * K_QUANT_BLOCK_SIZE;
+                    Self::dequant_q6_k_block(block, &mut out[off..]);
                 }
                 out
             }
@@ -535,6 +516,44 @@ impl Tensor {
             out_idx += 64;
             q_off += 32;
             is += 2;
+        }
+    }
+
+    /// Dequantize one 210-byte Q6_K super-block into `out[..256]` (shared by the
+    /// row-major Q6_K and row-interleaved Q6_K_R4 `to_f32_vec` paths). 16 i8
+    /// scales per super-block; within each 128-element half the 4 sub-groups use
+    /// scale offsets +0/+2/+4/+6 with a split at l==16 (`is = l/16`), base
+    /// advancing by 8 per 128-block — matches ggml dequantize_row_q6_K.
+    fn dequant_q6_k_block(block: &[u8], out: &mut [f32]) {
+        let ql = &block[0..128];
+        let qh = &block[128..192];
+        let sc = &block[192..208];
+        let d = half::f16::from_le_bytes([block[208], block[209]]).to_f32();
+        let mut out_idx = 0usize;
+        let mut ql_off = 0usize;
+        let mut qh_off = 0usize;
+        let mut sc_base = 0usize;
+        for _ in 0..(crate::dtype::K_QUANT_BLOCK_SIZE / 128) {
+            for l in 0..32usize {
+                let is = l / 16;
+                let q1 =
+                    (((ql[ql_off + l] & 0x0F) | ((qh[qh_off + l] & 3) << 4)) as i32 - 32) as f32;
+                let q2 = (((ql[ql_off + l + 32] & 0x0F) | (((qh[qh_off + l] >> 2) & 3) << 4))
+                    as i32
+                    - 32) as f32;
+                let q3 = (((ql[ql_off + l] >> 4) | (((qh[qh_off + l] >> 4) & 3) << 4)) as i32 - 32)
+                    as f32;
+                let q4 = (((ql[ql_off + l + 32] >> 4) | (((qh[qh_off + l] >> 6) & 3) << 4)) as i32
+                    - 32) as f32;
+                out[out_idx + l] = d * sc[sc_base + is] as i8 as f32 * q1;
+                out[out_idx + l + 32] = d * sc[sc_base + is + 2] as i8 as f32 * q2;
+                out[out_idx + l + 64] = d * sc[sc_base + is + 4] as i8 as f32 * q3;
+                out[out_idx + l + 96] = d * sc[sc_base + is + 6] as i8 as f32 * q4;
+            }
+            out_idx += 128;
+            ql_off += 64;
+            qh_off += 32;
+            sc_base += 8;
         }
     }
 

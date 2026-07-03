@@ -54,10 +54,14 @@ contiguous stream per task (`DType::Q4_K_R4`, pure-CPU engines, heap tensors
 only, embedding excluded, `SAPIENT_NO_REPACK=1` to disable). Bit-identical
 logits (engine-gated). Measured cumulative vs v0.5.0: **Pi 5 llama-1B 8.2→9.2
 tok/s (+12%), qwen-1.5B 6.6→7.5 (+14%); M4 +5–6%** — the llama.cpp CPU gap
-narrows from 1.79× to 1.60×. Next rungs, in measured-value order: the same
-repack+multi-row treatment for **Q6_K** (v_proj + lm_head + half of ffn_down ≈
-⅓ of decode bytes, still single-row), then **i8mm/SMMLA** kernels on v8.6+
-cores (M4/Grace).
+narrows from 1.79× to 1.60×. The **Q6_K** rung was then built and measured: with the existing f32-activation
+Q6_K kernel, the interleaved layout is **neutral on both Pi and M4** (A/B/A
+within ±2% noise) — so `Q6_K_R4` ships as tested, opt-in groundwork
+(`SAPIENT_REPACK_Q6K=1`) rather than a default. The measured conclusion: Q6_K's
+cost is the u8→f32 widening arithmetic, not the weight-stream layout — which
+makes the remaining ladder (in expected-value order): a **W6A8 SDOT Q6_K
+kernel** (int8 activations like Q4_K's, where the R4 stream should then pay),
+and **i8mm/SMMLA** kernels on v8.6+ cores (M4/Grace).
 
 **The honest read:**
 - On **Apple Metal** SAPIENT is competitive with llama.cpp (−7% on qwen-1.5B,
