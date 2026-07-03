@@ -80,23 +80,65 @@ pub fn quantize_tensor_to_q8_0(t: Tensor) -> Tensor {
 }
 
 /// Gather token embeddings: weight `[vocab, hidden]`, ids `[seq]` → `[1, seq, hidden]`.
+///
+/// **Row-wise, never whole-table** (Phase 8.3 finding): this runs every decode
+/// step, and the old `to_f32_cow()` fast path silently dequantized the ENTIRE
+/// table per token for quantized GGUF embeddings — for Llama-3.2-1B (tied Q6_K
+/// embed, 128k vocab × 2048) that was a ~1 GB f32 allocation + 262M-element
+/// dequant per generated token, the dominant decode cost. Each quantized row is
+/// a contiguous `byte_count(hidden)` slice (ggml quantizes per row;
+/// `hidden % block == 0` guaranteed for quantized tables), so we dequantize only
+/// the `seq_len` rows actually needed.
 pub fn embed_tokens(weight: &Tensor, input_ids: &[u32]) -> Result<Tensor> {
-    let hidden = weight.shape().dims()[1];
+    let dims = weight.shape().dims();
+    let (vocab, hidden) = (dims[0], dims[1]);
     let seq_len = input_ids.len();
-    // Embedding tables are commonly stored in F16/BF16; convert on the fly.
-    let w_cow = weight.to_f32_cow();
-    let w = w_cow.as_ref();
     let mut out = vec![0.0f32; seq_len * hidden];
 
     for (i, &id) in input_ids.iter().enumerate() {
-        let row = id as usize * hidden;
-        if row + hidden > w.len() {
+        if id as usize >= vocab {
             anyhow::bail!("token id {id} out of vocab range");
         }
-        out[i * hidden..(i + 1) * hidden].copy_from_slice(&w[row..row + hidden]);
+        let dst = &mut out[i * hidden..(i + 1) * hidden];
+        gather_row_f32(weight, id as usize, hidden, dst)?;
     }
 
     Tensor::from_f32(&out, Shape::new([1, seq_len, hidden])).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// Dequantize/convert one row of a `[vocab, hidden]` table into `dst` (len =
+/// `hidden`) without touching the rest of the table. Bit-identical to slicing
+/// the row out of a full `to_f32_vec()` (per-row block layout for quantized
+/// dtypes; plain per-element conversion for floats).
+fn gather_row_f32(weight: &Tensor, row: usize, hidden: usize, dst: &mut [f32]) -> Result<()> {
+    use sapient_core::DType;
+    match weight.dtype() {
+        DType::F32 => {
+            let w = weight.as_f32_slice();
+            dst.copy_from_slice(&w[row * hidden..(row + 1) * hidden]);
+        }
+        DType::F16 => {
+            let bytes = &weight.as_bytes()[row * hidden * 2..(row + 1) * hidden * 2];
+            for (d, b) in dst.iter_mut().zip(bytes.chunks_exact(2)) {
+                *d = half::f16::from_le_bytes([b[0], b[1]]).to_f32();
+            }
+        }
+        DType::BF16 => {
+            let bytes = &weight.as_bytes()[row * hidden * 2..(row + 1) * hidden * 2];
+            for (d, b) in dst.iter_mut().zip(bytes.chunks_exact(2)) {
+                *d = half::bf16::from_le_bytes([b[0], b[1]]).to_f32();
+            }
+        }
+        dt if dt.is_quantized() => {
+            let row_bytes = dt.byte_count(hidden);
+            let blocks = &weight.as_quant_blocks()[row * row_bytes..(row + 1) * row_bytes];
+            let t = Tensor::from_quant_bytes(blocks, vec![1, hidden], dt)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            dst.copy_from_slice(&t.to_f32_vec());
+        }
+        other => anyhow::bail!("unsupported embedding dtype {other}"),
+    }
+    Ok(())
 }
 
 /// Linear on 3-D activations: `[1, seq, in] @ W^T` where W is `[out, in]`.
@@ -547,4 +589,56 @@ pub fn mean_pool_hidden(hidden: &Tensor) -> Result<Vec<f32>> {
         *v /= n;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sapient_core::DType;
+
+    /// Row-wise embedding gather must be bit-identical to slicing rows out of a
+    /// full-table dequant — for every table dtype the GGUF/safetensors paths
+    /// ship (the old implementation did the full-table dequant per decode step;
+    /// this pins the replacement to the same values).
+    #[test]
+    fn embed_row_gather_matches_full_dequant() {
+        let (vocab, hidden) = (17usize, 256usize);
+        let mut s = 0xABCDu64;
+        let mut next = move || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((s >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
+        };
+        let data: Vec<f32> = (0..vocab * hidden).map(|_| next()).collect();
+
+        // Build one table per dtype from the same values.
+        let f32_t = Tensor::from_f32(&data, Shape::new([vocab, hidden])).unwrap();
+        let f16_bytes: Vec<u8> = data
+            .iter()
+            .flat_map(|&v| half::f16::from_f32(v).to_le_bytes())
+            .collect();
+        let f16_t = Tensor::from_f16_bytes(&f16_bytes, Shape::new([vocab, hidden])).unwrap();
+        let q8_t = quantize_tensor_to_q8_0(f32_t.clone());
+        assert_eq!(q8_t.dtype(), DType::Q8_0);
+
+        for table in [&f32_t, &f16_t, &q8_t] {
+            let full = table.to_f32_vec();
+            let ids: Vec<u32> = vec![0, 7, 16, 3];
+            let got = embed_tokens(table, &ids).unwrap();
+            let got = got.as_f32_slice();
+            for (i, &id) in ids.iter().enumerate() {
+                let want = &full[id as usize * hidden..(id as usize + 1) * hidden];
+                assert_eq!(
+                    &got[i * hidden..(i + 1) * hidden],
+                    want,
+                    "row gather differs from full dequant (dtype {:?}, id {id})",
+                    table.dtype()
+                );
+            }
+        }
+
+        // Out-of-range id still errors.
+        assert!(embed_tokens(&f32_t, &[vocab as u32]).is_err());
+    }
 }

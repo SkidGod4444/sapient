@@ -44,12 +44,20 @@ Reproduce with: `python3 scripts/bench_wgpu.py --backends cpu --model <alias> --
 Reference device: **Pi 5 16 GB**, Raspberry Pi OS 64-bit, sapient v0.4.4
 (measured 2026-07-03; sustained decode plateaus at ~75 °C on this board).
 
-| Model | Pi 5 16 GB (v0.4.4) | notes |
-|---|---|---|
-| qwen2.5-0.5b-q4 | **8.7 tok/s**, TTFT 116 ms | up from ~6.1 at v0.3.9 |
-| qwen2.5-1.5b-q4 | **1.9 tok/s**, TTFT 507 ms | memory-bound, matches v0.3.9 |
-| llama-3.2-3b Q4_K_M | TBD | — |
-| mistral-7b Q4_K_M (mmap) | ~0.6 (v0.3.9 measurement) | — |
+| Model | Pi 5 16 GB | vs v0.4.4 release | TTFT |
+|---|---|---|---|
+| qwen2.5-0.5b-q4 | **8.7 tok/s** | = (embed was never quantized) | 116 ms |
+| llama-3.2-1b-q4 | **8.3 tok/s** | **6.4×** (was 1.3) | 119 ms |
+| qwen2.5-1.5b-q4 | **6.7 tok/s** | **3.5×** (was 1.9) | 148 ms |
+| llama-3.2-3b-q4 | **3.4 tok/s** | **4.3×** (was 0.8) | 303 ms |
+| mistral-7b Q4_K_M (mmap) | ~0.6 (v0.3.9 measurement) | — | — |
+
+The big jumps come from the Phase-8 embedding fix: the engine used to
+dequantize the **entire** quantized embedding table every decode step
+(`to_f32_cow` on a `[vocab, hidden]` GGUF table — ~0.8 GB of Q6_K dequant per
+token for Llama-3.2-1B's tied 128k-vocab embedding). Embedding lookup is now
+row-wise; only the tokens actually processed are dequantized. 1B-class chat on
+a Pi 5 is genuinely interactive now, and even 3B is usable.
 
 Sustained (6-minute soak, back-to-back 64-token generations, 0.5B): steady
 **8.70 tok/s** with the SoC plateauing at 71–75 °C — no throttling on this
@@ -97,7 +105,12 @@ Notes:
 - `whisper-tiny` keeps STT latency reasonable on the Pi; `whisper-base` is
   noticeably more accurate but slower.
 - Replies stream sentence-by-sentence into TTS, so speech starts before the
-  LLM finishes. End-to-end latency figures on the Pi 5: TBD.
+  LLM finishes. Measured on the Pi 5 (v0.4.4 release binary, WAV-injected turn via
+  `converse --input`): STT 3.5 s (whisper-tiny, 0.6× realtime) + LLM 2.1 s
+  (0.5B) + TTS 5.3 s (Kokoro, RTF 2.34) ≈ **10.9 s per turn** — functional and
+  correct end-to-end, not yet conversational-speed on Pi hardware (streaming
+  overlap is roadmap Phase 10; the embedding fix above will also cut the LLM
+  stage on the next release).
 
 ## Bigger models than RAM
 
