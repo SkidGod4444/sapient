@@ -189,6 +189,22 @@ Fixed submission overhead matters most when the per-kernel GPU work is small —
 hence the bigger win on the smaller model. The batch flushes once per token:
 accumulating a whole prompt's passes into one encoder stalls Metal.
 
+### Batched prefill (Phase 7.5)
+
+Prompts now prefill in 128-token chunks (`forward_chunk`) instead of one
+sequential forward per token. Cold end-to-end (fresh server, model load
+included), Qwen2.5-1.5B Q4_K_M, ~640-token prompt, greedy, M4/Metal:
+
+| | per-token prefill | chunked prefill |
+|---|---|---|
+| Time to first token | 87.9 s | **58.5 s (1.5×)** |
+| Reply | "fox" (correct) | "fox" (identical) |
+
+Known limitation: the matmul kernels are still GEMV-shaped (one workgroup per
+output element), so chunking improves occupancy and pass count but does not yet
+amortise weight reads across the chunk — a multi-row/tiled GEMM is the follow-up
+that makes prefill weight traffic scale with 1/chunk.
+
 ### f16 KV cache (Phase 7.3)
 
 K/V now store as f16 halves packed two-per-u32 word (core WGSL — no shader-f16

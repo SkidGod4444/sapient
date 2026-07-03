@@ -148,12 +148,23 @@ Radeon, Nvidia, and Apple — and are dev-tested on Apple Silicon (Metal under w
   Shader-level fusion (norm→GEMV, gate/up→SwiGLU) evaluated and deferred: post-
   batching it would cut ~3 of ~450 kernels while multiplying shaders across 4
   weight formats; revisit if 7.6 discrete-GPU data shows launch-bound decode.
-- [ ] **P5 (remaining)**: batched prefill (`seq_q>1`), scratch-buffer/bind-group
-  reuse (per-dispatch uniform + output allocations are the next overhead after
-  batching), discrete-adapter pick, `sapient devices` listing, Linux/Windows CI,
-  bench on real Arc/AMD/Nvidia cards. (Q5_K/Q4_0 in-shader dequant only if a shipped
-  model needs them — Q4_K_M files are fully covered by Q4_K+Q6_K+Q8_0; a quantized
-  Q8 KV cache only if long-context memory becomes the constraint.)
+- ✅ **Batched prefill** (Phase 7.5, `forward_chunk` + multi-token `kv_append`):
+  prompts process in 128-token chunks — transposes to heads-major for RoPE /
+  KV-append / attention (`seq_q = chunk`, the FlashDecoding kernel handles it
+  causally via `kv_offset`), last position sliced before the final norm; decode
+  keeps the transpose-free `seq_q = 1` fast path. Measured (Qwen2.5-1.5B, ~640-token
+  prompt, cold incl. load): time-to-first-token **87.9 → 58.5 s (1.5×)**, identical
+  greedy reply. Gated by `wgpu_chunked_prefill_matches_per_token` (300-token prompt,
+  chunk boundaries + pos0>0). **Known limitation:** matmuls are still GEMV-shaped,
+  so weights are read `m×` per chunk — the multi-row/tiled GEMM epilogue that makes
+  prefill weight traffic ∝ 1/chunk is the highest-value follow-up below.
+- [ ] **P5 (remaining)**: multi-row/tiled GEMM for prefill matmuls (amortise weight
+  reads across the chunk), scratch-buffer/bind-group reuse (per-dispatch uniform +
+  output allocations are the next overhead after batching), discrete-adapter pick,
+  `sapient devices` listing, Linux/Windows CI, bench on real Arc/AMD/Nvidia cards.
+  (Q5_K/Q4_0 in-shader dequant only if a shipped model needs them — Q4_K_M files are
+  fully covered by Q4_K+Q6_K+Q8_0; a quantized Q8 KV cache only if long-context
+  memory becomes the constraint.)
 - **Success metric:** a Q4 model on an Intel Arc / AMD Radeon card decoding several×
   faster than that machine's CPU path, from the same single binary.
 
