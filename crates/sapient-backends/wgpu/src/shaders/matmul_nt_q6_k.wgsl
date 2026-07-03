@@ -62,18 +62,21 @@ fn cs_main(@builtin(workgroup_id) wg: vec3<u32>,
         let qh_shift = g * 2u;
         let xoff = xb + b * 256u + h * 128u + g * 32u + l16 * 16u;
 
-        var sum_q = 0.0; // Σ x·(q − 32)
+        // Vectorized dequant: assemble each 6-bit q in its byte lane (low nibble
+        // from ql, two high bits from qh) and read all four as q/255 with one
+        // unpack4x8unorm; Σx·(q−32) = 255·Σx·(q/255) − 32·Σx.
+        var sum_q = 0.0; // Σ x·(q/255)
+        var sum_x = 0.0; // Σ x
         for (var w = 0u; w < 4u; w = w + 1u) {
-            let qlw = qb[blk + ql0 + w];
-            let qhw = qb[blk + 32u + qh0 + w];
+            let ln = (qb[blk + ql0 + w] >> shift4) & 0x0F0F0F0Fu;
+            let hn = ((qb[blk + 32u + qh0 + w] >> qh_shift) & 0x03030303u) << 4u;
+            let q6 = unpack4x8unorm(ln | hn);
             let xi = xoff + w * 4u;
-            for (var t = 0u; t < 4u; t = t + 1u) {
-                let q = ((byte_of(qlw, t) >> shift4) & 0xFu)
-                      | (((byte_of(qhw, t) >> qh_shift) & 3u) << 4u);
-                sum_q = sum_q + x[xi + t] * (f32(q) - 32.0);
-            }
+            let xv = vec4<f32>(x[xi], x[xi + 1u], x[xi + 2u], x[xi + 3u]);
+            sum_q = sum_q + dot(q6, xv);
+            sum_x = sum_x + dot(xv, vec4<f32>(1.0));
         }
-        acc = acc + d * sc * sum_q;
+        acc = acc + d * sc * (255.0 * sum_q - 32.0 * sum_x);
         sg = sg + WG;
     }
     partial[tid] = acc;

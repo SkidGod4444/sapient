@@ -158,13 +158,31 @@ Radeon, Nvidia, and Apple — and are dev-tested on Apple Silicon (Metal under w
   chunk boundaries + pos0>0). **Known limitation:** matmuls are still GEMV-shaped,
   so weights are read `m×` per chunk — the multi-row/tiled GEMM epilogue that makes
   prefill weight traffic ∝ 1/chunk is the highest-value follow-up below.
-- [ ] **P5 (remaining)**: multi-row/tiled GEMM for prefill matmuls (amortise weight
-  reads across the chunk), scratch-buffer/bind-group reuse (per-dispatch uniform +
-  output allocations are the next overhead after batching), discrete-adapter pick,
-  `sapient devices` listing, Linux/Windows CI, bench on real Arc/AMD/Nvidia cards.
-  (Q5_K/Q4_0 in-shader dequant only if a shipped model needs them — Q4_K_M files are
-  fully covered by Q4_K+Q6_K+Q8_0; a quantized Q8 KV cache only if long-context
-  memory becomes the constraint.)
+- ✅ **Nvidia datapoint (7.6, Jetson AGX Thor via Vulkan, 2026-07-03)**: whole
+  quantized WGSL stack correct on Vulkan first try (198/198 quantized, greedy
+  matches Metal/CPU). 1.5B: CPU 2.2 → wgpu-quantized **10 tok/s (4.5×)**; but the
+  **f32 path hits 19.6 tok/s** (bandwidth roofline) — the dequant kernels are
+  **ALU-bound on Nvidia** (Q8_0 ≈ 0.9× f32, Q4_K/Q6_K ~0.5×). The ≥2×-f32 bar is
+  NOT met on bandwidth-rich Thor-class hardware; quantized-resident's value there
+  is the 6.4× memory cut. See BENCHMARKS.md for the full table.
+- ✅ **Multi-row dequant GEMM (MT=8)** for all prefill matmuls (f32/Q8_0/Q4_K/
+  Q6_K `_mt` shader variants): weight blocks decoded once per 8 x-rows. Measured
+  1101-token cold prefill: Thor **485→57 s (~8.5×** — the full amortization
+  factor, confirming GEMV prefill was dequant-ALU-bound on Nvidia); M4 Metal
+  59.8→37.9 s (1.58×). Decode (m=1) untouched and unchanged on both.
+- ✅ **Vectorized dequant** (unpack4x8snorm/unorm + dot in all six quant matmul
+  shaders, norm constants folded into block scales): M4 1.5B decode 12.8→14.3
+  tok/s (+12%); Thor neutral — which pins the remaining Nvidia m=1 gap on the
+  GEMV **workgroup shape** (one output per 256-lane workgroup ⇒ ~1 word/lane +
+  8-round reduction; f32 hides it behind 4× traffic), not instruction cost.
+- [ ] **P5 (remaining)**: decode-GEMV shape rework for bandwidth-rich GPUs
+  (fewer lanes per output / multiple outputs per workgroup — the measured
+  Nvidia m=1 gap), then scratch-buffer/bind-group reuse,
+  discrete-adapter pick, `sapient devices` listing, Linux/Windows CI, bench on
+  real **Arc/AMD** cards (the remaining 7.6 vendors — and the original "done
+  when" targets). (Q5_K/Q4_0 in-shader dequant only if a shipped model needs
+  them; quantized Q8 KV cache only if long-context memory becomes the
+  constraint.)
 - **Success metric:** a Q4 model on an Intel Arc / AMD Radeon card decoding several×
   faster than that machine's CPU path, from the same single binary.
 

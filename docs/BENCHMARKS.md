@@ -189,11 +189,43 @@ Fixed submission overhead matters most when the per-kernel GPU work is small —
 hence the bigger win on the smaller model. The batch flushes once per token:
 accumulating a whole prompt's passes into one encoder stalls Metal.
 
-### Help wanted: cross-vendor numbers (Phase 7.6)
+### Cross-vendor numbers (Phase 7.6): Nvidia ✅ (Jetson AGX Thor, Vulkan)
 
-Everything above was measured on Apple Silicon (wgpu→Metal). The same WGSL needs
-numbers from real **Intel Arc / AMD Radeon / Nvidia** cards, where the smaller
-quantized weight reads should matter more than on UMA. If you have one:
+First non-Apple datapoint, measured 2026-07-03 on a **Jetson AGX Thor DevKit**
+(14-core ARM CPU, NVIDIA Thor iGPU, 122 GB LPDDR5X, driver 595.78, Vulkan) —
+notable in itself: this is GPU LLM inference on a Jetson **without CUDA or any
+JetPack SDK integration**, just the Vulkan driver (the Phase 7b story).
+
+**Correctness first**: the entire quantized WGSL stack ran on Vulkan unmodified,
+first try — `WgpuForwardEngine ready … 1062 MiB resident (198/198 matrices
+quantized) (NVIDIA Thor (Vulkan))`, byte-identical greedy answer to Metal/CPU.
+
+Decode, 64 tokens (same binary class, same models, same machine):
+
+| Model | CPU (14-core) | wgpu **quantized-resident** (PR) | wgpu **f32-upload** (main) |
+|---|---|---|---|
+| Qwen2.5-1.5B Q4_K_M | 2.2 tok/s, TTFT 475 ms | 9.8–10.0 tok/s, TTFT ~96 ms (**4.5× CPU**) | **19.6 tok/s**, TTFT 49 ms (8.9× CPU) |
+| SmolLM2-360M Q8_0 | 17.2 tok/s | 29.4 tok/s (1.71× CPU) | 32.5 tok/s |
+| Weights resident (1.5B) | — | **1062 MiB** | 6778 MiB |
+
+**Honest finding — the dequant kernels are ALU-bound on Nvidia.** The f32 path's
+19.6 tok/s sits almost exactly on the Thor's ~273 GB/s bandwidth roofline
+(6.2 GB of weights per token), while the quantized path reads 6× less data yet
+decodes at half the speed: on this GPU the per-weight bit-unpacking (worst in
+Q4_K/Q6_K; Q8_0 is nearly free at 0.9× f32) dominates. Metal hides this
+(quantized ≈ f32 ± a few % on M4); Vulkan/Nvidia does not. Consequences:
+- Phase 7's "≥2× the f32 path" bar is **not met on Thor-class hardware** — there
+  the quantized path's value is the 6.4× memory cut (fitting models on
+  small-VRAM cards, leaving RAM free), not raw speed.
+- The identified follow-up is a **vectorized / multi-row dequant GEMM** (each
+  weight block decoded once and reused across rows, wider u32 processing) — it
+  was already the top P5-remaining item after 7.5, and the Thor data raises its
+  priority.
+- Mid-range Arc/AMD cards (8–16 GB VRAM, where the f32 1.5B footprint is
+  painful and bandwidth is scarcer) remain the open measurement — the original
+  target of the "done when" criteria.
+
+Still wanted — **Intel Arc / AMD Radeon**:
 
 ```bash
 # Linux (needs Rust, python3, libvulkan1 + your GPU driver):
@@ -210,11 +242,44 @@ request to capture the `WgpuForwardEngine ready` line (VRAM + quantized-matrix c
 Phase 7's acceptance bar on this hardware: ≥2× the f32-path decode on the same
 card, and 1.5B Q4 above 15 tok/s on a mid-range Arc/AMD.
 
+### Vectorized dequant (unpack4x8 + dot)
+
+All six quantized matmul shaders now decode weights with hardware byte unpacks
+(`unpack4x8snorm/unorm`, normalization constants folded into the block scales)
+and reduce with `dot()` — one unpack per 4 weights instead of per-byte
+shift/mask chains. **M4/Metal: 1.5B decode 12.8 → 14.3 tok/s (+12%)**; Jetson
+Thor: neutral. The Thor neutrality *refines* the ALU-bound finding: with
+dequant arithmetic now near-free, m=1 decode there is limited by the GEMV
+**workgroup shape** (256 lanes per single output element at k≈1536 → ~1 word
+per lane, then an 8-round barrier reduction per element; the f32 kernel hides
+that latency behind 4× the memory traffic). The remaining Nvidia decode work is
+a shape rework — fewer lanes per output / several outputs per workgroup — not
+further instruction tuning.
+
+### Multi-row dequant GEMM (prefill matmuls)
+
+For `m > 1` each workgroup now dequantizes a weight row **once** and applies it
+to 8 x-rows (MT=8), instead of the single-row GEMV re-reading and re-decoding
+every weight `m` times per chunk. Decode (`m = 1`) keeps the untouched GEMV
+kernels. Cold 1101-token prefill (server start incl. model load, Qwen2.5-1.5B
+Q4_K_M, greedy):
+
+| Device | GEMV prefill (before) | MT-8 GEMM (after) |
+|---|---|---|
+| Jetson AGX Thor (Vulkan) | 485 s | **57.4 s (~8.5×)** |
+| Apple M4 (Metal) | 59.8 s | **37.9 s (1.58×)** |
+
+The Thor's ~8.5× is the full MT amortization factor — direct confirmation that
+GEMV prefill was dequant-ALU-bound on Nvidia (the finding above). Decode is
+unchanged on both platforms (same kernels at m = 1). Note the ALU-bound *decode*
+gap on Nvidia remains open — at m = 1 there are no rows to amortize across; that
+needs cheaper per-weight unpacking in the GEMV kernels themselves.
+
 ### Batched prefill (Phase 7.5)
 
 Prompts now prefill in 128-token chunks (`forward_chunk`) instead of one
 sequential forward per token. Cold end-to-end (fresh server, model load
-included), Qwen2.5-1.5B Q4_K_M, ~640-token prompt, greedy, M4/Metal:
+included), Qwen2.5-1.5B Q4_K_M, ~1100-token prompt, greedy, M4/Metal:
 
 | | per-token prefill | chunked prefill |
 |---|---|---|

@@ -19,12 +19,6 @@ struct P { m: u32, k: u32, n: u32, _pad: u32 };
 const WG: u32 = 256u;
 var<workgroup> partial: array<f32, 256>;
 
-// Extract the `lane`-th int8 (0..3) from a u32 word, sign-extended to f32.
-fn unpack_i8(word: u32, lane: u32) -> f32 {
-    let byte = (word >> (lane * 8u)) & 0xFFu;
-    return f32(i32(byte << 24u) >> 24u);
-}
-
 @compute @workgroup_size(256)
 fn cs_main(@builtin(workgroup_id) wg: vec3<u32>,
            @builtin(local_invocation_id) lid: vec3<u32>,
@@ -46,10 +40,12 @@ fn cs_main(@builtin(workgroup_id) wg: vec3<u32>,
         let word = qs[wb + wi];
         let scale = scales[sb + (wi >> 3u)]; // 8 words per 32-weight block
         let xi = xb + wi * 4u;
-        acc = acc + scale * (x[xi]      * unpack_i8(word, 0u)
-                           + x[xi + 1u] * unpack_i8(word, 1u)
-                           + x[xi + 2u] * unpack_i8(word, 2u)
-                           + x[xi + 3u] * unpack_i8(word, 3u));
+        // Vectorized dequant: unpack4x8snorm = q/127 per byte lane (Q8_0 quants
+        // never reach -128, so the snorm clamp is a no-op) — fold the 127 back
+        // into the scale and reduce with one hardware dot per 4 weights.
+        let w4 = unpack4x8snorm(word);
+        let xv = vec4<f32>(x[xi], x[xi + 1u], x[xi + 2u], x[xi + 3u]);
+        acc = acc + (scale * 127.0) * dot(w4, xv);
         wi = wi + WG;
     }
     partial[tid] = acc;
