@@ -174,6 +174,21 @@ read cut 6.5× (933 MB f32 → 196 MB Q6_K per token) the portable GPU path now
 numbers (Arc/AMD/Nvidia, where the bandwidth win is larger) are still open —
 Phase 7.6.
 
+### Per-token command batching (Phase 7.4)
+
+Each decode token's ~450 kernels (16/layer × 28 layers on a 1.5B) used to pay one
+queue submission each; they now record into a single command encoder and submit
+once per token. Back-to-back on the same warm machine (M4, wgpu→Metal, 64 tokens):
+
+| Model | before | after |
+|---|---|---|
+| SmolLM2-360M Q8_0 | 23.1 tok/s, TTFT 40.5 ms | **29.3 tok/s (+27%), TTFT 35.0 ms** |
+| Qwen2.5-1.5B Q4_K_M | 12.0 tok/s, TTFT 86 ms | **12.5 tok/s (+4%), TTFT 80 ms** |
+
+Fixed submission overhead matters most when the per-kernel GPU work is small —
+hence the bigger win on the smaller model. The batch flushes once per token:
+accumulating a whole prompt's passes into one encoder stalls Metal.
+
 ### f16 KV cache (Phase 7.3)
 
 K/V now store as f16 halves packed two-per-u32 word (core WGSL — no shader-f16

@@ -337,10 +337,12 @@ online-quantized to Q8_0 on upload, same as the CPU engine.
 
 The KV cache is **f16** (packed halves, f32 accumulation — works on any adapter,
 no shader-f16 feature needed), which doubles the on-GPU context window to 8192 at
-the same memory cost as the old f32@4096 cache.
+the same memory cost as the old f32@4096 cache. Each decoded token's kernels are
+batched into **one queue submission** (was ~450), worth +27% decode on a 360M
+model and +4% on 1.5B (M4/Metal).
 
-Current scope: Llama-family models, one token per submission. Kernel fusion and
-batched prefill are tracked in [ROADMAP Phase 3b](docs/ROADMAP.md).
+Current scope: Llama-family models, decode one token at a time. Batched prefill
+and buffer reuse are tracked in [ROADMAP Phase 3b](docs/ROADMAP.md).
 
 **Benchmark it on your machine.** `scripts/bench_wgpu.py` times TTFT and decode tok/s
 across backends so you can see what your GPU buys you — works on any OS/vendor, needs

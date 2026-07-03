@@ -139,8 +139,18 @@ Radeon, Nvidia, and Apple — and are dev-tested on Apple Silicon (Metal under w
   **4096 → 8192** (`kv_cache_ctx` / `SAPIENT_CTX`) at the same memory; auto-on for
   even head_dim (all real models). Decode unchanged within noise at short context.
   Gated by an f16-rounded-reference kernel test + `wgpu_f16_kv_cache_matches_f32_kv_cache`.
-- [ ] **P5 (remaining)**: kernel fusion (cut per-token dispatches), batched prefill
-  (`seq_q>1`), discrete-adapter pick, `sapient devices` listing, Linux/Windows CI,
+- ✅ **Per-token command batching** (Phase 7.4, `begin_batch`/`flush_batch`):
+  every kernel used to pay its own queue submission (~450/token); each decode
+  token now records into one shared encoder and submits once. Measured
+  back-to-back on M4/Metal: SmolLM2-360M **23.1→29.3 tok/s (+27%)**, TTFT
+  40.5→35 ms; Qwen2.5-1.5B 12.0→12.5 tok/s (+4%), TTFT 86→80 ms. **Must flush
+  per token** — batching a whole prompt's passes into one encoder stalls Metal.
+  Shader-level fusion (norm→GEMV, gate/up→SwiGLU) evaluated and deferred: post-
+  batching it would cut ~3 of ~450 kernels while multiplying shaders across 4
+  weight formats; revisit if 7.6 discrete-GPU data shows launch-bound decode.
+- [ ] **P5 (remaining)**: batched prefill (`seq_q>1`), scratch-buffer/bind-group
+  reuse (per-dispatch uniform + output allocations are the next overhead after
+  batching), discrete-adapter pick, `sapient devices` listing, Linux/Windows CI,
   bench on real Arc/AMD/Nvidia cards. (Q5_K/Q4_0 in-shader dequant only if a shipped
   model needs them — Q4_K_M files are fully covered by Q4_K+Q6_K+Q8_0; a quantized
   Q8 KV cache only if long-context memory becomes the constraint.)
