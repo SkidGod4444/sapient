@@ -324,20 +324,20 @@ cargo build --release -p sapient-cli --features wgpu
 ./target/release/sapient chat openhorizon/qwen2.5-0.5b --backend wgpu
 ```
 
-**Q8_0 and Q4_K weights stay quantized on the GPU**: raw ggml blocks upload without
-f32 expansion (Q4_K super-blocks verbatim — zero repack) and are dequantized inside
-the shader — 1.125 / 0.5625 bytes per weight of VRAM instead of 4. Measured on Apple
-M4 (16 GB, wgpu→Metal): SmolLM2-360M Q8_0 weights resident 1.6 GiB → **388 MiB**
-(≈ the GGUF file size) with greedy output token-identical to the f32 path;
-Qwen2.5-1.5B Q4_K_M weights resident 6.8 GiB → **2.4 GiB**, peak process footprint
-14.7 → 5.4 GB — on a 16 GB machine the old f32 path ran out of memory at 1.5B while
-the quantized-resident path answers correctly. F16/BF16 safetensors linears are
+**Quantized weights stay quantized on the GPU** (Q8_0, Q4_K, Q6_K): raw ggml blocks
+upload without f32 expansion and are dequantized inside the shader — a Q4_K_M GGUF
+loads **fully quantized**, so VRAM ≈ the GGUF file size. Measured on Apple M4
+(16 GB, wgpu→Metal): SmolLM2-360M Q8_0 weights resident 1.6 GiB → **388 MiB** with
+greedy output token-identical to the f32 path; Qwen2.5-1.5B Q4_K_M weights resident
+6.8 GiB → **1.06 GiB** (198/198 matrices quantized), peak process footprint
+14.7 → 3.6 GB, decode **13.2 tok/s — 1.13× the NEON-optimized M4 CPU path**. On a
+16 GB machine the old f32 path ran out of memory at 1.5B (empty replies); the
+quantized-resident path answers correctly. F16/BF16 safetensors linears are
 online-quantized to Q8_0 on upload, same as the CPU engine.
 
-Current scope: Llama-family models; Q5_K/Q6_K still expand to f32 on upload
-(Q6_K covers v_proj + lm_head in Q4_K_M files — next target), KV cache is f32, one
-token per submission. In-shader Q6_K dequant, an f16/quantized KV cache, kernel
-fusion, and batched prefill are tracked in [ROADMAP Phase 3b](docs/ROADMAP.md).
+Current scope: Llama-family models, KV cache is f32, one token per submission. An
+f16/quantized KV cache, kernel fusion, and batched prefill are tracked in
+[ROADMAP Phase 3b](docs/ROADMAP.md).
 
 **Benchmark it on your machine.** `scripts/bench_wgpu.py` times TTFT and decode tok/s
 across backends so you can see what your GPU buys you — works on any OS/vendor, needs

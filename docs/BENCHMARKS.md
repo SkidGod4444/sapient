@@ -151,26 +151,28 @@ is expected from discrete cards (Arc/AMD/Nvidia), where the 3.6× smaller weight
 reads directly cut the memory-bandwidth bottleneck — those runs are still open
 (Phase 7.6).
 
-### Q4_K (Phase 7.2) — Qwen2.5-1.5B Q4_K_M, Apple M4 16 GB, wgpu→Metal
+### Q4_K + Q6_K — Qwen2.5-1.5B Q4_K_M, Apple M4 16 GB, wgpu→Metal
 
-Raw 144-byte Q4_K super-blocks upload verbatim (word-aligned, zero repack) and
-decode in-shader (6-bit scale/min pairs + 4-bit nibbles). 169/198 matrices load
-quantized; the rest are Q6_K (v_proj + the ~933 MB lm_head), still f32 until a
-Q6_K shader lands.
+Raw 144-byte Q4_K super-blocks upload verbatim (word-aligned, zero repack); Q6_K
+blocks (210 bytes) are padded to 212 (memcpy only). Both decode in-shader. With
+Q6_K covering v_proj + lm_head, a Q4_K_M GGUF loads **fully quantized**
+(198/198 matrices).
 
-| Metric | f32 upload (before) | Q4_K resident (after) |
-|---|---|---|
-| Weights resident on GPU | 6778 MiB | **2367 MiB** |
-| Peak memory footprint | 14.66 GB | **5.36 GB** |
-| Peak RSS (one-shot chat) | 8.41 GB | **4.82 GB** |
-| Greedy output | *broken* — immediate EOS, empty reply (memory exhaustion on 16 GB) | correct ("Paris"), byte-identical to the CPU engine's greedy answer |
-| Decode / TTFT | — (unusable) | 11.3 tok/s (≈ CPU 11.4), 81 ms (CPU 89 ms) |
+| Metric | f32 upload (before) | Q4_K resident | + Q6_K (full coverage) |
+|---|---|---|---|
+| Weights resident on GPU | 6778 MiB | 2367 MiB | **1062 MiB** (≈ GGUF file size) |
+| Peak memory footprint | 14.66 GB | 5.36 GB | **3.59 GB** |
+| Peak RSS (one-shot chat) | 8.41 GB | 4.82 GB | **3.60 GB** |
+| Greedy output | *broken* — immediate EOS, empty reply (memory exhaustion on 16 GB) | correct ("Paris"), matches CPU | correct ("Paris"), matches CPU |
+| Decode | — (unusable) | 11.3 tok/s (≈ CPU 11.4) | **13.2 tok/s (1.13× CPU)** |
+| TTFT | — | 81 ms | **77 ms** (CPU 86 ms) |
 
-The headline at this size isn't throughput — it's that quantized-resident weights
-are what make the wgpu path **fit and function at all** for 1.5B-class models on
-16 GB machines. Decode parity with the (heavily NEON-optimized) M4 CPU comes with
-the lm_head still f32: every token reads a 933 MB f32 matrix for logits. In-shader
-Q6_K (next) cuts that read 6.5×.
+Two takeaways: quantized-resident weights are what make the wgpu path **fit and
+function at all** for 1.5B-class models on 16 GB machines, and with the lm_head
+read cut 6.5× (933 MB f32 → 196 MB Q6_K per token) the portable GPU path now
+**beats the heavily NEON-optimized M4 CPU** on the same binary. Discrete-card
+numbers (Arc/AMD/Nvidia, where the bandwidth win is larger) are still open —
+Phase 7.6.
 
 ---
 

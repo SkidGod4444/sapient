@@ -123,12 +123,19 @@ Radeon, Nvidia, and Apple — and are dev-tested on Apple Silicon (Metal under w
   Q4_K build answers correctly, matching CPU greedy byte-for-byte. Decode 11.3 tok/s
   (≈ CPU), TTFT 81 vs 89 ms. Gated by `wgpu_q4_k_logits_match_cpu_llama` (vs a
   host-dequantized f32 twin, max_err<5e-3) + random-bit per-kernel reference tests.
-- [ ] **P5 (remaining)**: in-shader **Q6_K** dequant (biggest lever left: v_proj +
-  the ~933 MB f32 lm_head in Q4_K_M files — 210-byte blocks need a repack or pad,
-  not word-aligned; mind the 16-scale indexing postmortem), f16 / quantized KV cache,
+- ✅ **In-shader Q6_K dequant** (`matmul_nt_q6_k.wgsl` / `embed_q6_k.wgsl`): 210-byte
+  blocks padded to 212 on upload (pure memcpy — word alignment only); the shader
+  decodes the 4+2-bit quants and 16 **signed** int8 scales with the +0/+2/+4/+6
+  per-128-half indexing mirrored from the fixed CPU `dequantize_row_q6_K`
+  (random-bit reference tests pin every path). Q4_K_M GGUFs now load **fully
+  quantized** (Qwen2.5-1.5B: 198/198): weights resident 2367→**1062 MiB** (≈ GGUF
+  file size; 6.4× vs f32), peak footprint 5.4→**3.6 GB**, decode 11.3→**13.2 tok/s —
+  the wgpu path now beats the NEON M4 CPU (11.7) at 1.13×**. TTFT 77 ms.
+- [ ] **P5 (remaining)**: f16 / quantized KV cache,
   kernel fusion (cut per-token dispatches), batched prefill (`seq_q>1`),
   discrete-adapter pick, `sapient devices` listing, Linux/Windows CI, bench on real
-  Arc/AMD/Nvidia cards.
+  Arc/AMD/Nvidia cards. (Q5_K/Q4_0 in-shader dequant only if a shipped model needs
+  them — Q4_K_M files are fully covered by Q4_K+Q6_K+Q8_0.)
 - **Success metric:** a Q4 model on an Intel Arc / AMD Radeon card decoding several×
   faster than that machine's CPU path, from the same single binary.
 

@@ -283,10 +283,10 @@ The real generation math: how to run a Phi or Llama-style model layer by layer.
   - `forward/wgpu_engine.rs` — the **cross-platform GPU engine** (`WgpuForwardEngine`,
     `--features wgpu`, `--backend wgpu`). The same idea as the MLX engine but portable
     via wgpu/WGSL (Vulkan/DX12/Metal) so it runs on Intel/AMD/Nvidia too. Weights upload
-    once (Q8_0 and Q4_K stay quantized on-device, dequantized in-shader; Q5_K/Q6_K
-    expand to f32 until they get shaders), the KV cache stays on the GPU, each token
-    decodes on-device; only logits read back. Llama-family — see the wgpu invariants
-    in `CLAUDE.md`.
+    once (Q8_0/Q4_K/Q6_K stay quantized on-device, dequantized in-shader — a Q4_K_M
+    GGUF loads fully quantized; Q4_0/Q5_K expand to f32), the KV cache stays on the
+    GPU, each token decodes on-device; only logits read back. Llama-family — see the
+    wgpu invariants in `CLAUDE.md`.
   - `forward/whisper.rs` — the **Whisper speech-to-text engine** (`WhisperForward`,
     wrapped in `AudioEngine`). An encoder turns the mel spectrogram into an "audio
     understanding," then a decoder writes out the words one token at a time, *listening
@@ -398,14 +398,15 @@ Enabled with `--features wgpu` and selected via `--backend wgpu`.
   the forward pass needs: RMSNorm, GEMV matmul, RoPE, causal grouped-query FlashDecoding
   attention, SwiGLU/add, embedding gather, and a KV-cache append copy. Every kernel has a
   CPU-reference test (`tests/resident.rs`).
-- `quant.rs` + `matmul_nt_q8_0.wgsl` / `embed_q8_0.wgsl` / `matmul_nt_q4_k.wgsl` /
-  `embed_q4_k.wgsl` — **quantized-resident weights** (Phases 7.1/7.2): raw ggml
-  Q8_0 blocks upload as packed int8 words + f32 scales (`GpuQ8Buffer`) and Q4_K
-  super-blocks upload *verbatim* (`GpuQ4KBuffer`, word-aligned — zero repack); both
-  are dequantized *inside* the matmul/embed shaders, no f32 expansion anywhere.
-  1.125 / 0.5625 bytes per weight of VRAM instead of 4 — a 360M Q8_0 model drops
-  from 1.6 GiB resident to 388 MiB (≈ the GGUF file size), and Qwen2.5-1.5B Q4_K_M
-  from 6.8 GiB to 2.4 GiB (which is what lets it run at all on a 16 GB machine).
+- `quant.rs` + the `matmul_nt_q{8_0,4_k,6_k}.wgsl` / `embed_q{8_0,4_k,6_k}.wgsl`
+  shaders — **quantized-resident weights** (Phase 7): raw ggml Q8_0 blocks upload as
+  packed int8 words + f32 scales (`GpuQ8Buffer`), Q4_K super-blocks upload *verbatim*
+  (`GpuQ4KBuffer`, word-aligned — zero repack), and Q6_K blocks are padded 210→212
+  bytes (`GpuQ6KBuffer`, memcpy only); all are dequantized *inside* the matmul/embed
+  shaders, no f32 expansion anywhere. A Q4_K_M GGUF loads **fully quantized**:
+  Qwen2.5-1.5B drops from 6.8 GiB resident to 1.06 GiB (≈ the GGUF file size) and
+  decodes at 1.13× the M4 CPU path — on a 16 GB machine the f32 path couldn't even
+  run it. A 360M Q8_0 model drops from 1.6 GiB to 388 MiB.
 - The engine that drives them lives in `sapient-models` as `WgpuForwardEngine`
   (`forward/wgpu_engine.rs`): weights upload once (Q8_0 stays quantized; F16/BF16
   linears online-quantize to Q8_0 like the CPU engine; tied output projections reuse
