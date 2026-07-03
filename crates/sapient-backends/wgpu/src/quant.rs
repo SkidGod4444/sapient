@@ -22,10 +22,14 @@ use crate::resident::GpuBuffer;
 const BLOCK: usize = 32;
 /// Bytes per raw ggml Q8_0 block (f16 scale + 32 int8).
 const BLOCK_BYTES: usize = 34;
-/// Weights per Q4_K super-block.
+/// Weights per Q4_K/Q6_K super-block.
 const K_BLOCK: usize = 256;
 /// Bytes per raw ggml Q4_K super-block (d + dmin f16, 12 scale bytes, 128 qs bytes).
 const Q4_K_BLOCK_BYTES: usize = 144;
+/// Bytes per raw ggml Q6_K super-block (ql[128], qh[64], 16 i8 scales, d f16).
+const Q6_K_BLOCK_BYTES: usize = 210;
+/// Q6_K super-block padded to a word boundary for GPU upload (210 + 2 zero bytes).
+const Q6_K_PADDED_BYTES: usize = 212;
 
 /// A Q8_0-quantized tensor resident in GPU storage buffers: `qs` holds the int8
 /// quants packed 4-per-`u32` word (little-endian lanes), `scales` one f32 per
@@ -59,6 +63,23 @@ impl GpuQ4KBuffer {
     /// GPU bytes this tensor occupies — 0.5625 × element count.
     pub fn byte_size(&self) -> usize {
         self.len / K_BLOCK * Q4_K_BLOCK_BYTES
+    }
+}
+
+/// A Q6_K-quantized tensor resident in one GPU storage buffer. ggml Q6_K blocks
+/// are 210 bytes (not word-aligned), so the upload pads each block to 212 bytes —
+/// a pure per-block memcpy, still no dequantization or f32 copy. Kernels decode
+/// the 4+2-bit quants and the 16 signed int8 scales in-shader.
+pub struct GpuQ6KBuffer {
+    pub(crate) qb: wgpu::Buffer,
+    /// Number of logical (dequantized) elements.
+    pub len: usize,
+}
+
+impl GpuQ6KBuffer {
+    /// GPU bytes this tensor occupies — ~0.83 × element count.
+    pub fn byte_size(&self) -> usize {
+        self.len / K_BLOCK * Q6_K_PADDED_BYTES
     }
 }
 
@@ -259,6 +280,126 @@ impl WgpuContext {
         self.dispatch(
             "embed_q4_k",
             include_str!("shaders/embed_q4_k.wgsl"),
+            &[&ids.buf, &table.qb, &out.buf],
+            &params,
+            n_tokens as u32,
+        );
+        out
+    }
+
+    /// Upload raw ggml Q6_K super-block bytes (`numel/256` × 210-byte blocks, e.g.
+    /// from `Tensor::as_quant_blocks()`) into GPU-resident quantized storage. Each
+    /// block is padded with 2 zero bytes to 212 so it binds as whole `u32` words —
+    /// a pure memcpy repack, no dequantization, no f32 copy.
+    pub fn upload_q6_k(
+        &self,
+        blocks: &[u8],
+        numel: usize,
+        label: &str,
+    ) -> Result<GpuQ6KBuffer, WgpuError> {
+        if numel % K_BLOCK != 0 || blocks.len() != numel / K_BLOCK * Q6_K_BLOCK_BYTES {
+            return Err(WgpuError::Shape(format!(
+                "Q6_K upload '{label}': {} block bytes for {numel} elements \
+                 (expected {} for {} blocks of {Q6_K_BLOCK_BYTES})",
+                blocks.len(),
+                numel / K_BLOCK * Q6_K_BLOCK_BYTES,
+                numel / K_BLOCK,
+            )));
+        }
+        let nblocks = numel / K_BLOCK;
+        let mut padded = vec![0u8; nblocks * Q6_K_PADDED_BYTES];
+        for (src, dst) in blocks
+            .chunks_exact(Q6_K_BLOCK_BYTES)
+            .zip(padded.chunks_exact_mut(Q6_K_PADDED_BYTES))
+        {
+            dst[..Q6_K_BLOCK_BYTES].copy_from_slice(src);
+        }
+        let qb = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: &padded,
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        Ok(GpuQ6KBuffer { qb, len: numel })
+    }
+
+    /// Resident Q6_K linear projection `out[m,n] = x[m,k] @ dequant(w)[n,k]^T`
+    /// (w in HF `[n,k]` layout). Decodes the 4+2-bit quants and signed int8
+    /// scales in-shader; GEMV-style cooperative reduction, f32 accumulation.
+    pub fn matmul_nt_q6_k(
+        &self,
+        x: &GpuBuffer,
+        w: &GpuQ6KBuffer,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> GpuBuffer {
+        debug_assert_eq!(k % K_BLOCK, 0, "Q6_K matmul: k must be a multiple of 256");
+        debug_assert_eq!(w.len, n * k, "Q6_K matmul: weight numel mismatch");
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct P {
+            m: u32,
+            k: u32,
+            n: u32,
+            _pad: u32,
+        }
+        let out = self.alloc_f32(m * n, "matmul_q6k.out");
+        let params = self.uniform(
+            &P {
+                m: m as u32,
+                k: k as u32,
+                n: n as u32,
+                _pad: 0,
+            },
+            "matmul_q6k.params",
+        );
+        self.dispatch(
+            "matmul_nt_q6_k",
+            include_str!("shaders/matmul_nt_q6_k.wgsl"),
+            &[&x.buf, &w.qb, &out.buf],
+            &params,
+            (m * n) as u32,
+        );
+        out
+    }
+
+    /// Embedding gather from a Q6_K-resident table: `out[t,:] = dequant(table[ids[t],:])`.
+    /// Returns `[n_tokens, dim]` f32.
+    pub fn embed_q6_k(
+        &self,
+        ids: &GpuBuffer,
+        table: &GpuQ6KBuffer,
+        n_tokens: usize,
+        dim: usize,
+    ) -> GpuBuffer {
+        debug_assert_eq!(
+            dim % K_BLOCK,
+            0,
+            "Q6_K embed: dim must be a multiple of 256"
+        );
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct P {
+            n_tokens: u32,
+            dim: u32,
+            _b: u32,
+            _c: u32,
+        }
+        let out = self.alloc_f32(n_tokens * dim, "embed_q6k.out");
+        let params = self.uniform(
+            &P {
+                n_tokens: n_tokens as u32,
+                dim: dim as u32,
+                _b: 0,
+                _c: 0,
+            },
+            "embed_q6k.params",
+        );
+        self.dispatch(
+            "embed_q6_k",
+            include_str!("shaders/embed_q6_k.wgsl"),
             &[&ids.buf, &table.qb, &out.buf],
             &params,
             n_tokens as u32,

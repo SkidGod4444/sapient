@@ -45,5 +45,5 @@ mod quant;
 mod resident;
 
 pub use context::{WgpuContext, WgpuError};
-pub use quant::{GpuQ4KBuffer, GpuQ8Buffer};
+pub use quant::{GpuQ4KBuffer, GpuQ6KBuffer, GpuQ8Buffer};
 pub use resident::GpuBuffer;

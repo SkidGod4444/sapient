@@ -173,10 +173,33 @@ fn q4_k_random_tensor(shape: [usize; 2], next: &mut dyn FnMut() -> f32) -> Tenso
     Tensor::from_quant_bytes(&blocks, shape.to_vec(), DType::Q4_K).unwrap()
 }
 
+/// Build a raw-ggml-block Q6_K tensor from random valid block bytes (210 bytes per
+/// 256 weights: ql[128] + qh[64] + 16 signed int8 scales + f16 d) — same
+/// random-bit rationale as [`q4_k_random_tensor`]. Q6_K's +0/+2/+4/+6 per-half
+/// scale indexing is the historical token-salad bug, so both engines decoding
+/// identical bytes IS the regression net.
+fn q6_k_random_tensor(shape: [usize; 2], next: &mut dyn FnMut() -> f32) -> Tensor {
+    let numel = shape[0] * shape[1];
+    assert_eq!(numel % 256, 0);
+    let mut blocks = Vec::with_capacity(numel / 256 * 210);
+    for _ in 0..numel / 256 {
+        for _ in 0..192 {
+            blocks.push((next().abs() * 255.0) as u8); // ql + qh
+        }
+        for _ in 0..16 {
+            blocks.push((next() * 127.0) as i8 as u8); // signed scales
+        }
+        let d = half::f16::from_f32(2.0e-5 * (1.0 + next().abs()));
+        blocks.extend_from_slice(&d.to_le_bytes());
+    }
+    Tensor::from_quant_bytes(&blocks, shape.to_vec(), DType::Q6_K).unwrap()
+}
+
 /// A tiny Llama with **mixed quantization**, as a real Q4_K_M GGUF ships: Q4_K for
-/// every matrix whose row length is a multiple of 256 (q/k/v, gate/up/down, embed,
-/// lm_head), Q8_0 where it isn't (o_proj, k = 96), f32 norms. head_dim = 24 keeps
-/// the CPU KV cache in f32 (not a multiple of 32).
+/// most matrices whose row length is a multiple of 256 (q/k, gate/up/down, embed),
+/// **Q6_K for v_proj and lm_head** (exactly where Q4_K_M files use it), Q8_0 where
+/// the row length isn't a multiple of 256 (o_proj, k = 96), f32 norms.
+/// head_dim = 24 keeps the CPU KV cache in f32 (not a multiple of 32).
 fn tiny_llama_q4_k() -> (ModelInfo, HashMap<String, Tensor>) {
     let hidden = 256usize;
     let n_heads = 4usize;
@@ -220,7 +243,7 @@ fn tiny_llama_q4_k() -> (ModelInfo, HashMap<String, Tensor>) {
     w.insert("model.norm.weight".into(), norm(hidden, &mut next));
     w.insert(
         "lm_head.weight".into(),
-        q4_k_random_tensor([vocab, hidden], &mut next),
+        q6_k_random_tensor([vocab, hidden], &mut next),
     );
     for i in 0..layers {
         let p = format!("model.layers.{i}");
@@ -242,7 +265,7 @@ fn tiny_llama_q4_k() -> (ModelInfo, HashMap<String, Tensor>) {
         );
         w.insert(
             format!("{p}.self_attn.v_proj.weight"),
-            q4_k_random_tensor([kvd, hidden], &mut next),
+            q6_k_random_tensor([kvd, hidden], &mut next),
         );
         // o_proj rows are qd=96 wide → Q8_0 (mixed-quant, like real Q4_K_M files).
         let o: Vec<f32> = (0..hidden * qd).map(|_| next() * 0.1).collect();
@@ -391,17 +414,18 @@ fn wgpu_q8_0_logits_match_cpu_llama() {
     assert!(step_err < 0.1, "Q8_0 decode logits max_err={step_err}");
 }
 
-/// Phase 7.2 gate: the GPU-resident Q4_K path (raw 144-byte super-blocks uploaded
-/// verbatim, 6-bit scale/min pairs + 4-bit quants decoded in-shader) must produce the
-/// same logits as the CPU engine running the **same weights dequantized to f32 on the
-/// host** (`to_f32_vec` — the reference decoder). Both sides then compute with
-/// identical weight values and f32 activations, so the tolerance is as tight as the
-/// all-f32 test — this pins the in-shader scale-indexing math exactly (the bug class
-/// that made Q6_K emit token-salad). Comparing against the CPU *quantized* path
-/// instead would add its aarch64 W4A8 activation-quantization noise (~0.1 logit) and
-/// mask real dequant bugs of the same magnitude.
+/// K-quant gate (Phase 7.2 + Q6_K): the GPU-resident Q4_K path (raw 144-byte
+/// super-blocks uploaded verbatim) and Q6_K path (210→212-byte padded blocks) must
+/// produce the same logits as the CPU engine running the **same weights dequantized
+/// to f32 on the host** (`to_f32_vec` — the reference decoder). Both sides then
+/// compute with identical weight values and f32 activations, so the tolerance is as
+/// tight as the all-f32 test — this pins the in-shader scale-indexing math exactly
+/// (Q6_K's +0/+2/+4/+6 per-half indexing is the bug class that made it emit
+/// token-salad). Comparing against the CPU *quantized* path instead would add its
+/// aarch64 W4A8/W8A8 activation-quantization noise (~0.1 logit) and mask real
+/// dequant bugs of the same magnitude.
 #[test]
-fn wgpu_q4_k_logits_match_cpu_llama() {
+fn wgpu_k_quant_logits_match_cpu_llama() {
     let (info, weights) = tiny_llama_q4_k();
 
     // Host-dequantized twin: every quantized tensor expanded to f32 by the proven
@@ -442,14 +466,14 @@ fn wgpu_q4_k_logits_match_cpu_llama() {
         .fold(0.0f32, f32::max);
     assert!(
         max_err < 5e-3,
-        "Q4_K wgpu vs dequant-f32 cpu logits max_err={max_err} (argmax cpu={} gpu={})",
+        "K-quant wgpu vs dequant-f32 cpu logits max_err={max_err} (argmax cpu={} gpu={})",
         argmax(&cpu_logits),
         argmax(&gpu_logits)
     );
     assert_eq!(
         argmax(&cpu_logits),
         argmax(&gpu_logits),
-        "Q4_K greedy next-token must match"
+        "K-quant greedy next-token must match"
     );
 
     let next_tok = argmax(&gpu_logits) as u32;
@@ -464,11 +488,11 @@ fn wgpu_q4_k_logits_match_cpu_llama() {
         .fold(0.0f32, f32::max);
     assert!(
         step_err < 5e-3,
-        "Q4_K incremental-decode logits max_err={step_err}"
+        "K-quant incremental-decode logits max_err={step_err}"
     );
     assert_eq!(
         argmax(&cpu_step),
         argmax(&gpu_step),
-        "Q4_K decode greedy must match"
+        "K-quant decode greedy must match"
     );
 }

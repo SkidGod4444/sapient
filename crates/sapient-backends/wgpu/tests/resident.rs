@@ -558,6 +558,114 @@ fn embed_q4_k_matches_dequant_reference() {
     }
 }
 
+/// Build `nblocks` random-but-valid raw ggml Q6_K super-blocks (210 bytes each:
+/// ql[128] + qh[64] + 16 signed int8 scales + f16 d) and return them with their
+/// exact dequantized values per the ggml reference — `d·sc·(q−32)` with the
+/// +0/+2/+4/+6 scale-offset indexing per 128-half (the historical token-salad
+/// bug class). Random bytes exercise every ql/qh bit path and negative scales.
+fn random_q6_k_blocks(nblocks: usize, next: &mut dyn FnMut() -> f32) -> (Vec<u8>, Vec<f32>) {
+    let mut blocks = Vec::with_capacity(nblocks * 210);
+    let mut dequant = Vec::with_capacity(nblocks * 256);
+    for _ in 0..nblocks {
+        let base = blocks.len();
+        for _ in 0..192 {
+            blocks.push((next().abs() * 255.0) as u8); // ql[128] + qh[64]
+        }
+        for _ in 0..16 {
+            blocks.push((next() * 127.0) as i8 as u8); // signed scales
+        }
+        // Small d keeps dequant magnitudes ~O(0.1): |sc·(q−32)| ≤ 127·32.
+        let d = half::f16::from_f32(2.0e-5 * (1.0 + next().abs()));
+        blocks.extend_from_slice(&d.to_le_bytes());
+        let ql = blocks[base..base + 128].to_vec();
+        let qh = blocks[base + 128..base + 192].to_vec();
+        let sc = blocks[base + 192..base + 208].to_vec();
+        let df = d.to_f32();
+        for e in 0..256usize {
+            let (h, r) = (e / 128, e % 128);
+            let (g, l) = (r / 32, r % 32);
+            let q = ((ql[h * 64 + (g % 2) * 32 + l] >> ((g / 2) * 4)) & 0xF)
+                | (((qh[h * 32 + l] >> (g * 2)) & 3) << 4);
+            let scale = sc[h * 8 + 2 * g + l / 16] as i8 as f32;
+            dequant.push(df * scale * (q as i32 - 32) as f32);
+        }
+    }
+    (blocks, dequant)
+}
+
+#[test]
+fn matmul_nt_q6_k_resident_matches_dequant_reference() {
+    let Some(ctx) = ctx() else {
+        return;
+    };
+    for (m, k, n) in [(1usize, 1536usize, 512usize), (3, 256, 48)] {
+        let mut next = lcg();
+        let x: Vec<f32> = (0..m * k).map(|_| next()).collect();
+        let (blocks, wd) = random_q6_k_blocks(n * k / 256, &mut next);
+
+        let xg = ctx.upload_f32(&x, "x");
+        let wq = ctx.upload_q6_k(&blocks, n * k, "wq").expect("upload_q6_k");
+        let got = ctx
+            .download_f32(&ctx.matmul_nt_q6_k(&xg, &wq, m, k, n))
+            .unwrap();
+
+        let mut want = vec![0.0f32; m * n];
+        for r in 0..m {
+            for c in 0..n {
+                let mut acc = 0.0f32;
+                for i in 0..k {
+                    acc += x[r * k + i] * wd[c * k + i];
+                }
+                want[r * n + c] = acc;
+            }
+        }
+        let rel = got
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| (a - b).abs() / b.abs().max(1.0))
+            .fold(0.0f32, f32::max);
+        assert!(rel < 1e-4, "q6_k matmul {m}x{k}x{n} rel={rel}");
+    }
+}
+
+#[test]
+fn embed_q6_k_matches_dequant_reference() {
+    let Some(ctx) = ctx() else {
+        return;
+    };
+    let (vocab, dim) = (50usize, 512usize);
+    let mut next = lcg();
+    let (blocks, td) = random_q6_k_blocks(vocab * dim / 256, &mut next);
+    let ids: Vec<u32> = vec![11, 0, 49, 30];
+
+    let tq = ctx
+        .upload_q6_k(&blocks, vocab * dim, "table")
+        .expect("upload_q6_k");
+    let ig = ctx.upload_u32(&ids, "ids");
+    let got = ctx
+        .download_f32(&ctx.embed_q6_k(&ig, &tq, ids.len(), dim))
+        .unwrap();
+    for (t, &id) in ids.iter().enumerate() {
+        for i in 0..dim {
+            let want = td[id as usize * dim + i];
+            assert!(
+                (got[t * dim + i] - want).abs() < 1e-6,
+                "embed_q6_k token {t} elem {i}: got {} want {want}",
+                got[t * dim + i]
+            );
+        }
+    }
+}
+
+#[test]
+fn upload_q6_k_rejects_bad_block_count() {
+    let Some(ctx) = ctx() else {
+        return;
+    };
+    assert!(ctx.upload_q6_k(&[0u8; 209], 256, "bad").is_err());
+    assert!(ctx.upload_q6_k(&[0u8; 210], 200, "bad").is_err());
+}
+
 #[test]
 fn upload_q4_k_rejects_bad_block_count() {
     let Some(ctx) = ctx() else {
