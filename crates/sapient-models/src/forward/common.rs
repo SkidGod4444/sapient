@@ -100,12 +100,17 @@ pub fn repack_q4_k_weights(
         .map(|(name, t)| {
             let dims = t.shape().dims().to_vec();
             // Q4_K repacks by default (measured: Pi +7%, M4 +5% over plain
-            // multi-row). Q6_K repack measured NEUTRAL on both Pi and M4 with
-            // the f32-activation kernel (A/B/A within ±2% noise), so it is
-            // OPT-IN (SAPIENT_REPACK_Q6K=1) — the layout + kernels stay as
-            // tested groundwork for a future W6A8 SDOT Q6_K kernel, where a
-            // single weight stream should actually pay.
-            let q6_opt_in = std::env::var("SAPIENT_REPACK_Q6K").is_ok_and(|v| v == "1");
+            // multi-row). Q6_K repack defaults ON where i8mm exists because the
+            // SMMLA x2 prefill kernel consumes the R4 layout (M4 prefill 1.16×);
+            // decode is NEUTRAL either way on a cool machine (A/B'd — an earlier
+            // +13% reading was thermal-order artifact). OFF elsewhere (Pi/A76:
+            // neutral-to-slightly-negative, no i8mm to exploit it). Override
+            // either way with SAPIENT_REPACK_Q6K=1/0.
+            let q6_opt_in = match std::env::var("SAPIENT_REPACK_Q6K").as_deref() {
+                Ok("1") => true,
+                Ok("0") => false,
+                _ => std::arch::is_aarch64_feature_detected!("i8mm"),
+            };
             let eligible = (t.dtype() == DType::Q4_K || (t.dtype() == DType::Q6_K && q6_opt_in))
                 && !t.is_mmap()
                 && dims.len() == 2
