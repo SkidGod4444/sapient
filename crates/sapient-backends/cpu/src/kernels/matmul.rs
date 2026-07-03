@@ -544,9 +544,29 @@ fn matmul_nt_q4_k(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
                 .par_chunks_mut(chunk)
                 .enumerate()
                 .for_each(|(ci, cs)| {
-                    for (local, slot) in cs.iter_mut().enumerate() {
-                        let j = ci * chunk + local;
-                        // SAFETY: dotprod verified above; row slice is one Q4_K row.
+                    // Multi-row GEMV: 4 weight rows share one pass over the
+                    // activations (llama.cpp-style) — 4× less x traffic and four
+                    // independent sdot chains. Remainder rows use the single-row
+                    // kernel; per-row results are bit-identical either way.
+                    let start = ci * chunk;
+                    let mut local = 0usize;
+                    while local + 4 <= cs.len() {
+                        let j = start + local;
+                        let r = |o: usize| &w_blocks[(j + o) * row_bytes..(j + o + 1) * row_bytes];
+                        // SAFETY: dotprod verified above; slices are whole Q4_K rows.
+                        let v = unsafe {
+                            quant::dot_q4_k_4rows_q8_neon(
+                                [r(0), r(1), r(2), r(3)],
+                                &x_i8,
+                                &x_scales,
+                            )
+                        };
+                        cs[local..local + 4].copy_from_slice(&v);
+                        local += 4;
+                    }
+                    for slot in &mut cs[local..] {
+                        let j = start + local;
+                        // SAFETY: as above.
                         *slot = unsafe {
                             quant::dot_q4_k_row_q8_neon(
                                 &w_blocks[j * row_bytes..(j + 1) * row_bytes],
@@ -554,6 +574,7 @@ fn matmul_nt_q4_k(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
                                 &x_scales,
                             )
                         };
+                        local += 1;
                     }
                 });
         }

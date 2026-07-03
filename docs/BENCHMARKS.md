@@ -41,6 +41,15 @@ streamed 128-token generation; Ollama uses its own Q4_K_M download).
 | SAPIENT (CPU) | 22.4 |
 | SAPIENT (wgpu, Vulkan) | 9.7 |
 
+**Follow-up experiment (post-v0.5.0):** a 4-row multi-row SDOT GEMV (activation
+registers shared across 4 weight rows, per-row results bit-identical) gained
+**+5% on the Pi** (llama-1B 8.2→8.6, qwen-1.5B 6.6→6.9) and ~0% on M4 — which
+localizes llama.cpp's remaining CPU edge in (a) **load-time weight repacking**
+(4–8 rows interleaved into one contiguous stream per task, vs our four parallel
+row streams per task thrashing the prefetchers) and (b) **i8mm/SMMLA** on
+v8.6+ cores (M4/Grace; 2× int8 MACs per instruction, requires the interleaved
+layout). That repack + i8mm project is the defined path to CPU parity.
+
 **The honest read:**
 - On **Apple Metal** SAPIENT is competitive with llama.cpp (−7% on qwen-1.5B,
   +2% on llama-1B) and **1.66× Ollama** on the 1B — with better TTFT.

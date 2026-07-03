@@ -776,6 +776,82 @@ pub unsafe fn dot_q4_k_row_q8_neon(row_data: &[u8], x_i8: &[i8], x_scales: &[f32
     acc
 }
 
+/// Four Q4_K rows against ONE i8 activation vector — the multi-row GEMV core
+/// (llama.cpp-style): the activation registers and their per-sub-block sums are
+/// loaded/computed **once per 64-weight group and reused across all four rows**,
+/// cutting activation traffic 4× and giving four independent `sdot` dependency
+/// chains for ILP. Per-row arithmetic (values *and* order) is identical to
+/// [`dot_q4_k_row_q8_neon`], so each lane of the result is bit-for-bit equal to
+/// the single-row kernel (regression-tested).
+///
+/// # Safety
+/// Caller must verify `is_aarch64_feature_detected!("dotprod")`; all four row
+/// slices must be complete Q4_K rows of equal length covered by `x_i8`/`x_scales`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon,dotprod")]
+pub unsafe fn dot_q4_k_4rows_q8_neon(rows: [&[u8]; 4], x_i8: &[i8], x_scales: &[f32]) -> [f32; 4] {
+    use std::arch::aarch64::*;
+    let mask = vdupq_n_u8(0x0F);
+    let mut acc = [0.0f32; 4];
+    let n_blocks = rows[0].len() / Q4_K_BLOCK_BYTES;
+    let mut x_off = 0usize;
+    for bi in 0..n_blocks {
+        let base = bi * Q4_K_BLOCK_BYTES;
+        // Per-row super-block headers, hoisted once per block.
+        let mut dv = [0.0f32; 4];
+        let mut dminv = [0.0f32; 4];
+        for r in 0..4 {
+            let b = &rows[r][base..base + Q4_K_BLOCK_BYTES];
+            dv[r] = f16::from_le_bytes([b[0], b[1]]).to_f32();
+            dminv[r] = f16::from_le_bytes([b[2], b[3]]).to_f32();
+        }
+        let mut q_off = 0usize;
+        let mut is = 0usize;
+        for _ in 0..(QK_K / 64) {
+            // ── Shared activation work: loaded/summed ONCE for all 4 rows ──
+            let xlo0 = vld1q_s8(x_i8.as_ptr().add(x_off));
+            let xlo1 = vld1q_s8(x_i8.as_ptr().add(x_off + 16));
+            let xhi0 = vld1q_s8(x_i8.as_ptr().add(x_off + 32));
+            let xhi1 = vld1q_s8(x_i8.as_ptr().add(x_off + 48));
+            let sum_lo = vaddlvq_s8(xlo0) as i32 + vaddlvq_s8(xlo1) as i32;
+            let sum_hi = vaddlvq_s8(xhi0) as i32 + vaddlvq_s8(xhi1) as i32;
+            let xs_lo = x_scales[x_off / QK];
+            let xs_hi = x_scales[(x_off + 32) / QK];
+
+            for r in 0..4 {
+                let b = &rows[r][base..base + Q4_K_BLOCK_BYTES];
+                let scales = &b[4..16];
+                let qs = &b[16..Q4_K_BLOCK_BYTES];
+                let (sc1, m1) = get_scale_min_k4(is, scales);
+                let (sc2, m2) = get_scale_min_k4(is + 1, scales);
+                let d1 = dv[r] * sc1 as f32;
+                let m1v = dminv[r] * m1 as f32;
+                let d2 = dv[r] * sc2 as f32;
+                let m2v = dminv[r] * m2 as f32;
+
+                let q0 = vld1q_u8(qs.as_ptr().add(q_off));
+                let q1 = vld1q_u8(qs.as_ptr().add(q_off + 16));
+                let lo0 = vreinterpretq_s8_u8(vandq_u8(q0, mask));
+                let lo1 = vreinterpretq_s8_u8(vandq_u8(q1, mask));
+                let hi0 = vreinterpretq_s8_u8(vshrq_n_u8::<4>(q0));
+                let hi1 = vreinterpretq_s8_u8(vshrq_n_u8::<4>(q1));
+
+                let zero = vdupq_n_s32(0);
+                let dot_lo = vaddvq_s32(sdot_s32(sdot_s32(zero, lo0, xlo0), lo1, xlo1));
+                let dot_hi = vaddvq_s32(sdot_s32(sdot_s32(zero, hi0, xhi0), hi1, xhi1));
+
+                acc[r] += xs_lo * (d1 * dot_lo as f32 - m1v * sum_lo as f32);
+                acc[r] += xs_hi * (d2 * dot_hi as f32 - m2v * sum_hi as f32);
+            }
+            x_off += 64;
+            q_off += 32;
+            is += 2;
+        }
+        // x_off advanced inside the group loop covers this block's 256 weights.
+    }
+    acc
+}
+
 /// Dot product of a full Q5_K-quantized weight row with an f32 activation vector.
 ///
 /// Q5_K block layout (176 bytes, 256 weights):
@@ -1526,6 +1602,55 @@ mod tests {
                 rel_n < 1e-4,
                 "NEON≠scalar W4A8: neon={neon} scalar={q8_dot}"
             );
+        }
+    }
+
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn q4_k_4rows_matches_single_row() {
+        if !std::arch::is_aarch64_feature_detected!("dotprod") {
+            return;
+        }
+        // 8 pseudo-random Q4_K rows of k=512 (2 super-blocks each) + a random
+        // activation, quantized to per-block i8 like the hot path does.
+        let k = 512usize;
+        let mut seed = 0x5EEDu64;
+        let mut nb = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as u8
+        };
+        let row_bytes = k / 256 * Q4_K_BLOCK_BYTES;
+        let mut rows = vec![0u8; 8 * row_bytes];
+        for (i, b) in rows.iter_mut().enumerate() {
+            *b = match i % Q4_K_BLOCK_BYTES {
+                // small positive f16 d/dmin so magnitudes stay sane
+                0 | 2 => 0x11,
+                1 | 3 => 0x2c,
+                _ => nb(),
+            };
+        }
+        let x: Vec<f32> = (0..k)
+            .map(|i| ((i * 37 % 97) as f32 - 48.0) * 0.02)
+            .collect();
+        let (x_i8, x_scales) = quantize_row_to_i8_blocks(&x);
+
+        for group in 0..2 {
+            let j = group * 4;
+            let r = |o: usize| &rows[(j + o) * row_bytes..(j + o + 1) * row_bytes];
+            let got = unsafe { dot_q4_k_4rows_q8_neon([r(0), r(1), r(2), r(3)], &x_i8, &x_scales) };
+            for o in 0..4 {
+                let want = unsafe { dot_q4_k_row_q8_neon(r(o), &x_i8, &x_scales) };
+                assert_eq!(
+                    got[o].to_bits(),
+                    want.to_bits(),
+                    "row {} differs: {} vs {}",
+                    j + o,
+                    got[o],
+                    want
+                );
+            }
         }
     }
 
