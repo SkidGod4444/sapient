@@ -9,6 +9,55 @@
 
 ---
 
+## Head-to-head vs llama.cpp & Ollama (v0.5.0, 2026-07-03)
+
+Same GGUF **files** (Q4_K_M, byte-identical where both engines read GGUF), same
+machines, decode tok/s (llama.cpp = `llama-bench` tg128; SAPIENT/Ollama =
+streamed 128-token generation; Ollama uses its own Q4_K_M download).
+
+**Apple M4 (MacBook Pro, 16 GB):**
+
+| Engine | Qwen2.5-1.5B | Llama-3.2-1B | notes |
+|---|---|---|---|
+| **SAPIENT `-metal` (MLX)** | 73.8 | **103.2** | TTFT 38 / 27 ms |
+| llama.cpp (Metal) | **79.1** | 101.3 | |
+| Ollama (Metal) | 75.8 | 62.3 | |
+| llama.cpp (CPU, 4 threads) | 62.5 | 78.7 | |
+| SAPIENT (CPU) | 34.1 | 42.7 | |
+| SAPIENT (wgpu→Metal) | 14.5 | 24.0 | use `-metal` on Apple |
+
+**Raspberry Pi 5 (16 GB):**
+
+| Engine | Qwen2.5-1.5B | Llama-3.2-1B |
+|---|---|---|
+| llama.cpp (CPU) | **12.2** | **14.7** |
+| SAPIENT (CPU, official release binary) | 6.6 | 8.2 |
+
+**Jetson AGX Thor (14-core Grace + Thor GPU):**
+
+| Engine | Qwen2.5-1.5B |
+|---|---|
+| llama.cpp (CPU, 14 threads) | **85.3** |
+| SAPIENT (CPU) | 22.4 |
+| SAPIENT (wgpu, Vulkan) | 9.7 |
+
+**The honest read:**
+- On **Apple Metal** SAPIENT is competitive with llama.cpp (−7% on qwen-1.5B,
+  +2% on llama-1B) and **1.66× Ollama** on the 1B — with better TTFT.
+- On **CPU**, llama.cpp decodes ~1.8–3.8× faster than SAPIENT everywhere
+  (Pi, M4, Grace). The ratio is consistent across machines → kernel-level gap
+  (tiled GEMV, K-quant micro-kernels, weight repacking), now the top CPU work
+  item. SAPIENT's own CPU path did jump up to 6.4× this release (embedding
+  fix), but llama.cpp remains ahead.
+- The **wgpu path's value is capability, not crown**: the only engine running
+  fully-quantized models on any GPU vendor from one binary (VRAM ≈ file size,
+  Jetson with zero CUDA). On machines with strong CPUs it is not the fastest
+  option, and on Apple the `-metal` build is the right choice.
+- Thor-class Grace CPUs are decode monsters; the "Jetson via Vulkan" thesis
+  (7b) is about weak-CPU Jetsons (Orin Nano class) — still unmeasured. The
+  llama.cpp-CUDA gate comparison also remains open (no CUDA toolkit on the
+  test device).
+
 ## TL;DR
 
 The v0.3.5 `MlxForwardEngine` puts SAPIENT's GPU path **ahead of Ollama on 0.5B
