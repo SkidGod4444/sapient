@@ -396,7 +396,7 @@ These are especially welcome:
 | **Speculative decoding** | `crates/sapient-generate/src/speculative.rs` | Draft/target pipeline, engine reuse, cache-aware verify (`forward_all_logits_cached` + `truncate_cache`) |
 | **HTTP server** | `crates/sapient-cli/src/server.rs` | OpenAI-compatible `/v1/chat/completions`; `ServedModel` (plain/speculative), LRU cache, `--speculative` |
 | **Metal / GPU backend** | `crates/sapient-backends-metal/` | Apple Silicon (MLX); `MlxForwardEngine` |
-| **Cross-platform GPU** | `crates/sapient-backends/wgpu/` | wgpu/WGSL (Vulkan/DX12/Metal); `WgpuForwardEngine` (`--features wgpu`, `--backend wgpu`). Kernels in `resident.rs` + `quant.rs` (Q8_0 kept quantized on-device, in-shader dequant) + `shaders/*.wgsl`, validated vs CPU in `tests/resident.rs` + `sapient-models/tests/wgpu_coherence.rs` (f32 + Q8_0) |
+| **Cross-platform GPU** | `crates/sapient-backends/wgpu/` | wgpu/WGSL (Vulkan/DX12/Metal); `WgpuForwardEngine` (`--features wgpu`, `--backend wgpu`). Kernels in `resident.rs` + `quant.rs` (Q8_0/Q4_K kept quantized on-device, in-shader dequant) + `shaders/*.wgsl`, validated vs CPU in `tests/resident.rs` + `sapient-models/tests/wgpu_coherence.rs` (f32 + Q8_0 + Q4_K) |
 | **Hub client** | `crates/sapient-hub/` | Downloads, caching, auth, registry |
 | **CLI UX** | `crates/sapient-cli/` | Commands, terminal UI |
 | **Tokenizers / chat templates** | `crates/sapient-tokenizers/` | HF tokenizer edge cases |
