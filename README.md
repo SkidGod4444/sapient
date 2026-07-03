@@ -271,21 +271,33 @@ and validating its architecture in `sapient-models`.
 
 ---
 
-## Performance (v0.3.5, Apple M4, 16 GB)
+## Performance (v0.5.1, Apple M4 16 GB / Raspberry Pi 5)
 
-The **`MlxForwardEngine`** runs the whole Llama/Qwen forward pass as one MLX lazy
-graph — every activation stays on the GPU, `eval()` runs once per token. Measured on
-GGUF Q4 models (decode-only tok/s; steady-state TTFT):
+**Head-to-head vs llama.cpp and Ollama** (same GGUF file, same machine, decode tok/s —
+full tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md)):
 
-| Model | CPU | **Metal** | Speedup | Decode vs Ollama / mlx-lm | TTFT vs Ollama / mlx-lm |
-|---|---|---|---|---|---|
-| Qwen2.5-0.5B Q4 | 20 | **187 tok/s** | **9.4×** | beats 154 / 0.75× 249 | **21 ms** — best of all |
-| Qwen2.5-1.5B Q4 | 11 | **74 tok/s** | **6.7×** | 0.95× 78 / 0.79× 94 | 70 ms vs 64 / 264 |
+| Apple M4 | SAPIENT `-metal` | llama.cpp (Metal) | Ollama |
+|---|---|---|---|
+| Llama-3.2-1B Q4_K_M | **103.2 tok/s** | 101.3 | 62.3 |
+| Qwen2.5-1.5B Q4_K_M | 73.8 | **79.1** | 75.8 |
 
-SAPIENT Metal **beats Ollama on 0.5B decode and has the lowest time-to-first-token of
-any engine on 0.5B**, within **1.3–1.5× of mlx-lm** — from a single daemon-free 22 MB
-binary. Full methodology, charts, and the remaining peak-RAM gap are in
-**[docs/BENCHMARKS.md](docs/BENCHMARKS.md)**.
+SAPIENT-Metal **trades blows with llama.cpp and beats Ollama by 1.66× on the 1B** —
+with the lowest TTFT (21–38 ms) — from a single daemon-free ~22 MB binary. The
+**`MlxForwardEngine`** runs the whole forward pass as one MLX lazy graph: every
+activation stays on the GPU, one `eval()` per token.
+
+**The CPU engine is within 1.13–1.35× of llama.cpp** (was 1.8–3.8× at v0.5.0) after
+the v0.5.1 kernel ladder — multi-row GEMV, `Q4_K_R4` load-time weight repacking,
+W6A8 SDOT Q6_K, and i8mm SMMLA prefill kernels, every rung bit-identity-gated:
+
+| CPU decode, Llama-3.2-1B Q4_K_M | SAPIENT | llama.cpp |
+|---|---|---|
+| Apple M4 | **69.5 tok/s** | 78.7 |
+| Raspberry Pi 5 (16 GB) | **11.6 tok/s** | 14.7 |
+
+A Pi 5 went **1.3 → 11.6 tok/s (8.9×)** on this model across v0.5.0 + v0.5.1 — 1B-class
+chat on a Pi is genuinely interactive. CPU prefill is 1.5× (M4) to 2× (Jetson Thor)
+faster than v0.5.0 on long prompts.
 
 **Serving head-to-head** (`sapient serve` vs Ollama vs vLLM, Apple M4 / Metal): SAPIENT
 beats Ollama on TTFT (**4.2×**, 14 ms vs 59 ms), decode (**1.25×**), concurrent
@@ -306,7 +318,10 @@ Key improvements:
 - **Flash-Edge attention** (CPU) — online-softmax, O(head_dim) memory, NEON `vfmaq_f32`.
 - **Q8_0 KV cache** — 4× RAM reduction vs F32; zero per-step heap allocation.
 - **Online quantization** — F16/BF16 safetensors weights auto-quantized to Q8_0 at load.
-- **NEON GEMV kernels** — native F16 (`vcvt_f32_f16`), Q4_K nibble-unpacking + FMA, SDOT Q8_0.
+- **NEON int8 kernel ladder (v0.5.1)** — every K-quant matmul runs int8 `sdot`/`smmla`:
+  `Q4_K_R4` load-time row-interleaved repacking (one contiguous weight stream per task),
+  W4A8/W6A8 SDOT dot products, and i8mm SMMLA prefill kernels (two prompt tokens per
+  weight pass on ARMv8.6 cores). Each kernel bit-identity-gated against a scalar oracle.
 - **`sapient devices`** — detect CPU/GPU, estimate tok/s, recommend backend before loading a model.
 
 ### Cross-platform GPU (Intel / AMD / Nvidia)
@@ -331,9 +346,12 @@ loads **fully quantized**, so VRAM ≈ the GGUF file size. Measured on Apple M4
 (16 GB, wgpu→Metal): SmolLM2-360M Q8_0 weights resident 1.6 GiB → **388 MiB** with
 greedy output token-identical to the f32 path; Qwen2.5-1.5B Q4_K_M weights resident
 6.8 GiB → **1.06 GiB** (198/198 matrices quantized), peak process footprint
-14.7 → 3.6 GB, decode **13.2 tok/s — 1.13× the NEON-optimized M4 CPU path**. On a
-16 GB machine the old f32 path ran out of memory at 1.5B (empty replies); the
-quantized-resident path answers correctly. F16/BF16 safetensors linears are
+14.7 → 3.6 GB, decode 14.3 tok/s. On a 16 GB machine the old f32 path ran out of
+memory at 1.5B (empty replies); the quantized-resident path answers correctly.
+(On Apple Silicon the `-metal` MLX build is the fast path — wgpu's value is
+Intel/AMD/Nvidia, where it's the only way to run these models quantized on the
+GPU, and small-VRAM cards, where VRAM ≈ file size is the difference between
+loading and not.) F16/BF16 safetensors linears are
 online-quantized to Q8_0 on upload, same as the CPU engine.
 
 The KV cache is **f16** (packed halves, f32 accumulation — works on any adapter,
