@@ -94,20 +94,77 @@ Bring GPU acceleration to the machines Metal can't reach, via a portable compute
 (`wgpu` → Vulkan / DX12 / Metal). The **same WGSL kernels** run on Intel Arc, AMD
 Radeon, Nvidia, and Apple — and are dev-tested on Apple Silicon (Metal under wgpu).
 - ✅ **Foundation** (`crates/sapient-backends/wgpu`): `WgpuContext` device acquisition
-  (adapter-max limits past the 128 MiB binding cap, `SHADER_F16`, pipeline cache) +
-  `matmul_nt_f32` / `matmul_nt_q8_0` kernels, validated on GPU against a host reference.
+  (adapter-max limits past the 128 MiB binding cap, `SHADER_F16`, pipeline cache).
 - ✅ **Resident kernels** (`resident.rs` + `shaders/*.wgsl`): GPU-resident `GpuBuffer`,
   RMSNorm, GEMV `matmul_nt`, RoPE (NEOX partial-rotary), SwiGLU, residual add, embedding
   gather, causal GQA **FlashDecoding attention** (online softmax, `kv_stride`), and a
   `copy_range` KV-cache append — each validated bit-close to a CPU reference.
-- ✅ **`WgpuForwardEngine`** in `sapient-models` (`--features wgpu`): weights upload once
-  (dequant→f32), GPU-resident KV cache, decode runs fully on-device, only logits read
+- ✅ **`WgpuForwardEngine`** in `sapient-models` (`--features wgpu`): weights upload once,
+  GPU-resident KV cache, decode runs fully on-device, only logits read
   back. Wired into `ForwardEngine::Wgpu` + `LlmBackendKind::Wgpu` (`--backend wgpu`) for
   Llama/Qwen/Mistral (GGUF + safetensors). **Coherence proven**: logits match the CPU
   `LlamaForward` on a synthetic model (prompt + incremental decode, argmax + max_err<5e-3).
-- [ ] **P5**: in-shader Q4_K/Q8_0 dequant (flat-u32 buffers, no f32 expansion at upload),
-  f16 / quantized KV cache, kernel fusion (cut per-token dispatches), batched prefill
-  (`seq_q>1`), discrete-adapter pick, `sapient devices` listing, Linux/Windows CI.
+- ✅ **In-shader Q8_0 dequant** (Phase 7.1, `quant.rs` + `matmul_nt_q8_0.wgsl` /
+  `embed_q8_0.wgsl`): raw ggml Q8_0 blocks upload as packed int8 `u32` words + f32
+  scales (`GpuQ8Buffer`) — **no f32 expansion**; matmul/embed dequantize in-shader.
+  F16/BF16 linears online-quantize to Q8_0 (same rule as the CPU engine); tied output
+  projections reuse the embed buffer. Measured (SmolLM2-360M Q8_0, Apple M4 via
+  wgpu→Metal): weights resident 1.6 GiB→**388 MiB** (≈ GGUF file size), peak RSS
+  2.65→1.27 GB, decode 20.5→21.4 tok/s, TTFT 51→46 ms; greedy output token-identical
+  to the f32 path. Gated by `wgpu_q8_0_logits_match_cpu_llama` + per-kernel dequant
+  reference tests.
+- ✅ **In-shader Q4_K dequant** (Phase 7.2, `matmul_nt_q4_k.wgsl` / `embed_q4_k.wgsl`):
+  raw 144-byte super-blocks upload **verbatim** (word-aligned — zero repack); the
+  shader decodes d/dmin + the packed 6-bit scale/min pairs (`get_scale_min_k4`) +
+  4-bit nibbles, 0.5625 bytes/weight. Q4_K_M GGUFs now load mostly quantized
+  (Qwen2.5-1.5B: 169/198 matrices). Measured (Qwen2.5-1.5B Q4_K_M, M4 16 GB):
+  weights resident 6778→**2367 MiB**, peak footprint 14.7→**5.4 GB** — the f32
+  baseline exhausted the machine and emitted an immediate-EOS empty reply; the
+  Q4_K build answers correctly, matching CPU greedy byte-for-byte. Decode 11.3 tok/s
+  (≈ CPU), TTFT 81 vs 89 ms. Gated by `wgpu_q4_k_logits_match_cpu_llama` (vs a
+  host-dequantized f32 twin, max_err<5e-3) + random-bit per-kernel reference tests.
+- ✅ **In-shader Q6_K dequant** (`matmul_nt_q6_k.wgsl` / `embed_q6_k.wgsl`): 210-byte
+  blocks padded to 212 on upload (pure memcpy — word alignment only); the shader
+  decodes the 4+2-bit quants and 16 **signed** int8 scales with the +0/+2/+4/+6
+  per-128-half indexing mirrored from the fixed CPU `dequantize_row_q6_K`
+  (random-bit reference tests pin every path). Q4_K_M GGUFs now load **fully
+  quantized** (Qwen2.5-1.5B: 198/198): weights resident 2367→**1062 MiB** (≈ GGUF
+  file size; 6.4× vs f32), peak footprint 5.4→**3.6 GB**, decode 11.3→**13.2 tok/s —
+  the wgpu path now beats the NEON M4 CPU (11.7) at 1.13×**. TTFT 77 ms.
+- ✅ **f16 KV cache** (Phase 7.3, `kv_append{,_f16}.wgsl` + templated attention):
+  K/V stored as f16 halves packed two-per-`u32` word, written by a `kv_append`
+  conversion kernel and read via core-WGSL `unpack2x16float` — **no `SHADER_F16`
+  feature needed** (naga in wgpu 22 can't parse `enable f16;`), so it runs on every
+  adapter. f32 accumulation unchanged. Half the bytes lifts the wgpu context cap
+  **4096 → 8192** (`kv_cache_ctx` / `SAPIENT_CTX`) at the same memory; auto-on for
+  even head_dim (all real models). Decode unchanged within noise at short context.
+  Gated by an f16-rounded-reference kernel test + `wgpu_f16_kv_cache_matches_f32_kv_cache`.
+- ✅ **Per-token command batching** (Phase 7.4, `begin_batch`/`flush_batch`):
+  every kernel used to pay its own queue submission (~450/token); each decode
+  token now records into one shared encoder and submits once. Measured
+  back-to-back on M4/Metal: SmolLM2-360M **23.1→29.3 tok/s (+27%)**, TTFT
+  40.5→35 ms; Qwen2.5-1.5B 12.0→12.5 tok/s (+4%), TTFT 86→80 ms. **Must flush
+  per token** — batching a whole prompt's passes into one encoder stalls Metal.
+  Shader-level fusion (norm→GEMV, gate/up→SwiGLU) evaluated and deferred: post-
+  batching it would cut ~3 of ~450 kernels while multiplying shaders across 4
+  weight formats; revisit if 7.6 discrete-GPU data shows launch-bound decode.
+- ✅ **Batched prefill** (Phase 7.5, `forward_chunk` + multi-token `kv_append`):
+  prompts process in 128-token chunks — transposes to heads-major for RoPE /
+  KV-append / attention (`seq_q = chunk`, the FlashDecoding kernel handles it
+  causally via `kv_offset`), last position sliced before the final norm; decode
+  keeps the transpose-free `seq_q = 1` fast path. Measured (Qwen2.5-1.5B, ~640-token
+  prompt, cold incl. load): time-to-first-token **87.9 → 58.5 s (1.5×)**, identical
+  greedy reply. Gated by `wgpu_chunked_prefill_matches_per_token` (300-token prompt,
+  chunk boundaries + pos0>0). **Known limitation:** matmuls are still GEMV-shaped,
+  so weights are read `m×` per chunk — the multi-row/tiled GEMM epilogue that makes
+  prefill weight traffic ∝ 1/chunk is the highest-value follow-up below.
+- [ ] **P5 (remaining)**: multi-row/tiled GEMM for prefill matmuls (amortise weight
+  reads across the chunk), scratch-buffer/bind-group reuse (per-dispatch uniform +
+  output allocations are the next overhead after batching), discrete-adapter pick,
+  `sapient devices` listing, Linux/Windows CI, bench on real Arc/AMD/Nvidia cards.
+  (Q5_K/Q4_0 in-shader dequant only if a shipped model needs them — Q4_K_M files are
+  fully covered by Q4_K+Q6_K+Q8_0; a quantized Q8 KV cache only if long-context
+  memory becomes the constraint.)
 - **Success metric:** a Q4 model on an Intel Arc / AMD Radeon card decoding several×
   faster than that machine's CPU path, from the same single binary.
 

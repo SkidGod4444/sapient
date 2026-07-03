@@ -324,9 +324,28 @@ cargo build --release -p sapient-cli --features wgpu
 ./target/release/sapient chat openhorizon/qwen2.5-0.5b --backend wgpu
 ```
 
-First cut: Llama-family models, f32 weights/KV cache, one token per submission.
-In-shader Q4_K/Q8_0 dequant, an f16/quantized KV cache, kernel fusion, and batched
-prefill are tracked in [ROADMAP Phase 3b](docs/ROADMAP.md).
+**Quantized weights stay quantized on the GPU** (Q8_0, Q4_K, Q6_K): raw ggml blocks
+upload without f32 expansion and are dequantized inside the shader — a Q4_K_M GGUF
+loads **fully quantized**, so VRAM ≈ the GGUF file size. Measured on Apple M4
+(16 GB, wgpu→Metal): SmolLM2-360M Q8_0 weights resident 1.6 GiB → **388 MiB** with
+greedy output token-identical to the f32 path; Qwen2.5-1.5B Q4_K_M weights resident
+6.8 GiB → **1.06 GiB** (198/198 matrices quantized), peak process footprint
+14.7 → 3.6 GB, decode **13.2 tok/s — 1.13× the NEON-optimized M4 CPU path**. On a
+16 GB machine the old f32 path ran out of memory at 1.5B (empty replies); the
+quantized-resident path answers correctly. F16/BF16 safetensors linears are
+online-quantized to Q8_0 on upload, same as the CPU engine.
+
+The KV cache is **f16** (packed halves, f32 accumulation — works on any adapter,
+no shader-f16 feature needed), which doubles the on-GPU context window to 8192 at
+the same memory cost as the old f32@4096 cache. Each decoded token's kernels are
+batched into **one queue submission** (was ~450), worth +27% decode on a 360M
+model and +4% on 1.5B (M4/Metal).
+
+Prompts prefill in 128-token batched chunks (1.5× faster time-to-first-token on
+long prompts); decode runs one token at a time.
+
+Current scope: Llama-family models. Tiled-GEMM prefill and buffer reuse are
+tracked in [ROADMAP Phase 3b](docs/ROADMAP.md).
 
 **Benchmark it on your machine.** `scripts/bench_wgpu.py` times TTFT and decode tok/s
 across backends so you can see what your GPU buys you — works on any OS/vendor, needs

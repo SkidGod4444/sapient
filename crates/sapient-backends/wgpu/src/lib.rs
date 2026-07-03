@@ -12,13 +12,18 @@
 //! one machine (e.g. an M-series Mac via Metal) runs unchanged on an Intel Arc or
 //! AMD Radeon card via Vulkan.
 //!
-//! # Status — foundation
+//! # Layout
 //!
-//! This is the foundation layer: GPU device acquisition ([`WgpuContext`]) plus the
-//! representative linear-projection kernels ([`WgpuContext::matmul_nt_f32`] and the
-//! Q8_0-quantized [`WgpuContext::matmul_nt_q8_0`]), validated against a host
-//! reference. The remaining transformer kernels (attention, RMSNorm, RoPE, SwiGLU,
-//! embedding gather) and the `ForwardEngine` integration build on this base.
+//! [`WgpuContext`] acquires the device (adapter-max limits, `SHADER_F16` when
+//! available, a compute-pipeline cache). On top of it sits the GPU-resident
+//! compute layer the `WgpuForwardEngine` drives: [`GpuBuffer`] (f32 tensors in
+//! storage buffers), [`GpuQ8Buffer`] and [`GpuQ4KBuffer`] (Q8_0 / Q4_K tensors kept
+//! quantized on-device, dequantized inside the shader — no host-side f32 expansion),
+//! plus the kernels `rms_norm`, `layer_norm`, `matmul_nt`, `matmul_nt_q8_0`,
+//! `matmul_nt_q4_k`, `rope`, `attention` (causal + non-causal GQA FlashDecoding),
+//! `swiglu`/`add`/`add_bias`/`gelu_erf`, `embed`/`embed_q8_0`/`embed_q4_k`,
+//! `transpose_heads`, and the KV-cache append `copy_range`.
+//! Each kernel is validated against a CPU reference in `tests/resident.rs`.
 //!
 //! # Example
 //!
@@ -28,17 +33,17 @@
 //! let ctx = WgpuContext::new().expect("a GPU is available");
 //! println!("running on {}", ctx.adapter_label());
 //!
-//! // out[1,2] = x[1,3] @ w[2,3]^T
-//! let x = [1.0, 2.0, 3.0];
-//! let w = [1.0, 0.0, 0.0,   0.0, 1.0, 1.0];
-//! let out = ctx.matmul_nt_f32(&x, &w, 1, 3, 2).unwrap();
+//! // out[1,2] = x[1,3] @ w[2,3]^T, GPU-resident
+//! let x = ctx.upload_f32(&[1.0, 2.0, 3.0], "x");
+//! let w = ctx.upload_f32(&[1.0, 0.0, 0.0, 0.0, 1.0, 1.0], "w");
+//! let out = ctx.download_f32(&ctx.matmul_nt(&x, &w, 1, 3, 2)).unwrap();
 //! assert_eq!(out, vec![1.0, 5.0]);
 //! ```
 
 mod context;
-mod matmul;
+mod quant;
 mod resident;
 
 pub use context::{WgpuContext, WgpuError};
-pub use matmul::quantize_q8_0_rows;
+pub use quant::{GpuQ4KBuffer, GpuQ6KBuffer, GpuQ8Buffer};
 pub use resident::GpuBuffer;

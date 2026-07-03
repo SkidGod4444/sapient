@@ -128,6 +128,118 @@ would close most of the gap — it's the top open item on the [roadmap](../ROADM
 
 ---
 
+## wgpu backend: Q8_0 GPU-resident weights (Phase 7.1)
+
+The cross-platform wgpu path now keeps Q8_0 weights **quantized on the GPU** (raw
+ggml blocks as packed int8 + scales, dequantized in-shader) instead of expanding to
+f32 on upload. Measured with `scripts/bench_wgpu.py` + `/usr/bin/time -l`,
+SmolLM2-360M-Instruct **Q8_0 GGUF**, Apple M4 (wgpu→Metal), 64 tokens, same model /
+same quant / same hardware for both builds:
+
+| Metric | f32 upload (before) | Q8_0 resident (after) |
+|---|---|---|
+| Weights resident on GPU | ~1.6 GiB | **388 MiB** (≈ GGUF file size; 225/225 matrices Q8_0, tied lm_head shares the embed buffer) |
+| Peak RSS (one-shot chat) | 2.65 GB | **1.27 GB** |
+| Peak memory footprint | 3.86 GB | **1.72 GB** |
+| Decode | 20.5 tok/s | **21.4 tok/s** |
+| TTFT | 51 ms | **46 ms** |
+
+Greedy decode output is **token-identical** to the f32 path (same dequant values,
+different reduction order). On UMA Apple silicon decode is dispatch-bound for a
+model this small, so throughput moves little; the ≥2× decode target of Phase 7
+is expected from discrete cards (Arc/AMD/Nvidia), where the 3.6× smaller weight
+reads directly cut the memory-bandwidth bottleneck — those runs are still open
+(Phase 7.6).
+
+### Q4_K + Q6_K — Qwen2.5-1.5B Q4_K_M, Apple M4 16 GB, wgpu→Metal
+
+Raw 144-byte Q4_K super-blocks upload verbatim (word-aligned, zero repack); Q6_K
+blocks (210 bytes) are padded to 212 (memcpy only). Both decode in-shader. With
+Q6_K covering v_proj + lm_head, a Q4_K_M GGUF loads **fully quantized**
+(198/198 matrices).
+
+| Metric | f32 upload (before) | Q4_K resident | + Q6_K (full coverage) |
+|---|---|---|---|
+| Weights resident on GPU | 6778 MiB | 2367 MiB | **1062 MiB** (≈ GGUF file size) |
+| Peak memory footprint | 14.66 GB | 5.36 GB | **3.59 GB** |
+| Peak RSS (one-shot chat) | 8.41 GB | 4.82 GB | **3.60 GB** |
+| Greedy output | *broken* — immediate EOS, empty reply (memory exhaustion on 16 GB) | correct ("Paris"), matches CPU | correct ("Paris"), matches CPU |
+| Decode | — (unusable) | 11.3 tok/s (≈ CPU 11.4) | **13.2 tok/s (1.13× CPU)** |
+| TTFT | — | 81 ms | **77 ms** (CPU 86 ms) |
+
+Two takeaways: quantized-resident weights are what make the wgpu path **fit and
+function at all** for 1.5B-class models on 16 GB machines, and with the lm_head
+read cut 6.5× (933 MB f32 → 196 MB Q6_K per token) the portable GPU path now
+**beats the heavily NEON-optimized M4 CPU** on the same binary. Discrete-card
+numbers (Arc/AMD/Nvidia, where the bandwidth win is larger) are still open —
+Phase 7.6.
+
+### Per-token command batching (Phase 7.4)
+
+Each decode token's ~450 kernels (16/layer × 28 layers on a 1.5B) used to pay one
+queue submission each; they now record into a single command encoder and submit
+once per token. Back-to-back on the same warm machine (M4, wgpu→Metal, 64 tokens):
+
+| Model | before | after |
+|---|---|---|
+| SmolLM2-360M Q8_0 | 23.1 tok/s, TTFT 40.5 ms | **29.3 tok/s (+27%), TTFT 35.0 ms** |
+| Qwen2.5-1.5B Q4_K_M | 12.0 tok/s, TTFT 86 ms | **12.5 tok/s (+4%), TTFT 80 ms** |
+
+Fixed submission overhead matters most when the per-kernel GPU work is small —
+hence the bigger win on the smaller model. The batch flushes once per token:
+accumulating a whole prompt's passes into one encoder stalls Metal.
+
+### Help wanted: cross-vendor numbers (Phase 7.6)
+
+Everything above was measured on Apple Silicon (wgpu→Metal). The same WGSL needs
+numbers from real **Intel Arc / AMD Radeon / Nvidia** cards, where the smaller
+quantized weight reads should matter more than on UMA. If you have one:
+
+```bash
+# Linux (needs Rust, python3, libvulkan1 + your GPU driver):
+git clone https://github.com/SkidGod4444/sapient && cd sapient
+git checkout feat/wgpu-q8-resident   # until the Phase 7 PR merges
+scripts/bench_gpu_7_6.sh             # writes bench-7_6-<gpu>.txt — attach it to PR #17
+```
+
+Windows (DX12): build with `cargo build --release -p sapient-cli --features wgpu`,
+then run `python3 scripts/bench_wgpu.py --backends cpu,wgpu --model openhorizon/qwen2.5-1.5b-q4`
+and `--model openhorizon/smollm2-360m-q4`, plus one `sapient.exe --verbose serve --backend wgpu`
+request to capture the `WgpuForwardEngine ready` line (VRAM + quantized-matrix count).
+
+Phase 7's acceptance bar on this hardware: ≥2× the f32-path decode on the same
+card, and 1.5B Q4 above 15 tok/s on a mid-range Arc/AMD.
+
+### Batched prefill (Phase 7.5)
+
+Prompts now prefill in 128-token chunks (`forward_chunk`) instead of one
+sequential forward per token. Cold end-to-end (fresh server, model load
+included), Qwen2.5-1.5B Q4_K_M, ~640-token prompt, greedy, M4/Metal:
+
+| | per-token prefill | chunked prefill |
+|---|---|---|
+| Time to first token | 87.9 s | **58.5 s (1.5×)** |
+| Reply | "fox" (correct) | "fox" (identical) |
+
+Known limitation: the matmul kernels are still GEMV-shaped (one workgroup per
+output element), so chunking improves occupancy and pass count but does not yet
+amortise weight reads across the chunk — a multi-row/tiled GEMM is the follow-up
+that makes prefill weight traffic scale with 1/chunk.
+
+### f16 KV cache (Phase 7.3)
+
+K/V now store as f16 halves packed two-per-u32 word (core WGSL — no shader-f16
+device feature, runs on every adapter), written by a `kv_append` conversion
+kernel; attention accumulation stays f32. Half the per-position bytes lifts the
+wgpu context cap **4096 → 8192** at identical memory cost: Qwen2.5-1.5B loads
+with `ctx 8192 (KV f16)`, same 1062 MiB of resident weights and same greedy
+output. Short-context decode is unchanged within run-to-run noise (measured
+back-to-back against the f32-cache build); the benefit is context capacity and
+long-context attention bandwidth. Logit deviation vs an f32 cache is bounded by
+f16 rounding (~5e-4 relative), gated by `wgpu_f16_kv_cache_matches_f32_kv_cache`.
+
+---
+
 ## Binary & deployment
 
 | Metric | SAPIENT | Ollama | mlx-lm |
