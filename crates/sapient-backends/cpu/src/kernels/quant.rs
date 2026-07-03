@@ -1618,6 +1618,142 @@ pub unsafe fn dot_q6_k_4rows_r4_neon(packed: &[u8], x: &[f32]) -> [f32; 4] {
     ]
 }
 
+/// Four Q6_K rows (R4 interleaved) × TWO int8 activation rows via `smmla` —
+/// the Q6_K CPU prefill kernel (m ≥ 2), mirroring
+/// [`dot_q4_k_4rows_r4_x2_smmla`]. Each 16-element scale group costs two `trn`
+/// shuffles + two `smmla`s per weight-row pair (covering both activation rows)
+/// instead of four `sdot`s. Per-output integer dots and f32 combine order match
+/// [`dot_q6_k_row_q8_neon`] exactly — all 8 result lanes bit-identical
+/// (regression-tested).
+///
+/// Returns `[[row0·x0, row0·x1], …, [row3·x0, row3·x1]]`.
+///
+/// # Safety
+/// Caller must verify `is_aarch64_feature_detected!("i8mm")`; `packed` must be a
+/// whole Q6_K_R4 row-group covered by both activation slices.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon,i8mm")]
+pub unsafe fn dot_q6_k_4rows_r4_x2_smmla(
+    packed: &[u8],
+    x0_i8: &[i8],
+    x0_scales: &[f32],
+    x1_i8: &[i8],
+    x1_scales: &[f32],
+) -> [[f32; 2]; 4] {
+    use std::arch::aarch64::*;
+    let mask0f = vdupq_n_u8(0x0F);
+    let mask3 = vdupq_n_u8(0x03);
+    let m32 = vdupq_n_s8(32);
+    let mut acc = [[0.0f32; 2]; 4];
+    let nb = packed.len() / (4 * Q6_K_BLOCK_BYTES);
+    let mut x_off = 0usize;
+    for b in 0..nb {
+        let gbase = b * 4 * Q6_K_BLOCK_BYTES;
+        let mut ql_off = 0usize;
+        let mut qh_off = 0usize;
+        let mut sc_base = 0usize;
+        let mut xo = x_off;
+        for _ in 0..(QK_K / 128) {
+            for &l0 in &[0usize, 16usize] {
+                let is = l0 / 16;
+                // Both activation rows' vectors for the four 16-groups, once.
+                let x0v = [
+                    vld1q_s8(x0_i8.as_ptr().add(xo + l0)),
+                    vld1q_s8(x0_i8.as_ptr().add(xo + 32 + l0)),
+                    vld1q_s8(x0_i8.as_ptr().add(xo + 64 + l0)),
+                    vld1q_s8(x0_i8.as_ptr().add(xo + 96 + l0)),
+                ];
+                let x1v = [
+                    vld1q_s8(x1_i8.as_ptr().add(xo + l0)),
+                    vld1q_s8(x1_i8.as_ptr().add(xo + 32 + l0)),
+                    vld1q_s8(x1_i8.as_ptr().add(xo + 64 + l0)),
+                    vld1q_s8(x1_i8.as_ptr().add(xo + 96 + l0)),
+                ];
+                let xs0 = [
+                    x0_scales[(xo + l0) / QK],
+                    x0_scales[(xo + 32 + l0) / QK],
+                    x0_scales[(xo + 64 + l0) / QK],
+                    x0_scales[(xo + 96 + l0) / QK],
+                ];
+                let xs1 = [
+                    x1_scales[(xo + l0) / QK],
+                    x1_scales[(xo + 32 + l0) / QK],
+                    x1_scales[(xo + 64 + l0) / QK],
+                    x1_scales[(xo + 96 + l0) / QK],
+                ];
+
+                for pair in 0..2usize {
+                    let (r0, r1) = (pair * 2, pair * 2 + 1);
+                    let blk0 = &packed[gbase + r0 * Q6_K_BLOCK_BYTES..];
+                    let blk1 = &packed[gbase + r1 * Q6_K_BLOCK_BYTES..];
+
+                    // Reconstruct the four 6-bit groups (q−32, i8) per row.
+                    let mut qm = [[vdupq_n_s8(0); 4]; 2];
+                    for (ri, blk) in [blk0, blk1].into_iter().enumerate() {
+                        let ql = blk.as_ptr();
+                        let qh = blk.as_ptr().add(128);
+                        let ql_lo = vld1q_u8(ql.add(ql_off + l0));
+                        let ql_hi = vld1q_u8(ql.add(ql_off + l0 + 32));
+                        let qhv = vld1q_u8(qh.add(qh_off + l0));
+                        let q1 = vorrq_u8(
+                            vandq_u8(ql_lo, mask0f),
+                            vshlq_n_u8::<4>(vandq_u8(qhv, mask3)),
+                        );
+                        let q2 = vorrq_u8(
+                            vandq_u8(ql_hi, mask0f),
+                            vshlq_n_u8::<4>(vandq_u8(vshrq_n_u8::<2>(qhv), mask3)),
+                        );
+                        let q3 = vorrq_u8(
+                            vshrq_n_u8::<4>(ql_lo),
+                            vshlq_n_u8::<4>(vandq_u8(vshrq_n_u8::<4>(qhv), mask3)),
+                        );
+                        let q4 = vorrq_u8(
+                            vshrq_n_u8::<4>(ql_hi),
+                            vshlq_n_u8::<4>(vandq_u8(vshrq_n_u8::<6>(qhv), mask3)),
+                        );
+                        qm[ri] = [
+                            vsubq_s8(vreinterpretq_s8_u8(q1), m32),
+                            vsubq_s8(vreinterpretq_s8_u8(q2), m32),
+                            vsubq_s8(vreinterpretq_s8_u8(q3), m32),
+                            vsubq_s8(vreinterpretq_s8_u8(q4), m32),
+                        ];
+                    }
+
+                    for g in 0..4usize {
+                        // [w_r0_seg, w_r1_seg] × [x0_seg, x1_seg] per 8-byte half.
+                        let wa = vtrn1q_s64_s8(qm[0][g], qm[1][g]);
+                        let wb = vtrn2q_s64_s8(qm[0][g], qm[1][g]);
+                        let xa = vtrn1q_s64_s8(x0v[g], x1v[g]);
+                        let xb = vtrn2q_s64_s8(x0v[g], x1v[g]);
+                        let d2 = smmla_s32(smmla_s32(vdupq_n_s32(0), wa, xa), wb, xb);
+                        // Lanes: [r0·x0, r0·x1, r1·x0, r1·x1].
+                        let dots = [
+                            vgetq_lane_s32::<0>(d2),
+                            vgetq_lane_s32::<1>(d2),
+                            vgetq_lane_s32::<2>(d2),
+                            vgetq_lane_s32::<3>(d2),
+                        ];
+                        let sc_off = is + 2 * g;
+                        for (ri, row) in [r0, r1].into_iter().enumerate() {
+                            let blk = &packed[gbase + row * Q6_K_BLOCK_BYTES..];
+                            let d = f16::from_le_bytes([blk[208], blk[209]]).to_f32();
+                            let scv = blk[192 + sc_base + sc_off] as i8 as f32;
+                            acc[row][0] += d * scv * xs0[g] * dots[ri * 2] as f32;
+                            acc[row][1] += d * scv * xs1[g] * dots[ri * 2 + 1] as f32;
+                        }
+                    }
+                }
+            }
+            xo += 128;
+            ql_off += 64;
+            qh_off += 32;
+            sc_base += 8;
+        }
+        x_off += QK_K;
+    }
+    acc
+}
+
 /// Dot product of a full Q6_K-quantized weight row with an f32 activation vector.
 ///
 /// Q6_K block layout (210 bytes, 256 weights):
@@ -2507,6 +2643,44 @@ mod tests {
             let row = &rows[r * row_bytes..(r + 1) * row_bytes];
             let w0 = unsafe { dot_q4_k_row_q8_neon(row, &x0_i8, &x0_s) };
             let w1 = unsafe { dot_q4_k_row_q8_neon(row, &x1_i8, &x1_s) };
+            assert_eq!(
+                got[r][0].to_bits(),
+                w0.to_bits(),
+                "row {r} x0: {} vs {w0}",
+                got[r][0]
+            );
+            assert_eq!(
+                got[r][1].to_bits(),
+                w1.to_bits(),
+                "row {r} x1: {} vs {w1}",
+                got[r][1]
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn q6_k_smmla_x2_matches_single_row() {
+        if !std::arch::is_aarch64_feature_detected!("i8mm") {
+            return;
+        }
+        let (n, k) = (4usize, 512usize);
+        let rows = q6_k_test_rows(n, k, 0x68AA);
+        let row_bytes = k / 256 * Q6_K_BLOCK_BYTES;
+        let x0: Vec<f32> = (0..k)
+            .map(|i| ((i * 37 % 97) as f32 - 48.0) * 0.02)
+            .collect();
+        let x1: Vec<f32> = (0..k)
+            .map(|i| ((i * 61 % 103) as f32 - 51.0) * 0.015)
+            .collect();
+        let (x0_i8, x0_s) = quantize_row_to_i8_blocks(&x0);
+        let (x1_i8, x1_s) = quantize_row_to_i8_blocks(&x1);
+        let packed = repack_q6_k_rows4(&rows, n, k);
+        let got = unsafe { dot_q6_k_4rows_r4_x2_smmla(&packed, &x0_i8, &x0_s, &x1_i8, &x1_s) };
+        for r in 0..4 {
+            let row = &rows[r * row_bytes..(r + 1) * row_bytes];
+            let w0 = unsafe { dot_q6_k_row_q8_neon(row, &x0_i8, &x0_s) };
+            let w1 = unsafe { dot_q6_k_row_q8_neon(row, &x1_i8, &x1_s) };
             assert_eq!(
                 got[r][0].to_bits(),
                 w0.to_bits(),

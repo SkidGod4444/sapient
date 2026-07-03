@@ -78,9 +78,21 @@ replaces four `sdot`s and each R4 weight group is read once per PAIR of prompt
 tokens. Measured (600-token prompt, qwen-1.5B, warm model): **M4 17.6→13.6 s
 (1.29×)**, **Thor 40.5→24.0 s (1.68× cumulative vs v0.5.0)**; Thor decode also
 +24% cumulative (22.4→27.7 tok/s). Pi 5 (Cortex-A76, no i8mm) is unaffected.
-Decode-side parity items left: Q6_K-x2 prefill treatment, deeper output tiling
-(llama.cpp pp512 remains well ahead), and Q8_K-style precomputed activation
-block-sums.
+The **Q6_K-x2 rung** followed (same SMMLA treatment for Q6_K, plus Q6_K repack
+now defaulting ON where i8mm exists — the x2 kernel consumes the R4 layout):
+prefill **M4 13.6→11.7 s** and **Thor 24.0→20.1 s** — cumulative prefill vs
+v0.5.0: **M4 1.50×, Thor 2.01×**. Decode is neutral on all machines.
+
+**Thermal discipline note (M-series):** back-to-back CPU benches on a MacBook
+progressively throttle — mid-session readings on the M4 varied 42.9→69.5 tok/s
+for the *same binary* by thermal state (and one apparent "+13%" and one
+apparent "−9%" were both thermal-order artifacts that A/B/A runs dispelled).
+M4 numbers here are cool-machine readings; Pi/Thor runs are short and
+consistent. Cool-machine decode reference (128-tok greedy): **llama-1B 69.5
+tok/s (1.13× behind llama.cpp), qwen-1.5B ~51 (1.22×)**.
+
+Remaining parity items: deeper output tiling for prefill (llama.cpp pp512
+remains well ahead), and Q8_K-style precomputed activation block-sums.
 
 **The honest read:**
 - On **Apple Metal** SAPIENT is competitive with llama.cpp (−7% on qwen-1.5B,
