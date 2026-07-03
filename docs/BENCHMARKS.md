@@ -189,6 +189,27 @@ Fixed submission overhead matters most when the per-kernel GPU work is small —
 hence the bigger win on the smaller model. The batch flushes once per token:
 accumulating a whole prompt's passes into one encoder stalls Metal.
 
+### Help wanted: cross-vendor numbers (Phase 7.6)
+
+Everything above was measured on Apple Silicon (wgpu→Metal). The same WGSL needs
+numbers from real **Intel Arc / AMD Radeon / Nvidia** cards, where the smaller
+quantized weight reads should matter more than on UMA. If you have one:
+
+```bash
+# Linux (needs Rust, python3, libvulkan1 + your GPU driver):
+git clone https://github.com/SkidGod4444/sapient && cd sapient
+git checkout feat/wgpu-q8-resident   # until the Phase 7 PR merges
+scripts/bench_gpu_7_6.sh             # writes bench-7_6-<gpu>.txt — attach it to PR #17
+```
+
+Windows (DX12): build with `cargo build --release -p sapient-cli --features wgpu`,
+then run `python3 scripts/bench_wgpu.py --backends cpu,wgpu --model openhorizon/qwen2.5-1.5b-q4`
+and `--model openhorizon/smollm2-360m-q4`, plus one `sapient.exe --verbose serve --backend wgpu`
+request to capture the `WgpuForwardEngine ready` line (VRAM + quantized-matrix count).
+
+Phase 7's acceptance bar on this hardware: ≥2× the f32-path decode on the same
+card, and 1.5B Q4 above 15 tok/s on a mid-range Arc/AMD.
+
 ### Batched prefill (Phase 7.5)
 
 Prompts now prefill in 128-token chunks (`forward_chunk`) instead of one
