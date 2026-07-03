@@ -2,8 +2,9 @@
 //! Windows, Metal on macOS — Intel/AMD/Nvidia/Apple). Weights are uploaded to GPU
 //! storage buffers once at load; every decode step runs entirely on-device (embed →
 //! per-layer RMSNorm/QKV/RoPE/flash-attention/SwiGLU → final norm → lm_head) and only
-//! the final logits are read back. The KV cache lives in GPU buffers and grows by a
-//! per-token `copy_range` append — no CPU↔GPU round-trips in the hot loop.
+//! the final logits are read back. The KV cache lives in GPU buffers (f16-packed by
+//! default — Phase 7.3) and grows by a per-token `kv_append` dispatch — no CPU↔GPU
+//! round-trips in the hot loop.
 //!
 //! Scope: Llama-family architectures (Llama/Qwen/Mistral/SmolLM) — RMSNorm, full RoPE,
 //! GQA, SwiGLU MLP, optional q/k/v projection biases (Qwen2). **Q8_0, Q4_K, and Q6_K
@@ -28,9 +29,12 @@ use crate::weights::{detect_weight_prefix, resolve_bias, resolve_lm_head, resolv
 
 use super::common::{kv_cache_ctx, quantize_tensor_to_q8_0, should_quantize_online};
 
-/// f32 KV cache is 4× a Q8_0 cache, so cap the wgpu first cut more conservatively than
-/// the CPU engine's 8192 to avoid OOMing modest GPUs at load (P5 adds a quantized cache).
-const WGPU_MAX_CTX: usize = 4096;
+/// An f32 KV cache is 4× a Q8_0 cache, so the f32 fallback stays capped more
+/// conservatively than the CPU engine's 8192 to avoid OOMing modest GPUs at load.
+/// With the f16 cache (the default for even head_dim — Phase 7.3) the cap is
+/// lifted to the standard `kv_cache_ctx` (8192 / `SAPIENT_CTX`): double the
+/// context for the same bytes as f32@4096.
+const WGPU_MAX_CTX_F32: usize = 4096;
 
 /// A weight matrix resident on the GPU — dense f32, or kept quantized and
 /// dequantized in-shader: Q8_0 (packed int8 + per-block scales), Q4_K (raw
@@ -90,6 +94,10 @@ pub struct WgpuForwardEngine {
     max_seq: usize,
     cur_len: usize,
     rotary_dim: usize,
+    /// KV cache stored as f16 packed two-per-u32 word (half the bytes, double the
+    /// context cap; core WGSL — no device feature). Auto-on whenever head_dim is
+    /// even; attention still accumulates in f32.
+    kv_f16: bool,
 }
 
 fn up(ctx: &WgpuContext, t: &Tensor, label: &str) -> GpuBuffer {
@@ -151,8 +159,22 @@ fn mm(ctx: &WgpuContext, x: &GpuBuffer, w: &GpuWeight, m: usize, k: usize, n: us
 
 impl WgpuForwardEngine {
     /// Build from an HF-named weight map (the same map the CPU `LlamaForward` consumes).
-    /// Only Llama-family architectures are supported here.
+    /// Only Llama-family architectures are supported here. The KV cache is f16
+    /// (u32-packed halves) whenever head_dim is even, f32 otherwise.
     pub fn from_weights(info: ModelInfo, weights: HashMap<String, Tensor>) -> Result<Self> {
+        Self::from_weights_with_kv(info, weights, None)
+    }
+
+    /// [`Self::from_weights`] with an explicit KV-cache dtype: `None` = auto (f16
+    /// whenever head_dim is even — the packed-u32 representation needs no device
+    /// feature), `Some(true)` = f16 (errors on an odd head_dim), `Some(false)` =
+    /// force f32 (the coherence tests use this for bit-tight comparison against
+    /// the CPU's f32 cache).
+    pub fn from_weights_with_kv(
+        info: ModelInfo,
+        weights: HashMap<String, Tensor>,
+        kv_f16: Option<bool>,
+    ) -> Result<Self> {
         if !matches!(
             info.arch,
             ArchType::Llama | ArchType::Qwen | ArchType::Mixtral
@@ -163,6 +185,18 @@ impl WgpuForwardEngine {
             );
         }
         let ctx = WgpuContext::new().context("no wgpu GPU adapter available")?;
+        // The f16 cache packs two halves per u32 word (core WGSL — works on every
+        // adapter); it only needs an even head_dim so words never straddle heads.
+        let kv_f16 = match kv_f16 {
+            Some(true) if info.head_dim % 2 != 0 => {
+                bail!(
+                    "f16 KV cache requires an even head_dim (got {})",
+                    info.head_dim
+                )
+            }
+            Some(v) => v,
+            None => info.head_dim % 2 == 0,
+        };
         let prefix = detect_weight_prefix(&weights);
         let embed_key = format!("{prefix}embed_tokens.weight");
 
@@ -177,7 +211,13 @@ impl WgpuForwardEngine {
             rotary_dim -= 1;
         }
 
-        let max_seq = kv_cache_ctx(info.max_position_embeddings).min(WGPU_MAX_CTX);
+        // f16 halves the per-position bytes, so it keeps the full default context;
+        // the f32 fallback stays capped to bound the footprint on modest GPUs.
+        let max_seq = if kv_f16 {
+            kv_cache_ctx(info.max_position_embeddings)
+        } else {
+            kv_cache_ctx(info.max_position_embeddings).min(WGPU_MAX_CTX_F32)
+        };
 
         let embed_t = weights
             .get(&embed_key)
@@ -232,8 +272,16 @@ impl WgpuForwardEngine {
                 wgate: gw("mlp.gate_proj")?,
                 wup: gw("mlp.up_proj")?,
                 wdown: gw("mlp.down_proj")?,
-                kcache: ctx.alloc_f32(n_kv * max_seq * head_dim, "kcache"),
-                vcache: ctx.alloc_f32(n_kv * max_seq * head_dim, "vcache"),
+                kcache: if kv_f16 {
+                    ctx.alloc_f16(n_kv * max_seq * head_dim, "kcache")
+                } else {
+                    ctx.alloc_f32(n_kv * max_seq * head_dim, "kcache")
+                },
+                vcache: if kv_f16 {
+                    ctx.alloc_f16(n_kv * max_seq * head_dim, "vcache")
+                } else {
+                    ctx.alloc_f32(n_kv * max_seq * head_dim, "vcache")
+                },
             });
         }
 
@@ -256,9 +304,10 @@ impl WgpuForwardEngine {
         }
         tracing::info!(
             "WgpuForwardEngine ready: {} layers, {hidden} hidden, {n_heads}/{n_kv} heads, \
-             head_dim {head_dim}, inter {inter}, ctx {max_seq}, weights {} MiB resident \
-             ({quant_matrices}/{total_matrices} matrices quantized{}) ({})",
+             head_dim {head_dim}, inter {inter}, ctx {max_seq} (KV {}), weights {} MiB \
+             resident ({quant_matrices}/{total_matrices} matrices quantized{}) ({})",
             info.num_hidden_layers,
+            if kv_f16 { "f16" } else { "f32" },
             weight_bytes >> 20,
             if lm_head.is_none() {
                 ", lm_head tied to embed"
@@ -278,6 +327,7 @@ impl WgpuForwardEngine {
             max_seq,
             cur_len: 0,
             rotary_dim,
+            kv_f16,
         })
     }
 
@@ -342,27 +392,58 @@ impl WgpuForwardEngine {
             ctx.rope(&q, &positions, n_heads, 1, head_dim, self.rotary_dim, theta);
             ctx.rope(&k, &positions, n_kv, 1, head_dim, self.rotary_dim, theta);
 
-            // Append this token's K/V into each kv-head's slot in the cache.
-            for hh in 0..n_kv {
-                let dst = (hh * self.max_seq + pos) * head_dim;
-                ctx.copy_range(&layer.kcache, dst, &k, hh * head_dim, head_dim);
-                ctx.copy_range(&layer.vcache, dst, &v, hh * head_dim, head_dim);
-            }
-
-            let attn = ctx.attention(
-                &q,
+            // Append this token's K/V into the cache (one dispatch per tensor,
+            // converting to the cache dtype in-shader).
+            ctx.kv_append(
+                &k,
                 &layer.kcache,
-                &layer.vcache,
-                1,
-                n_heads,
                 n_kv,
-                1,
-                pos + 1,
-                self.max_seq,
                 head_dim,
-                scale,
-                true, // causal (decoder LLM)
+                self.max_seq,
+                pos,
+                self.kv_f16,
             );
+            ctx.kv_append(
+                &v,
+                &layer.vcache,
+                n_kv,
+                head_dim,
+                self.max_seq,
+                pos,
+                self.kv_f16,
+            );
+
+            let attn = if self.kv_f16 {
+                ctx.attention_f16kv(
+                    &q,
+                    &layer.kcache,
+                    &layer.vcache,
+                    1,
+                    n_heads,
+                    n_kv,
+                    1,
+                    pos + 1,
+                    self.max_seq,
+                    head_dim,
+                    scale,
+                    true, // causal (decoder LLM)
+                )
+            } else {
+                ctx.attention(
+                    &q,
+                    &layer.kcache,
+                    &layer.vcache,
+                    1,
+                    n_heads,
+                    n_kv,
+                    1,
+                    pos + 1,
+                    self.max_seq,
+                    head_dim,
+                    scale,
+                    true,
+                )
+            };
             let mut o = mm(ctx, &attn, &layer.wo, 1, n_heads * head_dim, hidden);
             if let Some(b) = &layer.bo {
                 o = ctx.add(&o, b);

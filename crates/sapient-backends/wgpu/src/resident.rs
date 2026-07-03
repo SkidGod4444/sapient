@@ -10,6 +10,31 @@ use wgpu::util::DeviceExt;
 
 use crate::context::{WgpuContext, WgpuError};
 
+/// Rewrite attention.wgsl into its f16-KV variant: the cache binds as `array<u32>`
+/// (two packed f16 halves per word) and the `k_at`/`v_at` accessors decode via
+/// core-WGSL `unpack2x16float` — no `SHADER_F16` device feature involved, so this
+/// runs on every adapter (naga in wgpu 22 doesn't parse `enable f16;` anyway).
+/// Compiled once per label via the pipeline cache.
+fn f16_kv_variant(src: &str) -> String {
+    let out = src
+        .replace("alias kv_t = f32;", "alias kv_t = u32;")
+        .replace(
+            "fn k_at(i: u32) -> f32 { return f32(k[i]); }",
+            "fn k_at(i: u32) -> f32 { let w = unpack2x16float(k[i >> 1u]); \
+             return select(w.x, w.y, (i & 1u) == 1u); }",
+        )
+        .replace(
+            "fn v_at(i: u32) -> f32 { return f32(v[i]); }",
+            "fn v_at(i: u32) -> f32 { let w = unpack2x16float(v[i >> 1u]); \
+             return select(w.x, w.y, (i & 1u) == 1u); }",
+        );
+    debug_assert!(
+        out.contains("unpack2x16float") && out.contains("alias kv_t = u32;"),
+        "f16_kv_variant: accessor markers not found in shader source"
+    );
+    out
+}
+
 /// An f32 tensor resident in a GPU storage buffer. `len` is the element count;
 /// callers track logical shape separately (kernels take explicit dims).
 pub struct GpuBuffer {
@@ -58,6 +83,23 @@ impl WgpuContext {
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: (len * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        GpuBuffer { buf, len }
+    }
+
+    /// Allocate an uninitialized (zeroed) GPU storage buffer of `len` **f16**
+    /// elements — half the bytes of `alloc_f32`. Stored as packed f16 pairs in
+    /// `u32` words (core WGSL, no `SHADER_F16` feature needed), so `len` must be
+    /// even. Used for the f16 KV cache; `download_f32` must NOT be called on it.
+    pub fn alloc_f16(&self, len: usize, label: &str) -> GpuBuffer {
+        debug_assert_eq!(len % 2, 0, "alloc_f16: element count must be even");
+        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: (len * 2) as u64,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_SRC
                 | wgpu::BufferUsages::COPY_DST,
@@ -483,6 +525,55 @@ impl WgpuContext {
         scale: f32,
         causal: bool,
     ) -> GpuBuffer {
+        self.attention_impl(
+            q, k, v, batch, n_heads, n_kv_heads, seq_q, seq_k, kv_stride, head_dim, scale, causal,
+            false,
+        )
+    }
+
+    /// [`Self::attention`] over an **f16** K/V cache (buffers from [`Self::alloc_f16`],
+    /// written by [`Self::kv_append`] with `kv_f16 = true`; u32-packed halves, so no
+    /// device feature is required). Same math, f32 accumulation — only the K/V
+    /// loads narrow.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attention_f16kv(
+        &self,
+        q: &GpuBuffer,
+        k: &GpuBuffer,
+        v: &GpuBuffer,
+        batch: usize,
+        n_heads: usize,
+        n_kv_heads: usize,
+        seq_q: usize,
+        seq_k: usize,
+        kv_stride: usize,
+        head_dim: usize,
+        scale: f32,
+        causal: bool,
+    ) -> GpuBuffer {
+        self.attention_impl(
+            q, k, v, batch, n_heads, n_kv_heads, seq_q, seq_k, kv_stride, head_dim, scale, causal,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn attention_impl(
+        &self,
+        q: &GpuBuffer,
+        k: &GpuBuffer,
+        v: &GpuBuffer,
+        batch: usize,
+        n_heads: usize,
+        n_kv_heads: usize,
+        seq_q: usize,
+        seq_k: usize,
+        kv_stride: usize,
+        head_dim: usize,
+        scale: f32,
+        causal: bool,
+        kv_f16: bool,
+    ) -> GpuBuffer {
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         struct P {
@@ -517,14 +608,81 @@ impl WgpuContext {
             },
             "attn.params",
         );
-        self.dispatch(
-            "attention",
-            include_str!("shaders/attention.wgsl"),
-            &[&q.buf, &k.buf, &v.buf, &out.buf],
-            &params,
-            (batch * n_heads * seq_q) as u32,
-        );
+        if kv_f16 {
+            self.dispatch(
+                "attention_f16kv",
+                &f16_kv_variant(include_str!("shaders/attention.wgsl")),
+                &[&q.buf, &k.buf, &v.buf, &out.buf],
+                &params,
+                (batch * n_heads * seq_q) as u32,
+            );
+        } else {
+            self.dispatch(
+                "attention",
+                include_str!("shaders/attention.wgsl"),
+                &[&q.buf, &k.buf, &v.buf, &out.buf],
+                &params,
+                (batch * n_heads * seq_q) as u32,
+            );
+        }
         out
+    }
+
+    /// Append one token's K (or V) — an f32 `[n_kv_heads, head_dim]` buffer — into
+    /// position `pos` of a pre-allocated `[n_kv_heads, max_seq, head_dim]` cache,
+    /// converting to the cache's element type in-shader (`kv_f16 = true` for a
+    /// cache from [`Self::alloc_f16`], `false` for f32). One dispatch replaces the
+    /// former per-kv-head `copy_range` loop.
+    #[allow(clippy::too_many_arguments)]
+    pub fn kv_append(
+        &self,
+        src: &GpuBuffer,
+        cache: &GpuBuffer,
+        n_kv: usize,
+        head_dim: usize,
+        max_seq: usize,
+        pos: usize,
+        kv_f16: bool,
+    ) {
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct P {
+            n_kv: u32,
+            head_dim: u32,
+            max_seq: u32,
+            pos: u32,
+        }
+        debug_assert!(src.len >= n_kv * head_dim, "kv_append: src too small");
+        debug_assert!(pos < max_seq, "kv_append: pos out of range");
+        let params = self.uniform(
+            &P {
+                n_kv: n_kv as u32,
+                head_dim: head_dim as u32,
+                max_seq: max_seq as u32,
+                pos: pos as u32,
+            },
+            "kv_append.params",
+        );
+        if kv_f16 {
+            // The f16 kernel writes one packed u32 word (= 2 channels) per thread;
+            // head_dim must be even so words never straddle a head boundary.
+            debug_assert_eq!(head_dim % 2, 0, "kv_append f16: head_dim must be even");
+            self.dispatch(
+                "kv_append_f16",
+                include_str!("shaders/kv_append_f16.wgsl"),
+                &[&src.buf, &cache.buf],
+                &params,
+                ((n_kv * head_dim / 2) as u32).div_ceil(256),
+            );
+        } else {
+            self.dispatch(
+                "kv_append",
+                include_str!("shaders/kv_append.wgsl"),
+                &[&src.buf, &cache.buf],
+                &params,
+                ((n_kv * head_dim) as u32).div_ceil(256),
+            );
+        }
     }
 
     /// Embedding gather: `out[t,:] = table[ids[t], :]`. Returns `[n_tokens, dim]`.

@@ -303,7 +303,7 @@ fn wgpu_logits_match_cpu_llama() {
 
     let mut cpu =
         LlamaForward::from_weights(info.clone(), weights.clone()).expect("build CPU LlamaForward");
-    let mut gpu = match WgpuForwardEngine::from_weights(info, weights) {
+    let mut gpu = match WgpuForwardEngine::from_weights_with_kv(info, weights, Some(false)) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("no wgpu GPU adapter ({e}) — skipping coherence test");
@@ -369,7 +369,7 @@ fn wgpu_q8_0_logits_match_cpu_llama() {
 
     let mut cpu = LlamaForward::from_weights(info.clone(), weights.clone())
         .expect("build CPU LlamaForward (Q8_0)");
-    let mut gpu = match WgpuForwardEngine::from_weights(info, weights) {
+    let mut gpu = match WgpuForwardEngine::from_weights_with_kv(info, weights, Some(false)) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("no wgpu GPU adapter ({e}) — skipping Q8_0 coherence test");
@@ -445,7 +445,7 @@ fn wgpu_k_quant_logits_match_cpu_llama() {
 
     let mut cpu = LlamaForward::from_weights(info.clone(), dequant)
         .expect("build CPU LlamaForward (dequantized f32 reference)");
-    let mut gpu = match WgpuForwardEngine::from_weights(info, weights) {
+    let mut gpu = match WgpuForwardEngine::from_weights_with_kv(info, weights, Some(false)) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("no wgpu GPU adapter ({e}) — skipping Q4_K coherence test");
@@ -495,4 +495,49 @@ fn wgpu_k_quant_logits_match_cpu_llama() {
         argmax(&gpu_step),
         "K-quant decode greedy must match"
     );
+}
+
+/// Phase 7.3 gate: the f16 KV cache (halves packed two-per-u32 word, decoded with
+/// core-WGSL unpack2x16float — the auto default for even head_dim) must track the
+/// forced-f32-cache engine on the same weights. K/V values round to f16 on write
+/// (~5e-4 relative), so the bound is looser than the f32 gates but far below
+/// anything a layout/packing bug would produce; greedy agreement is the hard gate.
+/// Uses the Q8_0 tiny model (head_dim 16 — even) so quantized matmuls and the f16
+/// cache are exercised together, decoding several tokens to grow the cache.
+#[test]
+fn wgpu_f16_kv_cache_matches_f32_kv_cache() {
+    let (info, weights) = tiny_llama_q8_0();
+
+    let mut gpu32 =
+        match WgpuForwardEngine::from_weights_with_kv(info.clone(), weights.clone(), Some(false)) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("no wgpu GPU adapter ({e}) — skipping f16-KV coherence test");
+                return;
+            }
+        };
+    let mut gpu16 = WgpuForwardEngine::from_weights_with_kv(info, weights, Some(true))
+        .expect("f16 KV engine (head_dim is even)");
+
+    let tokens: Vec<u32> = vec![1, 5, 9, 3, 7, 2, 11];
+    let mut l32 = gpu32.forward_logits(&tokens, false).unwrap();
+    let mut l16 = gpu16.forward_logits(&tokens, false).unwrap();
+
+    // Greedy-decode a few steps through the growing caches.
+    for _ in 0..4 {
+        let max_err = l32
+            .iter()
+            .zip(&l16)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_err < 2e-2, "f16 vs f32 KV logits max_err={max_err}");
+        assert_eq!(
+            argmax(&l32),
+            argmax(&l16),
+            "greedy must match (err={max_err})"
+        );
+        let tok = argmax(&l32) as u32;
+        l32 = gpu32.forward_logits(&[tok], true).unwrap();
+        l16 = gpu16.forward_logits(&[tok], true).unwrap();
+    }
 }

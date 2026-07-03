@@ -10,7 +10,16 @@
 // One workgroup per (batch, head, query-row). 128 lanes cooperate: they parallelise
 // the q·k dot (tree reduction) and the O = corr*O + p*V accumulation over head_dim.
 // Each lane owns channels {lane, lane+128, ...}; o_reg holds its running output.
-// GQA: head h reads kv-head h / (n_heads/n_kv_heads). f32 throughout.
+// GQA: head h reads kv-head h / (n_heads/n_kv_heads).
+//
+// `kv_t` is the K/V storage element type and `k_at`/`v_at` the accessors. The host
+// compiles two variants of this source: f32 (as written) and an f16 KV cache where
+// each u32 word packs two f16 halves, read via core-WGSL `unpack2x16float` (works
+// on every adapter — no SHADER_F16 feature needed; see `f16_kv_variant` on the
+// host, which rewrites the alias + accessor lines). Accumulation is ALWAYS f32;
+// only the K/V loads narrow.
+
+alias kv_t = f32;
 
 struct P {
     batch: u32,
@@ -28,10 +37,13 @@ struct P {
 };
 
 @group(0) @binding(0) var<storage, read>       q:   array<f32>;
-@group(0) @binding(1) var<storage, read>       k:   array<f32>;
-@group(0) @binding(2) var<storage, read>       v:   array<f32>;
+@group(0) @binding(1) var<storage, read>       k:   array<kv_t>;
+@group(0) @binding(2) var<storage, read>       v:   array<kv_t>;
 @group(0) @binding(3) var<storage, read_write> out: array<f32>;
 @group(0) @binding(4) var<uniform>             p:   P;
+
+fn k_at(i: u32) -> f32 { return f32(k[i]); }
+fn v_at(i: u32) -> f32 { return f32(v[i]); }
 
 const WG: u32 = 128u;
 var<workgroup> partial: array<f32, 128>;
@@ -79,7 +91,7 @@ fn cs_main(@builtin(workgroup_id) wg: vec3<u32>,
         var local = 0.0;
         for (var j = 0u; j < p.jcount; j = j + 1u) {
             let c = tid + j * WG;
-            if (c < hd) { local = local + q_reg[j] * k[krow + c]; }
+            if (c < hd) { local = local + q_reg[j] * k_at(krow + c); }
         }
         partial[tid] = local;
         workgroupBarrier();
@@ -107,7 +119,7 @@ fn cs_main(@builtin(workgroup_id) wg: vec3<u32>,
         let vrow = kv_base + ki * hd;
         for (var j = 0u; j < p.jcount; j = j + 1u) {
             let c = tid + j * WG;
-            if (c < hd) { o_reg[j] = corr * o_reg[j] + pw * v[vrow + c]; }
+            if (c < hd) { o_reg[j] = corr * o_reg[j] + pw * v_at(vrow + c); }
         }
         workgroupBarrier();
     }

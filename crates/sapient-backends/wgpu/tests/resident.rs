@@ -333,6 +333,88 @@ fn kv_cache_append_then_decode_matches_cpu() {
 }
 
 #[test]
+fn kv_append_then_decode_matches_cpu_f32_and_f16() {
+    // Same decode simulation as above, but the cache is filled via the kv_append
+    // conversion kernel (which replaced the per-head copy_range loop) — once with
+    // an f32 cache and, when the device has SHADER_F16, once with an f16 cache.
+    // The f16 reference quantizes K/V to f16 on the host first, so the comparison
+    // stays tight: the only difference left is f32 reduction order.
+    let Some(ctx) = ctx() else {
+        return;
+    };
+    let (n_heads, n_kv_heads, head_dim, max_seq) = (4usize, 2usize, 64usize, 16usize);
+    let steps = 6usize;
+    let scale = 1.0 / (head_dim as f32).sqrt();
+
+    // The f16 cache is u32-packed (core WGSL) — both variants run on any adapter.
+    for f16 in [false, true] {
+        let mut next = lcg();
+        let alloc = |label: &str| {
+            if f16 {
+                ctx.alloc_f16(n_kv_heads * max_seq * head_dim, label)
+            } else {
+                ctx.alloc_f32(n_kv_heads * max_seq * head_dim, label)
+            }
+        };
+        let kcache = alloc("kcache");
+        let vcache = alloc("vcache");
+
+        // Host mirrors hold the values the cache actually stores (f16-rounded
+        // when the cache is f16).
+        let store = |x: f32| {
+            if f16 {
+                half::f16::from_f32(x).to_f32()
+            } else {
+                x
+            }
+        };
+        let mut k_host = vec![0.0f32; n_kv_heads * steps * head_dim];
+        let mut v_host = vec![0.0f32; n_kv_heads * steps * head_dim];
+        for t in 0..steps {
+            let knew: Vec<f32> = (0..n_kv_heads * head_dim).map(|_| next()).collect();
+            let vnew: Vec<f32> = (0..n_kv_heads * head_dim).map(|_| next()).collect();
+            let kg = ctx.upload_f32(&knew, "knew");
+            let vg = ctx.upload_f32(&vnew, "vnew");
+            ctx.kv_append(&kg, &kcache, n_kv_heads, head_dim, max_seq, t, f16);
+            ctx.kv_append(&vg, &vcache, n_kv_heads, head_dim, max_seq, t, f16);
+            for hh in 0..n_kv_heads {
+                for c in 0..head_dim {
+                    k_host[(hh * steps + t) * head_dim + c] = store(knew[hh * head_dim + c]);
+                    v_host[(hh * steps + t) * head_dim + c] = store(vnew[hh * head_dim + c]);
+                }
+            }
+        }
+
+        let q: Vec<f32> = (0..n_heads * head_dim).map(|_| next()).collect();
+        let qg = ctx.upload_f32(&q, "q");
+        let og = if f16 {
+            ctx.attention_f16kv(
+                &qg, &kcache, &vcache, 1, n_heads, n_kv_heads, 1, steps, max_seq, head_dim, scale,
+                true,
+            )
+        } else {
+            ctx.attention(
+                &qg, &kcache, &vcache, 1, n_heads, n_kv_heads, 1, steps, max_seq, head_dim, scale,
+                true,
+            )
+        };
+        let got = ctx.download_f32(&og).unwrap();
+        let want = cpu_attn(
+            &q, &k_host, &v_host, n_heads, n_kv_heads, 1, steps, head_dim, scale,
+        );
+        let max_err = got
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_err < 1e-4,
+            "kv_append decode (f16={f16}) max_err={max_err}"
+        );
+    }
+}
+
+#[test]
 fn embed_gather_matches_cpu() {
     let Some(ctx) = ctx() else {
         return;
