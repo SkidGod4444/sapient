@@ -123,6 +123,10 @@ pub fn matmul_nt(x: &Tensor, w: &Tensor) -> Result<Tensor> {
         });
     }
 
+    // Thermal governor sample point (Phase 8.4): rate-limited to one sysfs read
+    // per 500 ms — every other call is a single atomic compare.
+    crate::thermal::tick();
+
     // Dispatch on weight dtype. All quantized paths dequantize on-the-fly block
     // by block — no F32 expansion in memory.
     match w.dtype() {
@@ -383,10 +387,24 @@ fn matmul_nt_float(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resu
 // can balance load without excess overhead.  Clamped to [16, 512] so tiny
 // matrices still get at least 16 rows per task and huge matrices (lm_head
 // n=151936) don't create thousands of micro-tasks.
+//
+// Thermal-governed (Phase 8.4): while the board runs hot, work splits into
+// EXACTLY `effective_threads()` tasks — with fewer tasks than pool threads, the
+// surplus rayon workers have nothing to steal and idle, cutting package power so
+// the clocks stay up. Two traps found on-device (Pi 5 soak): the ×4 multiplier
+// must NOT apply while governed (4 threads × 4 = 16 tasks keeps every core busy
+// even at a reduced target), and the 512-row chunk cap must not re-split big
+// matrices (lm_head/151936 ÷ 512 = 297 tasks — same effect). Inert path
+// (== rayon::current_num_threads) is unchanged.
 fn gemv_chunk(n: usize) -> usize {
     let ncpus = rayon::current_num_threads().max(1);
-    let target_tasks = ncpus * 4;
-    (n / target_tasks).clamp(16, 512)
+    let eff = crate::thermal::effective_threads();
+    if eff < ncpus {
+        // Governed: one task per allowed thread; no upper chunk cap.
+        (n / eff.max(1)).max(16)
+    } else {
+        (n / (ncpus * 4)).clamp(16, 512)
+    }
 }
 
 /// Compute n output rows of a quantized GEMV, batching rows per Rayon task.

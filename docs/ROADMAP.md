@@ -168,12 +168,40 @@ Radeon, Nvidia, and Apple — and are dev-tested on Apple Silicon (Metal under w
 - **Success metric:** a Q4 model on an Intel Arc / AMD Radeon card decoding several×
   faster than that machine's CPU path, from the same single binary.
 
-## Phase 4 — Raspberry Pi / small ARM SBC  → **`v0.3.x`** (partially done)
-The hardest, most differentiating CPU target (2–8 GB RAM).
+## Phase 4 — Raspberry Pi / small ARM SBC  → **`v0.3.x` – `v0.4.x`** (mostly done)
+The hardest, most differentiating CPU target (2–8 GB RAM). (Continues as the
+Notion roadmap's Phase 8 — "Own the Raspberry Pi".)
 - ✅ Bigger-than-RAM support via mmap paging.
-- ✅ `aarch64` validation; NEON SIMD applies to Pi 4/5.
-- [ ] Low-RAM tuning: minimal activation buffers, optional `Q4_K_S`.
-- [ ] Document Pi 4/5 setup and expected tok/s.
+- ✅ `aarch64` validation; NEON SIMD applies to Pi 4/5. All hot dot-product paths
+  are NEON (Q8_0 SDOT, Q4_K W4A8 SDOT, Q5_K/Q6_K 16-lane) — the v0.3.9 Pi perf
+  hunt established "no scalar K-quant kernels" as the practical kernel ceiling
+  (decode is memory-latency-bound; further SDOT conversions measured ~0).
+- ✅ Low-RAM quant selection: **`SAPIENT_GGUF_QUANT=Q4_K_S`** (or any quant tag)
+  overrides the Q4_K_M default when a 4 GB board needs the smaller file.
+- ✅ **Thermal-aware sustained decode** (`sapient-backends-cpu/src/thermal.rs`):
+  a hysteresis governor samples `/sys/class/thermal` (rate-limited, from the
+  matmul dispatcher) and steps the GEMV parallelism target down one core at a
+  time from 80 °C (floor: half the cores), restoring below 70 °C — backs off
+  *before* the 85 °C firmware trip so passive boards degrade gracefully instead
+  of collapsing. `SAPIENT_THERMAL=off|_HOT|_COOL|_PATH` to tune; inert on
+  machines without thermal zones. Unit-tested against a fake sysfs; on-device
+  Pi validation pending.
+- ✅ `docs/PI.md`: setup, per-RAM guidance, thermal + voice-loop docs, and the
+  measured Pi 5 table (0.5B 8.7 / 1B 8.3 / 1.5B 6.7 / 3B 3.4 tok/s post-fix);
+  voice loop measured end-to-end via `converse --input` (10.9 s/turn on v0.4.4:
+  STT 3.5 s + LLM 2.1 s + TTS 5.3 s — correct at every stage). Pi 4 column:
+  no hardware on hand; numbers welcome.
+- ✅ **Minimal activation buffers (8.3) — closed with two findings.** (1) Ordinary
+  per-step activation allocations are measured-zero: forcing all large allocs onto
+  the reusable heap via `GLIBC_TUNABLES=glibc.malloc.mmap_threshold=64M` changed
+  Pi decode by 0.0% (8.7 tok/s in all four A/B runs) — glibc already recycles the
+  repeating buffers, so no scratch-pool machinery was added. (2) The audit found
+  the real per-step buffer catastrophe elsewhere: **embedding lookup dequantized
+  the whole quantized table every token** (`to_f32_cow` on `[vocab, hidden]`).
+  Now row-wise (`gather_row_f32`, bit-identical, regression-tested): Pi 5
+  llama-3.2-1b **1.3→8.3 tok/s (6.4×)**, qwen-1.5b 1.9→6.7, llama-3b 0.8→3.4;
+  M4 CPU llama-1b 6.6→38.7, qwen-1.5b 11.5→33.5. **The phase's success metric
+  ("1B Q4 usable-interactive on Pi 5") is met.**
 - **Success metric:** run a 3B Q4 model on a 4 GB Pi 5 without OOM.
 
 ## Phase 4b — Multi-model server  → **`v0.3.x`**

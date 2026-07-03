@@ -10,6 +10,7 @@
 pub mod backend;
 pub mod kernels;
 pub mod pool;
+pub mod thermal;
 
 pub use backend::CpuBackend;
 pub use pool::PoolAllocator;

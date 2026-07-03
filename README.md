@@ -61,6 +61,7 @@ Grab a pre-built binary for your platform from the [**latest release**](https://
 | Windows (x86_64, GPU — Intel/AMD/Nvidia via DX12) | `sapient-x86_64-pc-windows-msvc-gpu.zip` |
 
 > **Linux:** ARM64 binaries target 64-bit glibc systems (Pi 4/5 with Raspberry Pi OS 64-bit). 32-bit `armhf`/`armv7` is not built.
+> **Raspberry Pi:** see [docs/PI.md](docs/PI.md) — per-RAM model guidance, the low-RAM quant override (`SAPIENT_GGUF_QUANT=Q4_K_S`), and the thermal governor that keeps sustained decode from collapsing on passive cooling (`SAPIENT_THERMAL=off` to disable).
 >
 > **`-gpu` binaries** add the cross-platform wgpu GPU backend (`--backend wgpu`); use them on any Intel/AMD/Nvidia GPU. On Linux they need the Vulkan loader (`libvulkan1`) and your GPU driver installed. The plain binaries are CPU-only. On Apple Silicon use the `-metal` binary instead.
 
