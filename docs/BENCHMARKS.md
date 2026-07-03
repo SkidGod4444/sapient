@@ -48,7 +48,16 @@ localizes llama.cpp's remaining CPU edge in (a) **load-time weight repacking**
 (4–8 rows interleaved into one contiguous stream per task, vs our four parallel
 row streams per task thrashing the prefetchers) and (b) **i8mm/SMMLA** on
 v8.6+ cores (M4/Grace; 2× int8 MACs per instruction, requires the interleaved
-layout). That repack + i8mm project is the defined path to CPU parity.
+layout). The first repack rung has since landed: **Q4_K_R4** — a load-time permutation
+interleaving groups of 4 rows' super-blocks so the SDOT kernel walks one
+contiguous stream per task (`DType::Q4_K_R4`, pure-CPU engines, heap tensors
+only, embedding excluded, `SAPIENT_NO_REPACK=1` to disable). Bit-identical
+logits (engine-gated). Measured cumulative vs v0.5.0: **Pi 5 llama-1B 8.2→9.2
+tok/s (+12%), qwen-1.5B 6.6→7.5 (+14%); M4 +5–6%** — the llama.cpp CPU gap
+narrows from 1.79× to 1.60×. Next rungs, in measured-value order: the same
+repack+multi-row treatment for **Q6_K** (v_proj + lm_head + half of ffn_down ≈
+⅓ of decode bytes, still single-row), then **i8mm/SMMLA** kernels on v8.6+
+cores (M4/Grace).
 
 **The honest read:**
 - On **Apple Metal** SAPIENT is competitive with llama.cpp (−7% on qwen-1.5B,

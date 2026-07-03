@@ -246,6 +246,12 @@ impl Tensor {
         }
     }
 
+    /// True when this tensor's bytes are an OS file mapping (see
+    /// [`crate::buffer::Buffer::is_mmap`]).
+    pub fn is_mmap(&self) -> bool {
+        self.buffer.is_mmap()
+    }
+
     /// For quantized tensors (Q4_0, Q8_0): returns the packed block bytes as a
     /// row-major slice where each logical row of `k` elements occupies
     /// `dtype.byte_count(k)` bytes.  Panics if the tensor is not quantized.
@@ -382,29 +388,30 @@ impl Tensor {
                 let numel = self.numel();
                 let bytes = self.as_bytes();
                 let mut out = vec![0.0f32; numel];
-                let mut out_idx = 0usize;
-                for block in bytes.chunks_exact(Q4_K_BLOCK_BYTES) {
-                    let d = half::f16::from_le_bytes([block[0], block[1]]).to_f32();
-                    let dmin = half::f16::from_le_bytes([block[2], block[3]]).to_f32();
-                    let scales = &block[4..16];
-                    let qs = &block[16..Q4_K_BLOCK_BYTES];
-                    let mut q_off = 0usize;
-                    let mut is = 0usize;
-                    for _ in 0..(K_QUANT_BLOCK_SIZE / 64) {
-                        let (sc1, m1) = Self::get_scale_min_k4(is, scales);
-                        let d1 = d * sc1 as f32;
-                        let m1v = dmin * m1 as f32;
-                        let (sc2, m2) = Self::get_scale_min_k4(is + 1, scales);
-                        let d2 = d * sc2 as f32;
-                        let m2v = dmin * m2 as f32;
-                        for l in 0..32 {
-                            out[out_idx + l] = d1 * (qs[q_off + l] & 0x0F) as f32 - m1v;
-                            out[out_idx + l + 32] = d2 * (qs[q_off + l] >> 4) as f32 - m2v;
-                        }
-                        out_idx += 64;
-                        q_off += 32;
-                        is += 2;
-                    }
+                for (b, block) in bytes.chunks_exact(Q4_K_BLOCK_BYTES).enumerate() {
+                    Self::dequant_q4_k_block(block, &mut out[b * K_QUANT_BLOCK_SIZE..]);
+                }
+                out
+            }
+            DType::Q4_K_R4 => {
+                // Row-interleaved Q4_K (groups of 4 rows, block-major within the
+                // group): packed block index p = g·(4·NB) + b·4 + r maps to
+                // logical row g·4 + r, super-block b. De-interleave while
+                // dequantizing so callers see the normal row-major values.
+                let numel = self.numel();
+                let dims = self.shape.dims();
+                let k = *dims.last().expect("Q4_K_R4 tensor must be 2-D");
+                let nb = k / K_QUANT_BLOCK_SIZE; // super-blocks per row
+                let bytes = self.as_bytes();
+                let mut out = vec![0.0f32; numel];
+                for (p, block) in bytes.chunks_exact(Q4_K_BLOCK_BYTES).enumerate() {
+                    let g = p / (4 * nb);
+                    let rem = p % (4 * nb);
+                    let b = rem / 4;
+                    let r = rem % 4;
+                    let row = g * 4 + r;
+                    let off = (row * nb + b) * K_QUANT_BLOCK_SIZE;
+                    Self::dequant_q4_k_block(block, &mut out[off..]);
                 }
                 out
             }
@@ -504,6 +511,33 @@ impl Tensor {
 
     /// Extract scale and min for a K-quant sub-block (used in Q4_K/Q5_K dequantization).
     #[inline]
+    /// Dequantize one 144-byte Q4_K super-block into `out[..256]` (shared by the
+    /// row-major Q4_K and row-interleaved Q4_K_R4 `to_f32_vec` paths).
+    fn dequant_q4_k_block(block: &[u8], out: &mut [f32]) {
+        let d = half::f16::from_le_bytes([block[0], block[1]]).to_f32();
+        let dmin = half::f16::from_le_bytes([block[2], block[3]]).to_f32();
+        let scales = &block[4..16];
+        let qs = &block[16..crate::dtype::Q4_K_BLOCK_BYTES];
+        let mut out_idx = 0usize;
+        let mut q_off = 0usize;
+        let mut is = 0usize;
+        for _ in 0..(crate::dtype::K_QUANT_BLOCK_SIZE / 64) {
+            let (sc1, m1) = Self::get_scale_min_k4(is, scales);
+            let d1 = d * sc1 as f32;
+            let m1v = dmin * m1 as f32;
+            let (sc2, m2) = Self::get_scale_min_k4(is + 1, scales);
+            let d2 = d * sc2 as f32;
+            let m2v = dmin * m2 as f32;
+            for l in 0..32 {
+                out[out_idx + l] = d1 * (qs[q_off + l] & 0x0F) as f32 - m1v;
+                out[out_idx + l + 32] = d2 * (qs[q_off + l] >> 4) as f32 - m2v;
+            }
+            out_idx += 64;
+            q_off += 32;
+            is += 2;
+        }
+    }
+
     fn get_scale_min_k4(j: usize, scales: &[u8]) -> (u8, u8) {
         if j < 4 {
             (scales[j] & 63, scales[j + 4] & 63)
