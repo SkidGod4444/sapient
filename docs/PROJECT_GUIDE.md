@@ -285,8 +285,9 @@ The real generation math: how to run a Phi or Llama-style model layer by layer.
     via wgpu/WGSL (Vulkan/DX12/Metal) so it runs on Intel/AMD/Nvidia too. Weights upload
     once (Q8_0/Q4_K/Q6_K stay quantized on-device, dequantized in-shader — a Q4_K_M
     GGUF loads fully quantized; Q4_0/Q5_K expand to f32), the KV cache stays on the
-    GPU, each token decodes on-device; only logits read back. Llama-family — see the
-    wgpu invariants in `CLAUDE.md`.
+    GPU as packed f16 (half the bytes → ctx 8192 instead of 4096), each token decodes
+    on-device; only logits read back. Llama-family — see the wgpu invariants in
+    `CLAUDE.md`.
   - `forward/whisper.rs` — the **Whisper speech-to-text engine** (`WhisperForward`,
     wrapped in `AudioEngine`). An encoder turns the mel spectrogram into an "audio
     understanding," then a decoder writes out the words one token at a time, *listening

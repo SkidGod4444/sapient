@@ -131,11 +131,19 @@ Radeon, Nvidia, and Apple — and are dev-tested on Apple Silicon (Metal under w
   quantized** (Qwen2.5-1.5B: 198/198): weights resident 2367→**1062 MiB** (≈ GGUF
   file size; 6.4× vs f32), peak footprint 5.4→**3.6 GB**, decode 11.3→**13.2 tok/s —
   the wgpu path now beats the NEON M4 CPU (11.7) at 1.13×**. TTFT 77 ms.
-- [ ] **P5 (remaining)**: f16 / quantized KV cache,
-  kernel fusion (cut per-token dispatches), batched prefill (`seq_q>1`),
-  discrete-adapter pick, `sapient devices` listing, Linux/Windows CI, bench on real
-  Arc/AMD/Nvidia cards. (Q5_K/Q4_0 in-shader dequant only if a shipped model needs
-  them — Q4_K_M files are fully covered by Q4_K+Q6_K+Q8_0.)
+- ✅ **f16 KV cache** (Phase 7.3, `kv_append{,_f16}.wgsl` + templated attention):
+  K/V stored as f16 halves packed two-per-`u32` word, written by a `kv_append`
+  conversion kernel and read via core-WGSL `unpack2x16float` — **no `SHADER_F16`
+  feature needed** (naga in wgpu 22 can't parse `enable f16;`), so it runs on every
+  adapter. f32 accumulation unchanged. Half the bytes lifts the wgpu context cap
+  **4096 → 8192** (`kv_cache_ctx` / `SAPIENT_CTX`) at the same memory; auto-on for
+  even head_dim (all real models). Decode unchanged within noise at short context.
+  Gated by an f16-rounded-reference kernel test + `wgpu_f16_kv_cache_matches_f32_kv_cache`.
+- [ ] **P5 (remaining)**: kernel fusion (cut per-token dispatches), batched prefill
+  (`seq_q>1`), discrete-adapter pick, `sapient devices` listing, Linux/Windows CI,
+  bench on real Arc/AMD/Nvidia cards. (Q5_K/Q4_0 in-shader dequant only if a shipped
+  model needs them — Q4_K_M files are fully covered by Q4_K+Q6_K+Q8_0; a quantized
+  Q8 KV cache only if long-context memory becomes the constraint.)
 - **Success metric:** a Q4 model on an Intel Arc / AMD Radeon card decoding several×
   faster than that machine's CPU path, from the same single binary.
 

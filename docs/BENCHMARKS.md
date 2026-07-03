@@ -174,6 +174,18 @@ read cut 6.5× (933 MB f32 → 196 MB Q6_K per token) the portable GPU path now
 numbers (Arc/AMD/Nvidia, where the bandwidth win is larger) are still open —
 Phase 7.6.
 
+### f16 KV cache (Phase 7.3)
+
+K/V now store as f16 halves packed two-per-u32 word (core WGSL — no shader-f16
+device feature, runs on every adapter), written by a `kv_append` conversion
+kernel; attention accumulation stays f32. Half the per-position bytes lifts the
+wgpu context cap **4096 → 8192** at identical memory cost: Qwen2.5-1.5B loads
+with `ctx 8192 (KV f16)`, same 1062 MiB of resident weights and same greedy
+output. Short-context decode is unchanged within run-to-run noise (measured
+back-to-back against the f32-cache build); the benefit is context capacity and
+long-context attention bandwidth. Logit deviation vs an f32 cache is bounded by
+f16 rounding (~5e-4 relative), gated by `wgpu_f16_kv_cache_matches_f32_kv_cache`.
+
 ---
 
 ## Binary & deployment
