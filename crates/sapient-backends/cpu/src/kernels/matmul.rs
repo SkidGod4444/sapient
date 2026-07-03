@@ -709,8 +709,10 @@ fn matmul_nt_q6_k_r4(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Re
 
     #[cfg(target_arch = "aarch64")]
     {
+        let dotprod = std::arch::is_aarch64_feature_detected!("dotprod");
         for i in 0..m {
             let x_row = &x_data[i * k..(i + 1) * k];
+            let quantized = dotprod.then(|| quant::quantize_row_to_i8_blocks(x_row));
             let gchunk = (gemv_chunk(n) / 4).max(1);
             out[i * n..(i + 1) * n]
                 .par_chunks_mut(gchunk * 4)
@@ -719,12 +721,13 @@ fn matmul_nt_q6_k_r4(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Re
                     let g0 = ci * gchunk;
                     for (gl, slots) in cs.chunks_mut(4).enumerate() {
                         let g = g0 + gl;
-                        // SAFETY: NEON is baseline on aarch64; slice is one group.
-                        let v = unsafe {
-                            quant::dot_q6_k_4rows_r4_neon(
-                                &w_blocks[g * group_bytes..(g + 1) * group_bytes],
-                                x_row,
-                            )
+                        let group = &w_blocks[g * group_bytes..(g + 1) * group_bytes];
+                        // SAFETY: NEON baseline; dotprod verified when used.
+                        let v = match &quantized {
+                            Some((x_i8, x_scales)) => unsafe {
+                                quant::dot_q6_k_4rows_r4_q8_neon(group, x_i8, x_scales)
+                            },
+                            None => unsafe { quant::dot_q6_k_4rows_r4_neon(group, x_row) },
                         };
                         slots.copy_from_slice(&v[..slots.len()]);
                     }
@@ -764,6 +767,37 @@ fn matmul_nt_q6_k(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
     let w_blocks = w.as_quant_blocks();
     let row_bytes = k / 256 * Q6_K_BLOCK_BYTES;
     let mut out = vec![0.0f32; m * n];
+
+    // ── W6A8 SDOT path (aarch64 dotprod) ─────────────────────────────────────
+    // One `sdot` per 16-element scale group (the −32 folded into the int8
+    // quants) instead of the f32 path's widen/convert/FMA chains — the same
+    // W·A8 treatment that made Q4_K fast, applied to Q6_K.
+    #[cfg(target_arch = "aarch64")]
+    if std::arch::is_aarch64_feature_detected!("dotprod") {
+        for i in 0..m {
+            let x_row = &x_data[i * k..(i + 1) * k];
+            let (x_i8, x_scales) = quant::quantize_row_to_i8_blocks(x_row);
+            let chunk = gemv_chunk(n);
+            out[i * n..(i + 1) * n]
+                .par_chunks_mut(chunk)
+                .enumerate()
+                .for_each(|(ci, cs)| {
+                    for (local, slot) in cs.iter_mut().enumerate() {
+                        let j = ci * chunk + local;
+                        // SAFETY: dotprod verified above; slice is one Q6_K row.
+                        *slot = unsafe {
+                            quant::dot_q6_k_row_q8_neon(
+                                &w_blocks[j * row_bytes..(j + 1) * row_bytes],
+                                &x_i8,
+                                &x_scales,
+                            )
+                        };
+                    }
+                });
+        }
+        return Tensor::from_f32_vec(out, Shape::new([m, n]));
+    }
+
     for i in 0..m {
         let x_row = &x_data[i * k..(i + 1) * k];
         gemv_parallel!(

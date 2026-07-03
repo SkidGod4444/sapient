@@ -57,11 +57,22 @@ tok/s (+12%), qwen-1.5B 6.6→7.5 (+14%); M4 +5–6%** — the llama.cpp CPU gap
 narrows from 1.79× to 1.60×. The **Q6_K** rung was then built and measured: with the existing f32-activation
 Q6_K kernel, the interleaved layout is **neutral on both Pi and M4** (A/B/A
 within ±2% noise) — so `Q6_K_R4` ships as tested, opt-in groundwork
-(`SAPIENT_REPACK_Q6K=1`) rather than a default. The measured conclusion: Q6_K's
-cost is the u8→f32 widening arithmetic, not the weight-stream layout — which
-makes the remaining ladder (in expected-value order): a **W6A8 SDOT Q6_K
-kernel** (int8 activations like Q4_K's, where the R4 stream should then pay),
-and **i8mm/SMMLA** kernels on v8.6+ cores (M4/Grace).
+(`SAPIENT_REPACK_Q6K=1`) rather than a default. The measured conclusion — Q6_K's cost is
+the u8→f32 widening arithmetic — was then confirmed by building the **W6A8 SDOT
+Q6_K kernel** (int8 activations, −32 folded into the integer dot, one `sdot`
+per 16-element scale group):
+
+| Decode tok/s (128-tok greedy) | Pi 5 | M4 CPU |
+|---|---|---|
+| Llama-3.2-1B: v0.5.0 → +R4 → **+W6A8** | 8.2 → 9.2 → **11.5 (+40%)** | 42.7 → 44.8 → **58.1** (65.7 with Q6K-R4) |
+| Qwen2.5-1.5B: v0.5.0 → +R4 → **+W6A8** | 6.6 → 7.5 → **9.1 (+38%)** | 34.1 → 36.3 → **51.8 (+52%)** |
+
+**The llama.cpp CPU gap is now ~1.2–1.35×** (was 1.8–3.8× at v0.5.0). W6A8
+accuracy is the same class as the accepted Q4_K W4A8 path (per-32-block int8
+activations; greedy outputs verified). Q6_K-R4 remains opt-in: it adds +13% on
+M4/llama-1B but is slightly negative on the Pi — `SAPIENT_REPACK_Q6K=1` to
+enable. Remaining ladder: **i8mm/SMMLA** kernels on v8.6+ cores (M4/Grace) —
+the last structural llama.cpp edge.
 
 **The honest read:**
 - On **Apple Metal** SAPIENT is competitive with llama.cpp (−7% on qwen-1.5B,
