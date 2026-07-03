@@ -19,7 +19,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version       = "0.5.0"
+version       = "0.5.1"
 edition       = "2021"
 authors       = ["SAPIENT Contributors"]
 license       = "GPL-3.0-only"
@@ -35,20 +35,20 @@ rust-version  = "1.82"
 [workspace.dependencies]
 # Internal crates — version is required so they can be published to crates.io
 # (cargo uses the version for the registry dep and the path for local builds).
-sapient-core         = { path = "crates/sapient-core", version = "0.5.0" }
-sapient-ir           = { path = "crates/sapient-ir", version = "0.5.0" }
-sapient-backends-cpu = { path = "crates/sapient-backends/cpu", version = "0.5.0" }
-sapient-backends-metal = { path = "crates/sapient-backends/metal", version = "0.5.0" }
-sapient-backends-wgpu = { path = "crates/sapient-backends/wgpu", version = "0.5.0" }
-sapient-scheduler    = { path = "crates/sapient-scheduler", version = "0.5.0" }
-sapient-io           = { path = "crates/sapient-io", version = "0.5.0" }
-sapient-telemetry    = { path = "crates/sapient-telemetry", version = "0.5.0" }
-sapient-runtime      = { path = "crates/sapient-runtime", version = "0.5.0" }
-sapient-hub          = { path = "crates/sapient-hub", version = "0.5.0" }
-sapient-tokenizers   = { path = "crates/sapient-tokenizers", version = "0.5.0" }
-sapient-models       = { path = "crates/sapient-models", version = "0.5.0" }
-sapient-audio        = { path = "crates/sapient-audio", version = "0.5.0" }
-sapient-generate     = { path = "crates/sapient-generate", version = "0.5.0" }
+sapient-core         = { path = "crates/sapient-core", version = "0.5.1" }
+sapient-ir           = { path = "crates/sapient-ir", version = "0.5.1" }
+sapient-backends-cpu = { path = "crates/sapient-backends/cpu", version = "0.5.1" }
+sapient-backends-metal = { path = "crates/sapient-backends/metal", version = "0.5.1" }
+sapient-backends-wgpu = { path = "crates/sapient-backends/wgpu", version = "0.5.1" }
+sapient-scheduler    = { path = "crates/sapient-scheduler", version = "0.5.1" }
+sapient-io           = { path = "crates/sapient-io", version = "0.5.1" }
+sapient-telemetry    = { path = "crates/sapient-telemetry", version = "0.5.1" }
+sapient-runtime      = { path = "crates/sapient-runtime", version = "0.5.1" }
+sapient-hub          = { path = "crates/sapient-hub", version = "0.5.1" }
+sapient-tokenizers   = { path = "crates/sapient-tokenizers", version = "0.5.1" }
+sapient-models       = { path = "crates/sapient-models", version = "0.5.1" }
+sapient-audio        = { path = "crates/sapient-audio", version = "0.5.1" }
+sapient-generate     = { path = "crates/sapient-generate", version = "0.5.1" }
 
 # Core utilities
 thiserror      = "1.0"
