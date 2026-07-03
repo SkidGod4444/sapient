@@ -1640,15 +1640,13 @@ mod tests {
             let j = group * 4;
             let r = |o: usize| &rows[(j + o) * row_bytes..(j + o + 1) * row_bytes];
             let got = unsafe { dot_q4_k_4rows_q8_neon([r(0), r(1), r(2), r(3)], &x_i8, &x_scales) };
-            for o in 0..4 {
+            for (o, g) in got.iter().enumerate() {
                 let want = unsafe { dot_q4_k_row_q8_neon(r(o), &x_i8, &x_scales) };
                 assert_eq!(
-                    got[o].to_bits(),
+                    g.to_bits(),
                     want.to_bits(),
-                    "row {} differs: {} vs {}",
-                    j + o,
-                    got[o],
-                    want
+                    "row {} differs: {g} vs {want}",
+                    j + o
                 );
             }
         }
