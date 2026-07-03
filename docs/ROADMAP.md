@@ -165,10 +165,14 @@ Radeon, Nvidia, and Apple — and are dev-tested on Apple Silicon (Metal under w
   **ALU-bound on Nvidia** (Q8_0 ≈ 0.9× f32, Q4_K/Q6_K ~0.5×). The ≥2×-f32 bar is
   NOT met on bandwidth-rich Thor-class hardware; quantized-resident's value there
   is the 6.4× memory cut. See BENCHMARKS.md for the full table.
-- [ ] **P5 (remaining, reprioritised by the Thor data)**: **vectorized/multi-row
-  dequant GEMM** is now the top item (decode each weight block once, reuse across
-  rows; wider u32 processing — addresses both the Nvidia ALU-bound decode AND
-  prefill weight-read amplification), then scratch-buffer/bind-group reuse,
+- ✅ **Multi-row dequant GEMM (MT=8)** for all prefill matmuls (f32/Q8_0/Q4_K/
+  Q6_K `_mt` shader variants): weight blocks decoded once per 8 x-rows. Measured
+  1101-token cold prefill: Thor **485→57 s (~8.5×** — the full amortization
+  factor, confirming GEMV prefill was dequant-ALU-bound on Nvidia); M4 Metal
+  59.8→37.9 s (1.58×). Decode (m=1) untouched and unchanged on both.
+- [ ] **P5 (remaining)**: cheaper per-weight unpacking in the m=1 GEMV kernels
+  (the Nvidia ALU-bound *decode* gap — no rows to amortize across at m=1),
+  then scratch-buffer/bind-group reuse,
   discrete-adapter pick, `sapient devices` listing, Linux/Windows CI, bench on
   real **Arc/AMD** cards (the remaining 7.6 vendors — and the original "done
   when" targets). (Q5_K/Q4_0 in-shader dequant only if a shipped model needs

@@ -242,11 +242,30 @@ request to capture the `WgpuForwardEngine ready` line (VRAM + quantized-matrix c
 Phase 7's acceptance bar on this hardware: ≥2× the f32-path decode on the same
 card, and 1.5B Q4 above 15 tok/s on a mid-range Arc/AMD.
 
+### Multi-row dequant GEMM (prefill matmuls)
+
+For `m > 1` each workgroup now dequantizes a weight row **once** and applies it
+to 8 x-rows (MT=8), instead of the single-row GEMV re-reading and re-decoding
+every weight `m` times per chunk. Decode (`m = 1`) keeps the untouched GEMV
+kernels. Cold 1101-token prefill (server start incl. model load, Qwen2.5-1.5B
+Q4_K_M, greedy):
+
+| Device | GEMV prefill (before) | MT-8 GEMM (after) |
+|---|---|---|
+| Jetson AGX Thor (Vulkan) | 485 s | **57.4 s (~8.5×)** |
+| Apple M4 (Metal) | 59.8 s | **37.9 s (1.58×)** |
+
+The Thor's ~8.5× is the full MT amortization factor — direct confirmation that
+GEMV prefill was dequant-ALU-bound on Nvidia (the finding above). Decode is
+unchanged on both platforms (same kernels at m = 1). Note the ALU-bound *decode*
+gap on Nvidia remains open — at m = 1 there are no rows to amortize across; that
+needs cheaper per-weight unpacking in the GEMV kernels themselves.
+
 ### Batched prefill (Phase 7.5)
 
 Prompts now prefill in 128-token chunks (`forward_chunk`) instead of one
 sequential forward per token. Cold end-to-end (fresh server, model load
-included), Qwen2.5-1.5B Q4_K_M, ~640-token prompt, greedy, M4/Metal:
+included), Qwen2.5-1.5B Q4_K_M, ~1100-token prompt, greedy, M4/Metal:
 
 | | per-token prefill | chunked prefill |
 |---|---|---|
