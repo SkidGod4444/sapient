@@ -60,25 +60,25 @@ fn cs_main(@builtin(workgroup_id) wg: vec3<u32>,
         let qh_shift = g * 2u;
         let eoff = b * 256u + h * 128u + g * 32u + l16 * 16u;
 
-        var sum_q: array<f32, 8>;
-        for (var t = 0u; t < MT; t = t + 1u) { sum_q[t] = 0.0; }
+        var sum_q: array<f32, 8>; // Σ x·(q/255) per row
+        var sum_x: array<f32, 8>; // Σ x per row: Σx·(q−32) = 255·sum_q − 32·sum_x
+        for (var t = 0u; t < MT; t = t + 1u) { sum_q[t] = 0.0; sum_x[t] = 0.0; }
         for (var w = 0u; w < 4u; w = w + 1u) {
-            let qlw = qb[blk + ql0 + w];
-            let qhw = qb[blk + 32u + qh0 + w];
+            // Decode the 4 quants ONCE (6-bit values assembled in byte lanes) …
+            let ln = (qb[blk + ql0 + w] >> shift4) & 0x0F0F0F0Fu;
+            let hn = ((qb[blk + 32u + qh0 + w] >> qh_shift) & 0x03030303u) << 4u;
+            let q6 = unpack4x8unorm(ln | hn);
             let xi = eoff + w * 4u;
-            for (var j = 0u; j < 4u; j = j + 1u) {
-                // Decode each quant ONCE …
-                let q = ((byte_of(qlw, j) >> shift4) & 0xFu)
-                      | (((byte_of(qhw, j) >> qh_shift) & 3u) << 4u);
-                let qv = f32(q) - 32.0;
-                // … and reuse across all MT rows.
-                for (var t = 0u; t < MT; t = t + 1u) {
-                    sum_q[t] = sum_q[t] + x[xb[t] + xi + j] * qv;
-                }
+            // … and reuse across all MT rows with hardware dots.
+            for (var t = 0u; t < MT; t = t + 1u) {
+                let bx = xb[t] + xi;
+                let xv = vec4<f32>(x[bx], x[bx + 1u], x[bx + 2u], x[bx + 3u]);
+                sum_q[t] = sum_q[t] + dot(q6, xv);
+                sum_x[t] = sum_x[t] + dot(xv, vec4<f32>(1.0));
             }
         }
         for (var t = 0u; t < MT; t = t + 1u) {
-            acc[t] = acc[t] + d * sc * sum_q[t];
+            acc[t] = acc[t] + d * sc * (255.0 * sum_q[t] - 32.0 * sum_x[t]);
         }
         sg = sg + WG;
     }

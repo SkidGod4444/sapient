@@ -17,11 +17,6 @@ const WG: u32 = 256u;
 const MT: u32 = 8u;
 var<workgroup> partial: array<f32, 2048>; // [MT][WG]
 
-fn unpack_i8(word: u32, lane: u32) -> f32 {
-    let byte = (word >> (lane * 8u)) & 0xFFu;
-    return f32(i32(byte << 24u) >> 24u);
-}
-
 @compute @workgroup_size(256)
 fn cs_main(@builtin(workgroup_id) wg: vec3<u32>,
            @builtin(local_invocation_id) lid: vec3<u32>,
@@ -47,17 +42,14 @@ fn cs_main(@builtin(workgroup_id) wg: vec3<u32>,
     loop {
         if (wi >= words) { break; }
         let word = qs[wb + wi];
-        let scale = scales[sb + (wi >> 3u)];
-        // Dequantize the 4 weights ONCE …
-        let w0 = scale * unpack_i8(word, 0u);
-        let w1 = scale * unpack_i8(word, 1u);
-        let w2 = scale * unpack_i8(word, 2u);
-        let w3 = scale * unpack_i8(word, 3u);
+        // Vectorized dequant ONCE (unpack4x8snorm = q/127; Q8_0 never hits -128,
+        // so the snorm clamp is a no-op — fold the 127 into the scale) …
+        let w4 = unpack4x8snorm(word) * (scales[sb + (wi >> 3u)] * 127.0);
         let xi = wi * 4u;
-        // … and reuse them across all MT rows.
+        // … and reuse across all MT rows with one hardware dot per row.
         for (var t = 0u; t < MT; t = t + 1u) {
             let b = xb[t] + xi;
-            acc[t] = acc[t] + w0 * x[b] + w1 * x[b + 1u] + w2 * x[b + 2u] + w3 * x[b + 3u];
+            acc[t] = acc[t] + dot(w4, vec4<f32>(x[b], x[b + 1u], x[b + 2u], x[b + 3u]));
         }
         wi = wi + WG;
     }

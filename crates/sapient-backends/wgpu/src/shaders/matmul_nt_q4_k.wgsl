@@ -66,18 +66,20 @@ fn cs_main(@builtin(workgroup_id) wg: vec3<u32>,
         let qw0 = blk + 4u + (is / 2u) * 8u;
         let shift = (is % 2u) * 4u;
         let xoff = xb + b * 256u + is * 32u;
-        var sum_q = 0.0; // Σ x·q4
+        // Vectorized dequant: shift+mask drops this sub-block's nibbles into the
+        // four byte lanes; unpack4x8unorm reads them as q/255, so the 255 folds
+        // into the d·sc scale below. Σx uses a dot against ONES.
+        var sum_q = 0.0; // Σ x·(q/255)
         var sum_x = 0.0; // Σ x
         for (var w = 0u; w < 8u; w = w + 1u) {
-            let word = qb[qw0 + w];
+            let nib = (qb[qw0 + w] >> shift) & 0x0F0F0F0Fu;
+            let q4 = unpack4x8unorm(nib);
             let xi = xoff + w * 4u;
-            sum_q = sum_q + x[xi]      * f32((byte_of(word, 0u) >> shift) & 0xFu)
-                          + x[xi + 1u] * f32((byte_of(word, 1u) >> shift) & 0xFu)
-                          + x[xi + 2u] * f32((byte_of(word, 2u) >> shift) & 0xFu)
-                          + x[xi + 3u] * f32((byte_of(word, 3u) >> shift) & 0xFu);
-            sum_x = sum_x + x[xi] + x[xi + 1u] + x[xi + 2u] + x[xi + 3u];
+            let xv = vec4<f32>(x[xi], x[xi + 1u], x[xi + 2u], x[xi + 3u]);
+            sum_q = sum_q + dot(q4, xv);
+            sum_x = sum_x + dot(xv, vec4<f32>(1.0));
         }
-        acc = acc + dm.x * f32(sc) * sum_q - dm.y * f32(mn) * sum_x;
+        acc = acc + dm.x * f32(sc) * 255.0 * sum_q - dm.y * f32(mn) * sum_x;
         sub = sub + WG;
     }
     partial[tid] = acc;

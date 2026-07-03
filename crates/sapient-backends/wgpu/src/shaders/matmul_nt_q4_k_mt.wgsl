@@ -62,30 +62,23 @@ fn cs_main(@builtin(workgroup_id) wg: vec3<u32>,
         let qw0 = blk + 4u + (is / 2u) * 8u;
         let shift = (is % 2u) * 4u;
         let eoff = b * 256u + is * 32u; // element offset of this sub-block
-        var sum_q: array<f32, 8>;
+        var sum_q: array<f32, 8>; // Σ x·(q/255) per row — 255 folds into d·sc
         var sum_x: array<f32, 8>;
         for (var t = 0u; t < MT; t = t + 1u) { sum_q[t] = 0.0; sum_x[t] = 0.0; }
         for (var w = 0u; w < 8u; w = w + 1u) {
-            let word = qb[qw0 + w];
-            // Decode the 4 quants ONCE …
-            let q0 = f32((byte_of(word, 0u) >> shift) & 0xFu);
-            let q1 = f32((byte_of(word, 1u) >> shift) & 0xFu);
-            let q2 = f32((byte_of(word, 2u) >> shift) & 0xFu);
-            let q3 = f32((byte_of(word, 3u) >> shift) & 0xFu);
+            // Decode the 4 quants ONCE (nibbles → byte lanes → unpack4x8unorm) …
+            let q4 = unpack4x8unorm((qb[qw0 + w] >> shift) & 0x0F0F0F0Fu);
             let xi = eoff + w * 4u;
-            // … and reuse across all MT rows.
+            // … and reuse across all MT rows with hardware dots.
             for (var t = 0u; t < MT; t = t + 1u) {
                 let bx = xb[t] + xi;
-                let x0 = x[bx];
-                let x1 = x[bx + 1u];
-                let x2 = x[bx + 2u];
-                let x3 = x[bx + 3u];
-                sum_q[t] = sum_q[t] + x0 * q0 + x1 * q1 + x2 * q2 + x3 * q3;
-                sum_x[t] = sum_x[t] + x0 + x1 + x2 + x3;
+                let xv = vec4<f32>(x[bx], x[bx + 1u], x[bx + 2u], x[bx + 3u]);
+                sum_q[t] = sum_q[t] + dot(q4, xv);
+                sum_x[t] = sum_x[t] + dot(xv, vec4<f32>(1.0));
             }
         }
         for (var t = 0u; t < MT; t = t + 1u) {
-            acc[t] = acc[t] + dm.x * f32(sc) * sum_q[t] - dm.y * f32(mn) * sum_x[t];
+            acc[t] = acc[t] + dm.x * f32(sc) * 255.0 * sum_q[t] - dm.y * f32(mn) * sum_x[t];
         }
         sub = sub + WG;
     }
