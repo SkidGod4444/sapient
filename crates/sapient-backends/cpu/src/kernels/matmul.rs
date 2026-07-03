@@ -536,6 +536,7 @@ fn matmul_nt_q4_k_r4(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Re
     let x_data = x_cow.as_ref();
     let w_blocks = w.as_quant_blocks();
     let row_bytes = k / 256 * Q4_K_BLOCK_BYTES;
+    #[cfg(target_arch = "aarch64")]
     let group_bytes = 4 * row_bytes;
     let mut out = vec![0.0f32; m * n];
 
@@ -704,6 +705,7 @@ fn matmul_nt_q6_k_r4(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Re
     let x_data = x_cow.as_ref();
     let w_blocks = w.as_quant_blocks();
     let row_bytes = k / 256 * Q6_K_BLOCK_BYTES;
+    #[cfg(target_arch = "aarch64")]
     let group_bytes = 4 * row_bytes;
     let mut out = vec![0.0f32; m * n];
 
