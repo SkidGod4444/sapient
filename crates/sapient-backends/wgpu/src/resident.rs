@@ -35,6 +35,11 @@ fn f16_kv_variant(src: &str) -> String {
     out
 }
 
+/// Rows per workgroup in the multi-row (`_mt8`) matmul variants — the prefill
+/// kernels that dequantize/read each weight once and reuse it across MT rows.
+/// Must match `const MT` in the `matmul_nt*_mt.wgsl` shaders.
+pub(crate) const MT_ROWS: usize = 8;
+
 /// An f32 tensor resident in a GPU storage buffer. `len` is the element count;
 /// callers track logical shape separately (kernels take explicit dims).
 pub struct GpuBuffer {
@@ -311,7 +316,9 @@ impl WgpuContext {
     }
 
     /// Resident linear projection `out[m,n] = x[m,k] @ w[n,k]^T` (w in HF `[n,k]`),
-    /// GEMV-style cooperative reduction, f32 accumulation.
+    /// f32 accumulation. `m = 1` (decode) uses the GEMV kernel (one workgroup per
+    /// output element); `m > 1` (prefill) uses the multi-row variant — 8 x-rows
+    /// per workgroup so each weight is read once per 8 rows instead of per row.
     pub fn matmul_nt(
         &self,
         x: &GpuBuffer,
@@ -338,13 +345,23 @@ impl WgpuContext {
             },
             "matmul.params",
         );
-        self.dispatch(
-            "matmul_nt",
-            include_str!("shaders/matmul_nt.wgsl"),
-            &[&x.buf, &w.buf, &out.buf],
-            &params,
-            (m * n) as u32,
-        );
+        if m > 1 {
+            self.dispatch(
+                "matmul_nt_mt8",
+                include_str!("shaders/matmul_nt_mt.wgsl"),
+                &[&x.buf, &w.buf, &out.buf],
+                &params,
+                (n * m.div_ceil(MT_ROWS)) as u32,
+            );
+        } else {
+            self.dispatch(
+                "matmul_nt",
+                include_str!("shaders/matmul_nt.wgsl"),
+                &[&x.buf, &w.buf, &out.buf],
+                &params,
+                (m * n) as u32,
+            );
+        }
         out
     }
 

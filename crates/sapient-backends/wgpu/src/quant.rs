@@ -164,13 +164,23 @@ impl WgpuContext {
             },
             "matmul_q8.params",
         );
-        self.dispatch(
-            "matmul_nt_q8_0",
-            include_str!("shaders/matmul_nt_q8_0.wgsl"),
-            &[&x.buf, &w.qs, &w.scales, &out.buf],
-            &params,
-            (m * n) as u32,
-        );
+        if m > 1 {
+            self.dispatch(
+                "matmul_nt_q8_0_mt8",
+                include_str!("shaders/matmul_nt_q8_0_mt.wgsl"),
+                &[&x.buf, &w.qs, &w.scales, &out.buf],
+                &params,
+                (n * m.div_ceil(crate::resident::MT_ROWS)) as u32,
+            );
+        } else {
+            self.dispatch(
+                "matmul_nt_q8_0",
+                include_str!("shaders/matmul_nt_q8_0.wgsl"),
+                &[&x.buf, &w.qs, &w.scales, &out.buf],
+                &params,
+                (m * n) as u32,
+            );
+        }
         out
     }
 
@@ -235,13 +245,23 @@ impl WgpuContext {
             },
             "matmul_q4k.params",
         );
-        self.dispatch(
-            "matmul_nt_q4_k",
-            include_str!("shaders/matmul_nt_q4_k.wgsl"),
-            &[&x.buf, &w.qb, &out.buf],
-            &params,
-            (m * n) as u32,
-        );
+        if m > 1 {
+            self.dispatch(
+                "matmul_nt_q4_k_mt8",
+                include_str!("shaders/matmul_nt_q4_k_mt.wgsl"),
+                &[&x.buf, &w.qb, &out.buf],
+                &params,
+                (n * m.div_ceil(crate::resident::MT_ROWS)) as u32,
+            );
+        } else {
+            self.dispatch(
+                "matmul_nt_q4_k",
+                include_str!("shaders/matmul_nt_q4_k.wgsl"),
+                &[&x.buf, &w.qb, &out.buf],
+                &params,
+                (m * n) as u32,
+            );
+        }
         out
     }
 
@@ -355,13 +375,23 @@ impl WgpuContext {
             },
             "matmul_q6k.params",
         );
-        self.dispatch(
-            "matmul_nt_q6_k",
-            include_str!("shaders/matmul_nt_q6_k.wgsl"),
-            &[&x.buf, &w.qb, &out.buf],
-            &params,
-            (m * n) as u32,
-        );
+        if m > 1 {
+            self.dispatch(
+                "matmul_nt_q6_k_mt8",
+                include_str!("shaders/matmul_nt_q6_k_mt.wgsl"),
+                &[&x.buf, &w.qb, &out.buf],
+                &params,
+                (n * m.div_ceil(crate::resident::MT_ROWS)) as u32,
+            );
+        } else {
+            self.dispatch(
+                "matmul_nt_q6_k",
+                include_str!("shaders/matmul_nt_q6_k.wgsl"),
+                &[&x.buf, &w.qb, &out.buf],
+                &params,
+                (m * n) as u32,
+            );
+        }
         out
     }
 
