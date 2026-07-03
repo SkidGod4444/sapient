@@ -41,12 +41,20 @@ halves the KV-cache allocation if you don't need long prompts.
 
 Reproduce with: `python3 scripts/bench_wgpu.py --backends cpu --model <alias> --tokens 64`
 
-| Model | Pi 5 (active cooler) | Pi 5 (passive) sustained | Pi 4 |
-|---|---|---|---|
-| qwen2.5-0.5b-q4 | ~6.1 (v0.3.9 measurement) | TBD | TBD |
-| qwen2.5-1.5b-q4 | ~1.9 (v0.3.9 measurement) | TBD | TBD |
-| llama-3.2-3b Q4_K_M | TBD | TBD | — |
-| mistral-7b Q4_K_M (mmap) | ~0.6 (v0.3.9 measurement) | — | — |
+Reference device: **Pi 5 16 GB**, Raspberry Pi OS 64-bit, sapient v0.4.4
+(measured 2026-07-03; sustained decode plateaus at ~75 °C on this board).
+
+| Model | Pi 5 16 GB (v0.4.4) | notes |
+|---|---|---|
+| qwen2.5-0.5b-q4 | **8.7 tok/s**, TTFT 116 ms | up from ~6.1 at v0.3.9 |
+| qwen2.5-1.5b-q4 | **1.9 tok/s**, TTFT 507 ms | memory-bound, matches v0.3.9 |
+| llama-3.2-3b Q4_K_M | TBD | — |
+| mistral-7b Q4_K_M (mmap) | ~0.6 (v0.3.9 measurement) | — |
+
+Sustained (6-minute soak, back-to-back 64-token generations, 0.5B): steady
+**8.70 tok/s** with the SoC plateauing at 71–75 °C — no throttling on this
+board, and the thermal governor (below) correctly stays inert at its default
+80 °C threshold with zero throughput cost (measured on vs off: identical).
 
 ## Thermal behaviour (Phase 8.4)
 
@@ -64,8 +72,17 @@ of collapsing.
 - Tune it: `SAPIENT_THERMAL_HOT=75 SAPIENT_THERMAL_COOL=65 sapient chat …`
 - Disable it: `SAPIENT_THERMAL=off` (e.g. when benchmarking peak, actively cooled).
 
-With the official active cooler the governor never engages — the Pi 5 stays
-below 70 °C at sustained decode.
+Validated on a Pi 5 (16 GB, 2026-07-03):
+- **Inert when cool** — at the default 80 °C threshold on a board that plateaus
+  at ~75 °C, 6-minute soaks with the governor on vs off produced identical
+  throughput (8.70 tok/s) and identical temperature curves. Zero cost.
+- **Engages under load** — forcing the threshold inside the plateau
+  (`SAPIENT_THERMAL_HOT=72`) stepped decode down within seconds of crossing
+  72 °C: 8.70 → 8.23 tok/s, held stable for the rest of the soak. Only **−5%**
+  throughput for the shed cores, because Pi decode is memory-latency-bound —
+  which is exactly why backing off cores is nearly free in tokens/sec while
+  cutting package power. On a passive board heading for the 85 °C trip, that
+  trade is what prevents the hard-throttle collapse.
 
 ## The full voice loop on a Pi 5
 
