@@ -14,9 +14,9 @@
 //! 1.125 / 0.5625 / 0.83 bytes per weight of VRAM instead of 4 (F16/BF16 linears are
 //! online-quantized to Q8_0 first, mirroring the CPU engine, so both engines see
 //! identical weight values). A Q4_K_M GGUF therefore loads fully quantized. Other
-//! dtypes (F32, Q4_0/Q5_K) dequantize to f32 on upload. Tokens are processed
-//! one at a time (`seq_q = 1`), so prefill is a sequential append — correct and simple;
-//! batched prefill is a later optimization (Phase 7.5).
+//! dtypes (F32, Q4_0/Q5_K) dequantize to f32 on upload. Prompts prefill in
+//! 128-token chunks (`forward_chunk`, Phase 7.5); decode runs one token at a time
+//! through the transpose-free fast path.
 
 use std::collections::HashMap;
 
@@ -35,6 +35,12 @@ use super::common::{kv_cache_ctx, quantize_tensor_to_q8_0, should_quantize_onlin
 /// lifted to the standard `kv_cache_ctx` (8192 / `SAPIENT_CTX`): double the
 /// context for the same bytes as f32@4096.
 const WGPU_MAX_CTX_F32: usize = 4096;
+
+/// Prefill chunk size (Phase 7.5): prompt tokens processed per batched forward
+/// pass. Larger chunks amortise weight reads further but grow the activation
+/// buffers ([seq, intermediate]) and the per-chunk encoder; 128 matches the
+/// roadmap's 64–128 window.
+const PREFILL_CHUNK: usize = 128;
 
 /// A weight matrix resident on the GPU — dense f32, or kept quantized and
 /// dequantized in-shader: Q8_0 (packed int8 + per-block scales), Q4_K (raw
@@ -405,6 +411,7 @@ impl WgpuForwardEngine {
                 &k,
                 &layer.kcache,
                 n_kv,
+                1,
                 head_dim,
                 self.max_seq,
                 pos,
@@ -414,6 +421,7 @@ impl WgpuForwardEngine {
                 &v,
                 &layer.vcache,
                 n_kv,
+                1,
                 head_dim,
                 self.max_seq,
                 pos,
@@ -472,8 +480,155 @@ impl WgpuForwardEngine {
         Ok(out)
     }
 
+    /// Run a chunk of tokens through all layers in one batched pass (`seq_q > 1`,
+    /// Phase 7.5 prefill): weights are read once per **chunk** instead of once per
+    /// token, and every kernel gets `seq×` the parallelism. Appends all positions'
+    /// K/V and returns the post-final-norm hidden of the LAST position (`[hidden]`).
+    /// Layout dance: matmuls produce seq-major `[seq, heads, head_dim]`;
+    /// RoPE/attention/kv_append need heads-major `[heads, seq, head_dim]` — so q/k/v
+    /// are transposed via `transpose_heads`, and the attention output is transposed
+    /// back for o_proj (with `seq_q = 1` both layouts coincide, which is why the
+    /// decode path needs no transposes).
+    fn forward_chunk(&mut self, toks: &[u32]) -> Result<GpuBuffer> {
+        let seq = toks.len();
+        let hidden = self.info.hidden_size;
+        let n_heads = self.info.num_attention_heads;
+        let n_kv = self.info.num_key_value_heads;
+        let head_dim = self.info.head_dim;
+        let inter = self.info.intermediate_size;
+        let eps = self.info.rms_norm_eps as f32;
+        let theta = self.info.rope_theta as f32;
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let pos0 = self.cur_len;
+        if pos0 + seq > self.max_seq {
+            bail!("wgpu KV cache full ({} positions)", self.max_seq);
+        }
+        let positions: Vec<u32> = (pos0..pos0 + seq).map(|p| p as u32).collect();
+        let ctx = &self.ctx;
+
+        // One queue submission per chunk (same rationale as forward_token).
+        ctx.begin_batch();
+
+        let ids = ctx.upload_u32(toks, "toks");
+        let mut x = match &self.embed {
+            GpuWeight::F32(t) => ctx.embed(&ids, t, seq, hidden),
+            GpuWeight::Q8(t) => ctx.embed_q8_0(&ids, t, seq, hidden),
+            GpuWeight::Q4K(t) => ctx.embed_q4_k(&ids, t, seq, hidden),
+            GpuWeight::Q6K(t) => ctx.embed_q6_k(&ids, t, seq, hidden),
+        };
+
+        for layer in &self.layers {
+            // ── Attention ───────────────────────────────────────────────────────
+            let h = ctx.rms_norm(&x, &layer.input_ln, seq, hidden, eps);
+            let mut q = mm(ctx, &h, &layer.wq, seq, hidden, n_heads * head_dim);
+            if let Some(b) = &layer.bq {
+                q = ctx.add_bias(&q, b, n_heads * head_dim);
+            }
+            let mut k = mm(ctx, &h, &layer.wk, seq, hidden, n_kv * head_dim);
+            if let Some(b) = &layer.bk {
+                k = ctx.add_bias(&k, b, n_kv * head_dim);
+            }
+            let mut v = mm(ctx, &h, &layer.wv, seq, hidden, n_kv * head_dim);
+            if let Some(b) = &layer.bv {
+                v = ctx.add_bias(&v, b, n_kv * head_dim);
+            }
+            // Seq-major → heads-major for RoPE (position = row % seq), the
+            // KV-cache layout, and the attention kernel's q layout.
+            let qt = ctx.transpose_heads(&q, seq, n_heads, head_dim);
+            let kt = ctx.transpose_heads(&k, seq, n_kv, head_dim);
+            let vt = ctx.transpose_heads(&v, seq, n_kv, head_dim);
+            ctx.rope(
+                &qt,
+                &positions,
+                n_heads,
+                seq,
+                head_dim,
+                self.rotary_dim,
+                theta,
+            );
+            ctx.rope(&kt, &positions, n_kv, seq, head_dim, self.rotary_dim, theta);
+
+            ctx.kv_append(
+                &kt,
+                &layer.kcache,
+                n_kv,
+                seq,
+                head_dim,
+                self.max_seq,
+                pos0,
+                self.kv_f16,
+            );
+            ctx.kv_append(
+                &vt,
+                &layer.vcache,
+                n_kv,
+                seq,
+                head_dim,
+                self.max_seq,
+                pos0,
+                self.kv_f16,
+            );
+
+            let attn = if self.kv_f16 {
+                ctx.attention_f16kv(
+                    &qt,
+                    &layer.kcache,
+                    &layer.vcache,
+                    1,
+                    n_heads,
+                    n_kv,
+                    seq,
+                    pos0 + seq,
+                    self.max_seq,
+                    head_dim,
+                    scale,
+                    true, // causal: query row qi attends keys ≤ qi + pos0
+                )
+            } else {
+                ctx.attention(
+                    &qt,
+                    &layer.kcache,
+                    &layer.vcache,
+                    1,
+                    n_heads,
+                    n_kv,
+                    seq,
+                    pos0 + seq,
+                    self.max_seq,
+                    head_dim,
+                    scale,
+                    true,
+                )
+            };
+            // Heads-major → seq-major for the output projection.
+            let attn_sm = ctx.transpose_heads(&attn, n_heads, seq, head_dim);
+            let mut o = mm(ctx, &attn_sm, &layer.wo, seq, n_heads * head_dim, hidden);
+            if let Some(b) = &layer.bo {
+                o = ctx.add_bias(&o, b, hidden);
+            }
+            x = ctx.add(&x, &o);
+
+            // ── MLP (SwiGLU) ────────────────────────────────────────────────────
+            let h2 = ctx.rms_norm(&x, &layer.post_ln, seq, hidden, eps);
+            let gate = mm(ctx, &h2, &layer.wgate, seq, hidden, inter);
+            let upp = mm(ctx, &h2, &layer.wup, seq, hidden, inter);
+            let act = ctx.swiglu(&gate, &upp);
+            let down = mm(ctx, &act, &layer.wdown, seq, inter, hidden);
+            x = ctx.add(&x, &down);
+        }
+
+        self.cur_len += seq;
+        // Only the last position feeds next-token logits — slice before the norm.
+        let last = ctx.alloc_f32(hidden, "last_hidden");
+        ctx.copy_range(&last, 0, &x, (seq - 1) * hidden, hidden);
+        let out = ctx.rms_norm(&last, &self.final_norm, 1, hidden, eps);
+        ctx.flush_batch();
+        Ok(out)
+    }
+
     /// Logits for the final token. Appends `input_ids` to the KV cache when
-    /// `use_cache`; otherwise resets first.
+    /// `use_cache`; otherwise resets first. Multi-token inputs (prefill) are
+    /// processed in chunks of [`PREFILL_CHUNK`] via `forward_chunk`.
     pub fn forward_logits(&mut self, input_ids: &[u32], use_cache: bool) -> Result<Vec<f32>> {
         if input_ids.is_empty() {
             bail!("forward_logits: empty input");
@@ -484,8 +639,12 @@ impl WgpuForwardEngine {
         let hidden = self.info.hidden_size;
         let vocab = self.info.vocab_size;
         let mut last = None;
-        for &tok in input_ids {
-            last = Some(self.forward_token(tok)?);
+        for chunk in input_ids.chunks(PREFILL_CHUNK) {
+            last = Some(if chunk.len() == 1 {
+                self.forward_token(chunk[0])? // decode fast path — no transposes
+            } else {
+                self.forward_chunk(chunk)?
+            });
         }
         let h = last.expect("non-empty");
         let lm = self.lm_head.as_ref().unwrap_or(&self.embed);

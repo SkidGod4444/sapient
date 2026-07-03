@@ -541,3 +541,55 @@ fn wgpu_f16_kv_cache_matches_f32_kv_cache() {
         l16 = gpu16.forward_logits(&[tok], true).unwrap();
     }
 }
+
+/// Phase 7.5 gate: chunked prefill (`forward_logits` on a long prompt → 128-token
+/// `forward_chunk` batches with transposes + multi-token kv_append) must produce
+/// the same logits as feeding the same prompt one token at a time through the
+/// decode path. 300 tokens exercises two full chunks + a partial one, chunk
+/// boundaries, and pos0 > 0 RoPE/attention offsets. Same engine config on both
+/// sides (auto f16 KV), so the only difference is batched vs sequential math.
+#[test]
+fn wgpu_chunked_prefill_matches_per_token() {
+    let (info, weights) = tiny_llama_q8_0();
+
+    let mut chunked = match WgpuForwardEngine::from_weights(info.clone(), weights.clone()) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("no wgpu GPU adapter ({e}) — skipping chunked-prefill test");
+            return;
+        }
+    };
+    let mut per_token = WgpuForwardEngine::from_weights(info, weights).expect("engine");
+
+    // 300 pseudo-random tokens in-vocab (48).
+    let mut s = 0xFEED_u64;
+    let prompt: Vec<u32> = (0..300)
+        .map(|_| {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((s >> 33) % 48) as u32
+        })
+        .collect();
+
+    let l_chunked = chunked.forward_logits(&prompt, false).unwrap();
+    let mut l_seq = Vec::new();
+    for (i, &tok) in prompt.iter().enumerate() {
+        l_seq = per_token.forward_logits(&[tok], i != 0).unwrap();
+    }
+
+    let max_err = l_chunked
+        .iter()
+        .zip(&l_seq)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        max_err < 5e-3,
+        "chunked vs per-token prefill logits max_err={max_err}"
+    );
+    assert_eq!(
+        argmax(&l_chunked),
+        argmax(&l_seq),
+        "greedy after prefill must match"
+    );
+}

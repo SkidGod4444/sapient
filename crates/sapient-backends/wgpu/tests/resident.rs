@@ -370,13 +370,34 @@ fn kv_append_then_decode_matches_cpu_f32_and_f16() {
         };
         let mut k_host = vec![0.0f32; n_kv_heads * steps * head_dim];
         let mut v_host = vec![0.0f32; n_kv_heads * steps * head_dim];
-        for t in 0..steps {
+        // First 3 positions land in ONE multi-token append (the batched-prefill
+        // path, src layout [n_kv, chunk, head_dim]); the rest go one at a time
+        // (the decode path, seq = 1).
+        let chunk = 3usize;
+        {
+            let kc: Vec<f32> = (0..n_kv_heads * chunk * head_dim).map(|_| next()).collect();
+            let vc: Vec<f32> = (0..n_kv_heads * chunk * head_dim).map(|_| next()).collect();
+            let kg = ctx.upload_f32(&kc, "kchunk");
+            let vg = ctx.upload_f32(&vc, "vchunk");
+            ctx.kv_append(&kg, &kcache, n_kv_heads, chunk, head_dim, max_seq, 0, f16);
+            ctx.kv_append(&vg, &vcache, n_kv_heads, chunk, head_dim, max_seq, 0, f16);
+            for hh in 0..n_kv_heads {
+                for s in 0..chunk {
+                    for c in 0..head_dim {
+                        let src = (hh * chunk + s) * head_dim + c;
+                        k_host[(hh * steps + s) * head_dim + c] = store(kc[src]);
+                        v_host[(hh * steps + s) * head_dim + c] = store(vc[src]);
+                    }
+                }
+            }
+        }
+        for t in chunk..steps {
             let knew: Vec<f32> = (0..n_kv_heads * head_dim).map(|_| next()).collect();
             let vnew: Vec<f32> = (0..n_kv_heads * head_dim).map(|_| next()).collect();
             let kg = ctx.upload_f32(&knew, "knew");
             let vg = ctx.upload_f32(&vnew, "vnew");
-            ctx.kv_append(&kg, &kcache, n_kv_heads, head_dim, max_seq, t, f16);
-            ctx.kv_append(&vg, &vcache, n_kv_heads, head_dim, max_seq, t, f16);
+            ctx.kv_append(&kg, &kcache, n_kv_heads, 1, head_dim, max_seq, t, f16);
+            ctx.kv_append(&vg, &vcache, n_kv_heads, 1, head_dim, max_seq, t, f16);
             for hh in 0..n_kv_heads {
                 for c in 0..head_dim {
                     k_host[(hh * steps + t) * head_dim + c] = store(knew[hh * head_dim + c]);

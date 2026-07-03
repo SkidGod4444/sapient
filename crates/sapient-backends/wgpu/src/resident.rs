@@ -622,17 +622,20 @@ impl WgpuContext {
         out
     }
 
-    /// Append one token's K (or V) — an f32 `[n_kv_heads, head_dim]` buffer — into
-    /// position `pos` of a pre-allocated `[n_kv_heads, max_seq, head_dim]` cache,
-    /// converting to the cache's element type in-shader (`kv_f16 = true` for a
-    /// cache from [`Self::alloc_f16`], `false` for f32). One dispatch replaces the
-    /// former per-kv-head `copy_range` loop.
+    /// Append `seq` tokens' K (or V) — an f32 `[n_kv_heads, seq, head_dim]`
+    /// buffer (heads-major) — into positions `pos..pos+seq` of a pre-allocated
+    /// `[n_kv_heads, max_seq, head_dim]` cache, converting to the cache's element
+    /// type in-shader (`kv_f16 = true` for a cache from [`Self::alloc_f16`],
+    /// `false` for f32). `seq = 1` is the decode step; `seq > 1` is batched
+    /// prefill. One dispatch replaces the former per-kv-head `copy_range` loop.
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub fn kv_append(
         &self,
         src: &GpuBuffer,
         cache: &GpuBuffer,
         n_kv: usize,
+        seq: usize,
         head_dim: usize,
         max_seq: usize,
         pos: usize,
@@ -645,28 +648,36 @@ impl WgpuContext {
             head_dim: u32,
             max_seq: u32,
             pos: u32,
+            seq: u32,
+            _p0: u32,
+            _p1: u32,
+            _p2: u32,
         }
-        debug_assert!(src.len >= n_kv * head_dim, "kv_append: src too small");
-        debug_assert!(pos < max_seq, "kv_append: pos out of range");
+        debug_assert!(src.len >= n_kv * seq * head_dim, "kv_append: src too small");
+        debug_assert!(pos + seq <= max_seq, "kv_append: range out of bounds");
         let params = self.uniform(
             &P {
                 n_kv: n_kv as u32,
                 head_dim: head_dim as u32,
                 max_seq: max_seq as u32,
                 pos: pos as u32,
+                seq: seq as u32,
+                _p0: 0,
+                _p1: 0,
+                _p2: 0,
             },
             "kv_append.params",
         );
         if kv_f16 {
             // The f16 kernel writes one packed u32 word (= 2 channels) per thread;
-            // head_dim must be even so words never straddle a head boundary.
+            // head_dim must be even so words never straddle a (head, position) row.
             debug_assert_eq!(head_dim % 2, 0, "kv_append f16: head_dim must be even");
             self.dispatch(
                 "kv_append_f16",
                 include_str!("shaders/kv_append_f16.wgsl"),
                 &[&src.buf, &cache.buf],
                 &params,
-                ((n_kv * head_dim / 2) as u32).div_ceil(256),
+                ((n_kv * seq * head_dim / 2) as u32).div_ceil(256),
             );
         } else {
             self.dispatch(
@@ -674,7 +685,7 @@ impl WgpuContext {
                 include_str!("shaders/kv_append.wgsl"),
                 &[&src.buf, &cache.buf],
                 &params,
-                ((n_kv * head_dim) as u32).div_ceil(256),
+                ((n_kv * seq * head_dim) as u32).div_ceil(256),
             );
         }
     }
