@@ -170,9 +170,14 @@ Radeon, Nvidia, and Apple — and are dev-tested on Apple Silicon (Metal under w
   1101-token cold prefill: Thor **485→57 s (~8.5×** — the full amortization
   factor, confirming GEMV prefill was dequant-ALU-bound on Nvidia); M4 Metal
   59.8→37.9 s (1.58×). Decode (m=1) untouched and unchanged on both.
-- [ ] **P5 (remaining)**: cheaper per-weight unpacking in the m=1 GEMV kernels
-  (the Nvidia ALU-bound *decode* gap — no rows to amortize across at m=1),
-  then scratch-buffer/bind-group reuse,
+- ✅ **Vectorized dequant** (unpack4x8snorm/unorm + dot in all six quant matmul
+  shaders, norm constants folded into block scales): M4 1.5B decode 12.8→14.3
+  tok/s (+12%); Thor neutral — which pins the remaining Nvidia m=1 gap on the
+  GEMV **workgroup shape** (one output per 256-lane workgroup ⇒ ~1 word/lane +
+  8-round reduction; f32 hides it behind 4× traffic), not instruction cost.
+- [ ] **P5 (remaining)**: decode-GEMV shape rework for bandwidth-rich GPUs
+  (fewer lanes per output / multiple outputs per workgroup — the measured
+  Nvidia m=1 gap), then scratch-buffer/bind-group reuse,
   discrete-adapter pick, `sapient devices` listing, Linux/Windows CI, bench on
   real **Arc/AMD** cards (the remaining 7.6 vendors — and the original "done
   when" targets). (Q5_K/Q4_0 in-shader dequant only if a shipped model needs

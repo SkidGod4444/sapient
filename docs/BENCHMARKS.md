@@ -242,6 +242,20 @@ request to capture the `WgpuForwardEngine ready` line (VRAM + quantized-matrix c
 Phase 7's acceptance bar on this hardware: ≥2× the f32-path decode on the same
 card, and 1.5B Q4 above 15 tok/s on a mid-range Arc/AMD.
 
+### Vectorized dequant (unpack4x8 + dot)
+
+All six quantized matmul shaders now decode weights with hardware byte unpacks
+(`unpack4x8snorm/unorm`, normalization constants folded into the block scales)
+and reduce with `dot()` — one unpack per 4 weights instead of per-byte
+shift/mask chains. **M4/Metal: 1.5B decode 12.8 → 14.3 tok/s (+12%)**; Jetson
+Thor: neutral. The Thor neutrality *refines* the ALU-bound finding: with
+dequant arithmetic now near-free, m=1 decode there is limited by the GEMV
+**workgroup shape** (256 lanes per single output element at k≈1536 → ~1 word
+per lane, then an 8-round barrier reduction per element; the f32 kernel hides
+that latency behind 4× the memory traffic). The remaining Nvidia decode work is
+a shape rework — fewer lanes per output / several outputs per workgroup — not
+further instruction tuning.
+
 ### Multi-row dequant GEMM (prefill matmuls)
 
 For `m > 1` each workgroup now dequantizes a weight row **once** and applies it
