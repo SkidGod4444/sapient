@@ -79,6 +79,67 @@ pub fn quantize_tensor_to_q8_0(t: Tensor) -> Tensor {
     Tensor::from_quant_bytes(&q8_bytes, shape, DType::Q8_0).unwrap_or(t)
 }
 
+/// Repack heap-resident Q4_K weight matrices into the row-interleaved Q4_K_R4
+/// layout for the multi-row SDOT GEMV (one contiguous weight stream per task —
+/// see `repack_q4_k_rows4`). Eligibility: 2-D, rows % 4 == 0, k % 256 == 0,
+/// heap-backed (mmap tensors must stay paged), and NOT the embedding table
+/// (row-gathered, must stay row-major; a tied lm_head is the embedding and is
+/// therefore skipped too). `SAPIENT_NO_REPACK=1` disables (escape hatch +
+/// A/B benching).
+#[cfg(target_arch = "aarch64")]
+pub fn repack_q4_k_weights(
+    weights: std::collections::HashMap<String, Tensor>,
+    embed_key: &str,
+) -> std::collections::HashMap<String, Tensor> {
+    if std::env::var("SAPIENT_NO_REPACK").is_ok_and(|v| v == "1") {
+        return weights;
+    }
+    let mut repacked = 0usize;
+    let out = weights
+        .into_iter()
+        .map(|(name, t)| {
+            let dims = t.shape().dims().to_vec();
+            // Q4_K repacks by default (measured: Pi +7%, M4 +5% over plain
+            // multi-row). Q6_K repack measured NEUTRAL on both Pi and M4 with
+            // the f32-activation kernel (A/B/A within ±2% noise), so it is
+            // OPT-IN (SAPIENT_REPACK_Q6K=1) — the layout + kernels stay as
+            // tested groundwork for a future W6A8 SDOT Q6_K kernel, where a
+            // single weight stream should actually pay.
+            let q6_opt_in = std::env::var("SAPIENT_REPACK_Q6K").is_ok_and(|v| v == "1");
+            let eligible = (t.dtype() == DType::Q4_K || (t.dtype() == DType::Q6_K && q6_opt_in))
+                && !t.is_mmap()
+                && dims.len() == 2
+                && dims[0] % 4 == 0
+                && dims[1] % 256 == 0
+                && name != embed_key;
+            if eligible {
+                let (packed, r4_dtype) = match t.dtype() {
+                    DType::Q4_K => (
+                        kernels::quant::repack_q4_k_rows4(t.as_quant_blocks(), dims[0], dims[1]),
+                        DType::Q4_K_R4,
+                    ),
+                    _ => (
+                        kernels::quant::repack_q6_k_rows4(t.as_quant_blocks(), dims[0], dims[1]),
+                        DType::Q6_K_R4,
+                    ),
+                };
+                if let Ok(r4) = Tensor::from_quant_bytes(&packed, dims, r4_dtype) {
+                    repacked += 1;
+                    return (name, r4);
+                }
+            }
+            (name, t)
+        })
+        .collect();
+    if repacked > 0 {
+        tracing::debug!(
+            repacked,
+            "Q4_K weights repacked to Q4_K_R4 (multi-row GEMV)"
+        );
+    }
+    out
+}
+
 /// Gather token embeddings: weight `[vocab, hidden]`, ids `[seq]` → `[1, seq, hidden]`.
 ///
 /// **Row-wise, never whole-table** (Phase 8.3 finding): this runs every decode
@@ -129,6 +190,9 @@ fn gather_row_f32(weight: &Tensor, row: usize, hidden: usize, dst: &mut [f32]) -
                 *d = half::bf16::from_le_bytes([b[0], b[1]]).to_f32();
             }
         }
+        DType::Q4_K_R4 | DType::Q6_K_R4 => anyhow::bail!(
+            "embedding table is row-interleaved (R4) — repacking must skip embeddings"
+        ),
         dt if dt.is_quantized() => {
             let row_bytes = dt.byte_count(hidden);
             let blocks = &weight.as_quant_blocks()[row * row_bytes..(row + 1) * row_bytes];

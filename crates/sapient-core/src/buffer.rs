@@ -24,6 +24,14 @@ pub trait Buffer: Send + Sync + std::fmt::Debug {
     /// Total capacity in bytes.
     fn len(&self) -> usize;
 
+    /// True when the bytes are a read-only file mapping (weights paged by the
+    /// OS). Load-time transforms that would materialize tensors in RAM (e.g.
+    /// Q4_K_R4 repacking) must skip mmap-backed tensors or they defeat
+    /// bigger-than-RAM loading. Defaults to `false` (heap buffers).
+    fn is_mmap(&self) -> bool {
+        false
+    }
+
     /// True if the buffer has zero capacity.
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -53,6 +61,10 @@ impl BufferHandle {
 
     pub fn len(&self) -> usize {
         self.0.len()
+    }
+
+    pub fn is_mmap(&self) -> bool {
+        self.0.is_mmap()
     }
 
     pub fn is_empty(&self) -> bool {

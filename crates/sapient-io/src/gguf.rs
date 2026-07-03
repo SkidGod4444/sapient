@@ -53,6 +53,10 @@ impl Buffer for MmapBuffer {
         &self.mmap[self.offset..self.offset + self.len]
     }
 
+    fn is_mmap(&self) -> bool {
+        true
+    }
+
     fn as_bytes_mut(&mut self) -> &mut [u8] {
         panic!("MmapBuffer is read-only — model weights cannot be mutated in-place")
     }

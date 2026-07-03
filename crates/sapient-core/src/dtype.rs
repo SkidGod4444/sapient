@@ -38,6 +38,16 @@ pub enum DType {
     Q5_K,
     /// K-quant 6-bit. 256 weights/block, 210 bytes/block.
     Q6_K,
+    /// Q4_K repacked for multi-row CPU GEMV (SAPIENT-internal, never on disk):
+    /// groups of 4 consecutive rows have their 144-byte super-blocks
+    /// block-interleaved — [r0.b0, r1.b0, r2.b0, r3.b0, r0.b1, …] — so a 4-row
+    /// dot kernel reads ONE contiguous stream instead of four row-strided ones.
+    /// Same bytes-per-weight as Q4_K (pure permutation). Produced at load by
+    /// the CPU engine for heap-resident 2-D weights with rows % 4 == 0.
+    Q4_K_R4,
+    /// Q6_K repacked for multi-row CPU GEMV — same 4-row block-interleaved
+    /// scheme as [`DType::Q4_K_R4`], over 210-byte Q6_K super-blocks.
+    Q6_K_R4,
 }
 
 /// Weights per small quantized block (Q4_0, Q8_0).
@@ -69,7 +79,13 @@ impl DType {
             DType::U8 => 1,
             DType::Bool => 1,
             // Quantized types have sub-1 or fractional bytes/element; use byte_count.
-            DType::Q4_0 | DType::Q8_0 | DType::Q4_K | DType::Q5_K | DType::Q6_K => 0,
+            DType::Q4_0
+            | DType::Q8_0
+            | DType::Q4_K
+            | DType::Q4_K_R4
+            | DType::Q5_K
+            | DType::Q6_K
+            | DType::Q6_K_R4 => 0,
         }
     }
 
@@ -83,7 +99,7 @@ impl DType {
             DType::I64 => 8,
             DType::U8 | DType::Bool => 1,
             DType::Q4_0 | DType::Q8_0 => 2,
-            DType::Q4_K | DType::Q5_K | DType::Q6_K => 2,
+            DType::Q4_K | DType::Q4_K_R4 | DType::Q5_K | DType::Q6_K | DType::Q6_K_R4 => 2,
         }
     }
 
@@ -93,9 +109,9 @@ impl DType {
         match self {
             DType::Q4_0 => Q4_0_BLOCK_BYTES,
             DType::Q8_0 => Q8_0_BLOCK_BYTES,
-            DType::Q4_K => Q4_K_BLOCK_BYTES,
+            DType::Q4_K | DType::Q4_K_R4 => Q4_K_BLOCK_BYTES,
             DType::Q5_K => Q5_K_BLOCK_BYTES,
-            DType::Q6_K => Q6_K_BLOCK_BYTES,
+            DType::Q6_K | DType::Q6_K_R4 => Q6_K_BLOCK_BYTES,
             _ => panic!("block_bytes() called on non-quantized dtype"),
         }
     }
@@ -105,7 +121,9 @@ impl DType {
     pub const fn block_numel(self) -> usize {
         match self {
             DType::Q4_0 | DType::Q8_0 => QUANT_BLOCK_SIZE,
-            DType::Q4_K | DType::Q5_K | DType::Q6_K => K_QUANT_BLOCK_SIZE,
+            DType::Q4_K | DType::Q4_K_R4 | DType::Q5_K | DType::Q6_K | DType::Q6_K_R4 => {
+                K_QUANT_BLOCK_SIZE
+            }
             _ => panic!("block_numel() called on non-quantized dtype"),
         }
     }
@@ -116,9 +134,9 @@ impl DType {
         match self {
             DType::Q4_0 => numel / QUANT_BLOCK_SIZE * Q4_0_BLOCK_BYTES,
             DType::Q8_0 => numel / QUANT_BLOCK_SIZE * Q8_0_BLOCK_BYTES,
-            DType::Q4_K => numel / K_QUANT_BLOCK_SIZE * Q4_K_BLOCK_BYTES,
+            DType::Q4_K | DType::Q4_K_R4 => numel / K_QUANT_BLOCK_SIZE * Q4_K_BLOCK_BYTES,
             DType::Q5_K => numel / K_QUANT_BLOCK_SIZE * Q5_K_BLOCK_BYTES,
-            DType::Q6_K => numel / K_QUANT_BLOCK_SIZE * Q6_K_BLOCK_BYTES,
+            DType::Q6_K | DType::Q6_K_R4 => numel / K_QUANT_BLOCK_SIZE * Q6_K_BLOCK_BYTES,
             _ => numel * self.element_size(),
         }
     }
@@ -128,7 +146,13 @@ impl DType {
     pub const fn is_quantized(self) -> bool {
         matches!(
             self,
-            DType::Q4_0 | DType::Q8_0 | DType::Q4_K | DType::Q5_K | DType::Q6_K
+            DType::Q4_0
+                | DType::Q8_0
+                | DType::Q4_K
+                | DType::Q4_K_R4
+                | DType::Q5_K
+                | DType::Q6_K
+                | DType::Q6_K_R4
         )
     }
 
@@ -157,8 +181,10 @@ impl DType {
             DType::Q4_0 => "q4_0",
             DType::Q8_0 => "q8_0",
             DType::Q4_K => "q4_k",
+            DType::Q4_K_R4 => "q4_k_r4",
             DType::Q5_K => "q5_k",
             DType::Q6_K => "q6_k",
+            DType::Q6_K_R4 => "q6_k_r4",
         }
     }
 
@@ -230,7 +256,13 @@ impl DType {
             DType::F16 => 10,
             DType::BF16 => 16,
             // No standard ONNX code for ggml quant types.
-            DType::Q4_0 | DType::Q8_0 | DType::Q4_K | DType::Q5_K | DType::Q6_K => 0,
+            DType::Q4_0
+            | DType::Q8_0
+            | DType::Q4_K
+            | DType::Q4_K_R4
+            | DType::Q5_K
+            | DType::Q6_K
+            | DType::Q6_K_R4 => 0,
         }
     }
 }

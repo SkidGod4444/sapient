@@ -166,8 +166,6 @@ impl LlamaForward {
             .collect();
         let embed_key = format!("{prefix}embed_tokens.weight");
         let tie = tie_word_embeddings_from_config(&info.raw);
-        let lm_head = resolve_lm_head(&weights, &prefix, tie, &embed_key)?.clone();
-        validate_core_shapes(&info, &weights, &embed_key, &lm_head)?;
 
         // Determine hybrid split: on Apple Silicon with Auto backend, check if the
         // model fits entirely in Metal's memory budget. If not, split layers.
@@ -179,6 +177,26 @@ impl LlamaForward {
             compute_backend_split(backend, model_bytes, info.num_hidden_layers);
 
         let backend = LlmBackendDispatch::from_kind(primary_kind)?;
+
+        // Multi-row GEMV repack (llama.cpp-style): interleave heap Q4_K rows so
+        // the SDOT kernel reads one contiguous stream per task. Pure-CPU engines
+        // only — hybrid Metal layers must keep standard Q4_K.
+        #[cfg(target_arch = "aarch64")]
+        let weights = if gpu_layers == 0
+            && backend.name() == "cpu"
+            && std::arch::is_aarch64_feature_detected!("dotprod")
+        {
+            super::common::repack_q4_k_weights(weights, &embed_key)
+        } else {
+            weights
+        };
+
+        // Resolve the output head AFTER the repack so an untied lm_head (the
+        // single biggest matrix) gets the multi-row layout too; a tied head is
+        // the embedding and stays row-major by the embed_key skip above.
+        let lm_head = resolve_lm_head(&weights, &prefix, tie, &embed_key)?.clone();
+        validate_core_shapes(&info, &weights, &embed_key, &lm_head)?;
+
         if gpu_layers > 0 {
             tracing::info!(
                 gpu_layers,
