@@ -64,7 +64,27 @@ pub fn conv1d(
 /// transpose layout), optional `bias [C_out]`. Output `[1, C_out, L_out]` with
 /// `L_out = (L-1)*stride - 2*pad + K`. Used by SNAC/DAC codec decoders to
 /// upsample; implemented as direct scatter-add (cheap at codec frame rates).
+/// Accumulated nanoseconds in [`conv_transpose1d`] / [`snake`] (profiling).
+pub static CONVT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SNAKE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub fn conv_transpose1d(
+    x: &Tensor,
+    weight: &Tensor,
+    bias: Option<&Tensor>,
+    stride: usize,
+    pad: usize,
+) -> Result<Tensor> {
+    let _t = std::time::Instant::now();
+    let r = conv_transpose1d_inner(x, weight, bias, stride, pad);
+    CONVT_NS.fetch_add(
+        _t.elapsed().as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    r
+}
+
+fn conv_transpose1d_inner(
     x: &Tensor,
     weight: &Tensor,
     bias: Option<&Tensor>,
@@ -125,6 +145,16 @@ pub fn conv_transpose1d(
 /// Snake activation `x + sin²(α·x) / α` with a per-channel α. `x [1, C, L]`,
 /// `alpha [C]`. Used by SNAC/DAC decoder blocks. α is guarded against 0.
 pub fn snake(x: &Tensor, alpha: &Tensor) -> Result<Tensor> {
+    let _t = std::time::Instant::now();
+    let r = snake_inner(x, alpha);
+    SNAKE_NS.fetch_add(
+        _t.elapsed().as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    r
+}
+
+fn snake_inner(x: &Tensor, alpha: &Tensor) -> Result<Tensor> {
     let xd = x.shape().dims().to_vec();
     if xd.len() != 3 {
         anyhow::bail!("snake expects x [1, C, L]");
@@ -136,14 +166,15 @@ pub fn snake(x: &Tensor, alpha: &Tensor) -> Result<Tensor> {
     }
     let xv = x.to_f32_cow();
     let mut out = vec![0.0f32; c * l];
-    for ci in 0..c {
+    // Channels are independent — parallelize rows (bit-identical per element).
+    out.par_chunks_mut(l).enumerate().for_each(|(ci, row)| {
         let inv = 1.0 / (a[ci] + 1e-9);
-        for li in 0..l {
-            let v = xv[ci * l + li];
+        let src = &xv[ci * l..(ci + 1) * l];
+        for (o, &v) in row.iter_mut().zip(src) {
             let s = (a[ci] * v).sin();
-            out[ci * l + li] = v + inv * s * s;
+            *o = v + inv * s * s;
         }
-    }
+    });
     Tensor::from_f32(&out, Shape::new([1, c, l])).map_err(|e| anyhow!("{e}"))
 }
 
