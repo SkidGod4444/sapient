@@ -193,10 +193,17 @@ impl ConversePipeline {
             let mut synth_ms = 0u128;
             while let Some(sentence) = sent_rx.blocking_recv() {
                 let t = Instant::now();
-                let r = tts.synthesize(&sentence);
+                // Streaming synthesis: chunks are forwarded the moment the
+                // synthesizer emits them (Kokoro's decoder-only prefix path
+                // emits the first ~0.6 s long before the fragment finishes;
+                // batch TTS backends fall back to one emission at the end).
+                let atx = audio_tx.clone();
+                let r = tts.synthesize_streaming(&sentence, &mut |samples, _rate| {
+                    let _ = atx.send(Ok(samples.to_vec()));
+                });
                 synth_ms += t.elapsed().as_millis();
-                let failed = r.is_err();
-                if audio_tx.send(r).is_err() || failed {
+                if let Err(e) = r {
+                    let _ = audio_tx.send(Err(e));
                     break;
                 }
             }

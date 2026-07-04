@@ -347,6 +347,58 @@ impl KokoroModel {
         let n = &inp.n[..(2 * k).min(inp.n.len())];
         decode(&self.weights, &self.config, &asr, f0, n, &inp.s_dec)
     }
+
+    /// Decode frames `[a..b)` of a prepared utterance through the decoder with
+    /// `halo` frames of context on each side (clamped at the utterance edges),
+    /// returning ONLY the `[a..b)` samples. The NSF harmonic phase is carried
+    /// analytically (prefix-sum of f0), so window joins are phase-continuous;
+    /// `halo` ≥ the decoder's perceptual receptive field (16 frames measured by
+    /// the duplex spike) keeps joins inaudible.
+    pub fn decode_window(
+        &self,
+        inp: &DecoderStreamInputs,
+        a: usize,
+        b: usize,
+        halo: usize,
+    ) -> Result<Vec<f32>> {
+        let b = b.min(inp.t);
+        if a >= b {
+            return Ok(Vec::new());
+        }
+        let lo = a.saturating_sub(halo);
+        let hi = (b + halo).min(inp.t);
+        let k = hi - lo;
+        // Slice asr [h, T] → [h, lo..hi].
+        let mut asr_slice = vec![0.0f32; inp.h * k];
+        for c in 0..inp.h {
+            let src = &inp.asr[c * inp.t + lo..c * inp.t + hi];
+            asr_slice[c * k..c * k + k].copy_from_slice(src);
+        }
+        let asr =
+            Tensor::from_f32(&asr_slice, Shape::new([1, inp.h, k])).map_err(|e| anyhow!("{e}"))?;
+        let f0 = &inp.f0[2 * lo..(2 * hi).min(inp.f0.len())];
+        let n = &inp.n[2 * lo..(2 * hi).min(inp.n.len())];
+        // Analytic phase at f0 index 2·lo: each f0 frame advances
+        // upsample·f0/sr cycles (upsample 300, sr 24 kHz — see generator()).
+        let initial_cycles: f64 = inp.f0[..2 * lo]
+            .iter()
+            .map(|&f| f as f64 * 300.0 / 24_000.0)
+            .sum();
+        let wav = super::decoder::decode_with_phase(
+            &self.weights,
+            &self.config,
+            &asr,
+            f0,
+            n,
+            &inp.s_dec,
+            initial_cycles,
+        )?;
+        // Trim the halos: samples-per-frame is fixed (wav.len() == k·spf).
+        let spf = wav.len() / k.max(1);
+        let start = (a - lo) * spf;
+        let end = start + (b - a) * spf;
+        Ok(wav[start..end.min(wav.len())].to_vec())
+    }
 }
 
 /// Decoder inputs for a whole utterance, produced once by
