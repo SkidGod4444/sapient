@@ -9,6 +9,28 @@
 
 ---
 
+## Vision-language on-device (first measurements, Apple M4 CPU)
+
+`sapient see` per-stage timings (real chest X-ray, 3-sentence answer, greedy;
+`⏱` line printed by the CLI). MedGemma reads a radiograph **fully offline on a
+MacBook** — slow first token today, honest numbers below:
+
+| Model | vision tower | prefill | decode | peak RSS |
+|---|---|---|---|---|
+| MedGemma-4B (896², 280-tok prompt) | 33.0 s | 9.9 s | **15.0 tok/s** | 7.8 GB |
+| Gemma-3-4B (same protocol) | ~33 s | 10.1 s | 15.0 tok/s | — |
+| SmolVLM-256M (512², 87-tok prompt) | 3.0 s | 0.3 s | **~100 tok/s** | — |
+
+The vision-tower cost was **68.7 s at first light → 33.0 s** after three same-day
+kernel changes: row-block-parallel f32 SGEMM in `matmul_nt` (the tower had been
+running one single-threaded GEMM per linear), online-Q8_0 for eligible tower
+linears (Gemma3's 4304-wide fc2 stays f32 — 4304 % 32 ≠ 0), and **dense GEMM
+attention** for the non-causal tower (`Q·Kᵀ`/`S·V` through blocked SGEMM instead
+of the flash row-loop, which is shaped for long-KV decode). Remaining levers:
+a blocked W8A8 GEMM for m≫1 activations (the W8A8 path is per-row today) and
+resolution options. Decode at 15 tok/s makes the *reading* fast — it's the
+*looking* that needs the next rung.
+
 ## Head-to-head vs llama.cpp & Ollama (v0.5.0, 2026-07-03)
 
 Same GGUF **files** (Q4_K_M, byte-identical where both engines read GGUF), same

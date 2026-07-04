@@ -3,6 +3,7 @@
 pub mod backend;
 pub mod common;
 mod conv;
+mod gemma3;
 /// Kokoro-82M TTS (StyleTTS2 + ISTFTNet) — non-autoregressive, real-time `speak`.
 pub mod kokoro;
 mod llama;
@@ -27,6 +28,7 @@ use sapient_hub::resolver::WeightFormat;
 use crate::gguf_weights::{load_gguf_hf_weights, load_gguf_hf_weights_mmap};
 
 pub use backend::{mac_gpu_support, total_system_ram_bytes, LlmBackendKind, MacGpuSupport};
+pub use gemma3::Gemma3Forward;
 pub use kokoro::{DecoderStreamInputs, KokoroConfig, KokoroModel, KOKORO_SAMPLE_RATE};
 pub use llama::LlamaForward;
 #[cfg(all(target_os = "macos", feature = "mlx"))]
@@ -44,6 +46,9 @@ pub use whisper_wgpu::WhisperWgpuEngine;
 pub enum ForwardEngine {
     Llama(LlamaForward),
     Phi(PhiForward),
+    /// Gemma3 text engine (gemma-3-*b, MedGemma text) — QK-norm, sandwich
+    /// norms, alternating sliding/global attention. CPU-only v1.
+    Gemma3(Gemma3Forward),
     /// Fully MLX-native Llama-family engine: all activations stay as GPU arrays
     /// throughout the forward pass, one eval() per decode step.
     /// Enabled when `--backend metal` (or `auto` on Apple Silicon) for Llama/Qwen/Mistral.
@@ -141,6 +146,16 @@ impl ForwardEngine {
                     weight_paths,
                     backend,
                 )?)),
+                ArchType::Gemma3 => {
+                    // CPU-only v1 (safetensors; incl. multimodal checkpoints —
+                    // the engine strips the language_model. prefix and skips
+                    // vision weights). Explicit GPU backends are not wired yet.
+                    let mut weights = std::collections::HashMap::new();
+                    for path in weight_paths {
+                        weights.extend(sapient_io::safetensors::SafetensorsLoader::load(path)?);
+                    }
+                    Ok(Self::Gemma3(Gemma3Forward::from_weights(info, weights)?))
+                }
                 other => bail!(
                     "architecture {other:?} does not yet have a native forward engine — \
                      use safetensors weights for Llama, Phi, or Qwen models"
@@ -274,6 +289,7 @@ impl ForwardEngine {
         match self {
             Self::Llama(f) => f.reset_cache(),
             Self::Phi(f) => f.reset_cache(),
+            Self::Gemma3(f) => f.reset_cache(),
             #[cfg(all(target_os = "macos", feature = "mlx"))]
             Self::MlxLlama(f) => f.reset_cache(),
             #[cfg(feature = "wgpu")]
@@ -289,6 +305,11 @@ impl ForwardEngine {
         match self {
             Self::Llama(f) => f.truncate_cache(n),
             Self::Phi(f) => f.truncate_cache(n),
+            Self::Gemma3(f) => {
+                // v1: no incremental rollback — reset (no reuse, still correct).
+                f.reset_cache();
+                0
+            }
             #[cfg(all(target_os = "macos", feature = "mlx"))]
             Self::MlxLlama(f) => {
                 f.reset_cache();
@@ -303,6 +324,7 @@ impl ForwardEngine {
         match self {
             Self::Llama(f) => f.forward_logits(input_ids, use_cache),
             Self::Phi(f) => f.forward_logits(input_ids, use_cache),
+            Self::Gemma3(f) => f.forward_logits(input_ids, use_cache),
             #[cfg(all(target_os = "macos", feature = "mlx"))]
             Self::MlxLlama(f) => f.forward_logits(input_ids, use_cache),
             #[cfg(feature = "wgpu")]
@@ -314,6 +336,9 @@ impl ForwardEngine {
         match self {
             Self::Llama(f) => f.forward_all_logits(input_ids),
             Self::Phi(f) => f.forward_all_logits(input_ids),
+            Self::Gemma3(_) => {
+                bail!("speculative decoding is not yet supported on the Gemma3 engine")
+            }
             #[cfg(all(target_os = "macos", feature = "mlx"))]
             Self::MlxLlama(f) => f.forward_all_logits(input_ids),
             #[cfg(feature = "wgpu")]
@@ -330,6 +355,9 @@ impl ForwardEngine {
         match self {
             Self::Llama(f) => f.forward_all_logits_cached(input_ids),
             Self::Phi(f) => f.forward_all_logits_cached(input_ids),
+            Self::Gemma3(_) => {
+                bail!("speculative decoding is not yet supported on the Gemma3 engine")
+            }
             #[cfg(all(target_os = "macos", feature = "mlx"))]
             Self::MlxLlama(f) => f.forward_all_logits(input_ids),
             #[cfg(feature = "wgpu")]
@@ -341,6 +369,10 @@ impl ForwardEngine {
         match self {
             Self::Llama(f) => f.embed(input_ids),
             Self::Phi(f) => f.embed(input_ids),
+            Self::Gemma3(_) => {
+                let _ = input_ids;
+                bail!("embed() not yet implemented for the Gemma3 engine")
+            }
             #[cfg(all(target_os = "macos", feature = "mlx"))]
             Self::MlxLlama(_) => {
                 let _ = input_ids;
@@ -359,6 +391,7 @@ impl ForwardEngine {
         match self {
             Self::Llama(f) => f.is_hybrid(),
             Self::Phi(f) => f.is_hybrid(),
+            Self::Gemma3(_) => false,
             #[cfg(all(target_os = "macos", feature = "mlx"))]
             Self::MlxLlama(_) => false,
             #[cfg(feature = "wgpu")]
@@ -371,6 +404,7 @@ impl ForwardEngine {
         match self {
             Self::Llama(f) => f.backend_label(),
             Self::Phi(f) => f.backend_label(),
+            Self::Gemma3(_) => "cpu (Gemma3 engine)".to_string(),
             #[cfg(all(target_os = "macos", feature = "mlx"))]
             Self::MlxLlama(_) => "metal (MLX native graph)".to_string(),
             #[cfg(feature = "wgpu")]

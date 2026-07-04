@@ -9,6 +9,10 @@
 > (auto-pick quantization for available RAM, auto CPU/GPU offload, single static binary).
 
 ## Where we are (v0.4.4)
+- 🚧 **Gemma3 engine** — gemma-3-1b/4b + **MedGemma-4B** (medical chat + medical
+  image analysis via the Gemma3 multimodal path). New `Gemma3Forward` (QK-norm,
+  sandwich norms, sliding/global attention) + a flash-attention NaN fix any
+  sliding-window model needed. GGUF loading + perf work pending.
 - 🚧 **Vision-language (Phase 12 first cut)** — `sapient see <image> -p "…"`:
   SmolVLM-256M (SigLIP tower + pixel-shuffle connector on new `forward/siglip.rs`,
   embedding-splice into the existing Llama engine). Golden test (red fixture → "Red")

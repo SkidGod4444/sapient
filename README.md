@@ -107,9 +107,10 @@ sapient speak kokoro-82m "Save it, don't play it." --no-play -o out.wav  # write
 sapient speak orpheus-3b "The quick brown fox." --voice leo -o fox.wav
 #   voices: tara | leah | jess | leo | dan | mia | zac | zoe
 
-# Vision — ask questions about an image (SmolVLM-256M, fully on-device)
-sapient see photo.jpg -p "What's in this picture?"
-sapient see chart.png -p "Summarize this chart." --model smolvlm-256m
+# Vision — ask questions about an image, fully on-device
+sapient see photo.jpg -p "What's in this picture?"          # SmolVLM-256M (default)
+sapient see chart.png -p "Summarize this chart." --model gemma-3-4b
+sapient see xray.png -p "Describe findings." --model medgemma-4b   # medical (gated: sapient login)
 
 # Voice conversation — a STREAMING loop: speech is transcribed while you're
 # still talking, the reply starts speaking after its first clause, and you can
@@ -264,6 +265,9 @@ a speech-to-text model, use `sapient transcribe`").
 | `whisper-small` | Whisper | 244M | Speech-to-text — `sapient transcribe` |
 | `kokoro-82m` | StyleTTS2 + ISTFTNet | 82M | Text-to-speech — `sapient speak` (~2× real-time on CPU) |
 | `smolvlm-256m` | SmolVLM (SigLIP + SmolLM2) | 256M | Vision-language — `sapient see` |
+| `gemma-3-1b` | Gemma3 | 1B | Chat — new Gemma3 engine (QK-norm, sliding/global attention) |
+| `gemma-3-4b` | Gemma3 (multimodal) | 4B | Chat + `sapient see` |
+| `medgemma-4b` | Gemma3 (medical) | 4B | Medical Q&A chat + medical image analysis (gated) |
 | `orpheus-3b` | Llama/Orpheus | 3B | Text-to-speech — `sapient speak` (richer voice, slow) |
 
 **Speech-to-text:** Whisper models power `sapient transcribe <model> <audio>` on all platforms.

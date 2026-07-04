@@ -340,6 +340,39 @@ pub const CATALOG: &[SupportedModel] = &[
         gated: false,
         extra_aliases: &["kokoro-82m", "kokoro", "kokoro-tts"],
     },
+    // ── Gemma3 (text chat — `Gemma3Forward` engine) ─────────────────────────
+    // QK-norm + sandwich norms + alternating sliding/global attention.
+    // gemma-3-1b via the ungated unsloth safetensors mirror.
+    SupportedModel {
+        alias: "openhorizon/gemma-3-1b",
+        repo_id: "unsloth/gemma-3-1b-it",
+        family: "Gemma3",
+        params: "1B",
+        gated: false,
+        extra_aliases: &["gemma-3-1b", "gemma3-1b", "gemma-3-1b-it"],
+    },
+    // Multimodal Gemma3 (text chat AND `sapient see`) via the ungated mirror.
+    SupportedModel {
+        alias: "openhorizon/gemma-3-4b",
+        repo_id: "unsloth/gemma-3-4b-it",
+        family: "Gemma3",
+        params: "4B",
+        gated: false,
+        extra_aliases: &["gemma-3-4b", "gemma3-4b", "gemma-3-4b-it"],
+    },
+    // MedGemma: Google's medical Gemma3 (gated — accept the Health AI
+    // Developer Foundations terms on HF, then `sapient login`). Multimodal
+    // checkpoint: `sapient chat medgemma-4b` for medical Q&A text, and
+    // `sapient see scan.png --model medgemma-4b` for medical image analysis
+    // (X-ray / dermatology / pathology) via the Gemma3 VLM path.
+    SupportedModel {
+        alias: "openhorizon/medgemma-4b",
+        repo_id: "google/medgemma-4b-it",
+        family: "Gemma3",
+        params: "4B",
+        gated: true,
+        extra_aliases: &["medgemma-4b", "medgemma", "medgemma-4b-it"],
+    },
     // ── SmolVLM (vision-language — `sapient see`) ───────────────────────────
     // Idefics3: SigLIP tower + pixel-shuffle connector + SmolLM2-135M backbone
     // (safetensors; loaded by `VlmPipeline`, routed via `is_vlm_model`).
@@ -359,12 +392,14 @@ pub const CATALOG: &[SupportedModel] = &[
 /// validates `model_type`).
 pub fn resolve_vlm_repo(model: &str) -> String {
     let lower = model.to_lowercase();
+    // Any catalog alias resolves (multimodal Gemma3 models live in the Chat
+    // category but also serve `sapient see`); the pipeline validates the
+    // config's model_type, so a text-only model errors cleanly.
     for m in CATALOG {
-        if m.category() == ModelCategory::Vision
-            && (m.alias.eq_ignore_ascii_case(model)
-                || m.extra_aliases
-                    .iter()
-                    .any(|a| a.eq_ignore_ascii_case(&lower)))
+        if m.alias.eq_ignore_ascii_case(model)
+            || m.extra_aliases
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case(&lower))
         {
             return m.repo_id.to_string();
         }

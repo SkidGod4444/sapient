@@ -72,4 +72,4 @@ pub use sentence::SentenceChunker;
 pub use speak::{SpeakPipeline, DEFAULT_ORPHEUS_VOICE, ORPHEUS_VOICES};
 pub use speculative::SpeculativePipeline;
 pub use transcribe::{TranscribeOptions, TranscribePipeline};
-pub use vlm::VlmPipeline;
+pub use vlm::{VlmPipeline, VlmStats};

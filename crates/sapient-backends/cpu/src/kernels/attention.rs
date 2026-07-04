@@ -122,6 +122,16 @@ fn flash_attn_row(
 
         let s = raw_s + mask_row.map(|m| m[ki]).unwrap_or(0.0);
 
+        // Fully-masked position: contributes exactly nothing — and must be
+        // skipped, because while the running max is still -inf the update
+        // below would compute exp(-inf - -inf) = NaN and poison the row.
+        // (First reachable via sliding-window masks, whose leading positions
+        // are -inf once the window has scrolled past them — Gemma3 decode
+        // beyond `sliding_window` was the first caller to hit this.)
+        if s == f32::NEG_INFINITY {
+            continue;
+        }
+
         // Online softmax update.
         let m_new = if s > m { s } else { m };
         let p = (s - m_new).exp();
@@ -326,6 +336,48 @@ mod tests {
     }
 
     /// Smoke-test: attention with all-equal Q/K/V should produce values equal to V rows.
+    /// Leading -inf mask positions (a sliding window that has scrolled past
+    /// them) must not NaN the online softmax — regression for the Gemma3
+    /// "coherent until position 512, then salad" bug.
+    #[test]
+    fn leading_masked_positions_do_not_nan() {
+        let (seq_k, head_dim) = (8usize, 4usize);
+        let q = Tensor::from_f32(&vec![1.0; head_dim], vec![1, 1, 1, head_dim]).unwrap();
+        let kv: Vec<f32> = (0..seq_k * head_dim)
+            .map(|i| (i % 7) as f32 * 0.1)
+            .collect();
+        let k = Tensor::from_f32(&kv, vec![1, 1, seq_k, head_dim]).unwrap();
+        let v = Tensor::from_f32(&kv, vec![1, 1, seq_k, head_dim]).unwrap();
+        // Window of 3: only the last 3 positions visible.
+        let mut mask = vec![f32::NEG_INFINITY; seq_k];
+        for m in mask.iter_mut().skip(seq_k - 3) {
+            *m = 0.0;
+        }
+        let mask = Tensor::from_f32(&mask, vec![1, seq_k]).unwrap();
+        let out = scaled_dot_product_attention(&q, &k, &v, Some(&mask), None, 1).unwrap();
+        let ov = out.to_f32_vec();
+        assert!(
+            ov.iter().all(|x| x.is_finite()),
+            "NaN/inf in output: {ov:?}"
+        );
+        // Reference: naive softmax over the visible 3 positions.
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let mut scores: Vec<f32> = (seq_k - 3..seq_k)
+            .map(|ki| (0..head_dim).map(|d| kv[ki * head_dim + d]).sum::<f32>() * scale)
+            .collect();
+        let mx = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        for x in scores.iter_mut() {
+            *x = (*x - mx).exp();
+        }
+        let sum: f32 = scores.iter().sum();
+        for d in 0..head_dim {
+            let want: f32 = (0..3)
+                .map(|j| scores[j] / sum * kv[(seq_k - 3 + j) * head_dim + d])
+                .sum();
+            assert!((ov[d] - want).abs() < 1e-5, "d{d}: {} vs {want}", ov[d]);
+        }
+    }
+
     #[test]
     fn uniform_attention_recovers_v() {
         // When all scores are equal, softmax gives uniform weights and the output
