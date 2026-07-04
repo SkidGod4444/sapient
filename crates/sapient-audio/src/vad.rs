@@ -214,11 +214,27 @@ impl EnergyVad {
         };
         self.rms_sum = 0.0;
         let utterance = std::mem::take(&mut self.buffer);
+        let debug = std::env::var("SAPIENT_VAD_DEBUG").is_ok();
         if frames < self.cfg.min_utterance_frames {
+            if debug {
+                eprintln!(
+                    "[vad] DISCARD short: {frames} frames (min {})",
+                    self.cfg.min_utterance_frames
+                );
+            }
             return None; // too short — discard
         }
         if self.cfg.min_mean_rms > 0.0 && mean_rms < self.cfg.min_mean_rms {
+            if debug {
+                eprintln!(
+                    "[vad] DISCARD quiet: mean_rms {mean_rms:.4} < {} over {frames} frames",
+                    self.cfg.min_mean_rms
+                );
+            }
             return None; // low-energy noise/echo tail — Whisper would hallucinate
+        }
+        if debug {
+            eprintln!("[vad] ACCEPT: {frames} frames, mean_rms {mean_rms:.4}");
         }
         Some(utterance)
     }

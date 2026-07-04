@@ -2166,18 +2166,18 @@ async fn converse_command(
                                     turn.ttft_ms
                                 ));
                             }
-                            // Drain queued speaker audio — but keep listening:
-                            // sustained mic energy interrupts playback (barge-in).
-                            // No echo cancellation exists, so the threshold is
-                            // CALIBRATED per turn: the first ~350 ms of playback
-                            // measures this room's speaker-bleed level, and only
-                            // sustained input well ABOVE that bleed interrupts.
-                            // (A fixed 0.035 bar self-triggered on every reply —
-                            // real-mic field report.)
+                            // Drain queued speaker audio — but keep listening
+                            // for barge-in. There is no real AEC, so the gate is
+                            // ECHO-REFERENCED: the speaker tracks its own played
+                            // envelope (`expected_bleed`), and the mic must beat
+                            // α·(what's playing RIGHT NOW) — a reply that gets
+                            // louder mid-sentence raises the bar with itself.
+                            // (A start-of-turn calibration still lost to loud
+                            // later sentences — live-mic field report #2.)
                             if let Some(p) = &player {
                                 let mut consec_loud = 0u32;
                                 let mut frames_seen = 0u32;
-                                let mut bleed_peak = 0.0f32;
+                                let mut alpha = 0.0f32; // mic ← speaker coupling
                                 'drain: while p.pending_secs() > 0.05 {
                                     while let Ok(chunk) = frames.try_recv() {
                                         buf.extend_from_slice(&chunk);
@@ -2187,21 +2187,29 @@ async fn converse_command(
                                         let rms = (f.iter().map(|s| s * s).sum::<f32>()
                                             / f.len() as f32)
                                             .sqrt();
+                                        let exp = p.expected_bleed();
                                         frames_seen += 1;
-                                        if frames_seen <= 17 {
-                                            // calibration window (~350 ms)
-                                            bleed_peak = bleed_peak.max(rms);
-                                            continue;
+                                        let threshold =
+                                            (alpha * exp * 2.2 + 0.03).max(0.05);
+                                        let loud = rms > threshold;
+                                        // Learn the coupling from frames that are
+                                        // NOT candidate speech (they're pure
+                                        // bleed); never learn from loud frames —
+                                        // those may be the human.
+                                        if !loud && exp > 0.02 {
+                                            alpha = alpha.max(rms / exp);
                                         }
-                                        let threshold = (bleed_peak * 3.0).max(0.05);
-                                        if rms > threshold {
+                                        if frames_seen <= 20 {
+                                            continue; // settle coupling ~400 ms
+                                        }
+                                        if loud {
                                             consec_loud += 1;
                                         } else {
                                             consec_loud = 0;
                                         }
                                         if consec_loud >= 15 {
-                                            // ~300 ms sustained well above the
-                                            // bleed → the human is talking.
+                                            // ~300 ms sustained above the live
+                                            // bleed estimate → human talking.
                                             p.clear();
                                             ui::converse_note("(interrupted — listening)");
                                             break 'drain;
@@ -2213,6 +2221,7 @@ async fn converse_command(
                                 // reverb decay before we listen again, so the
                                 // tail can't become a phantom "utterance".
                                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                                p.reset_reference();
                             }
                         }
 
