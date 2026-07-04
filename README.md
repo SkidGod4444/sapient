@@ -96,7 +96,7 @@ sapient transcribe whisper-tiny clip.flac --translate     # → English
 sapient transcribe whisper-base long.wav --timestamps     # long-audio re-seek
 sapient transcribe whisper-base clip.wav --beam-size 5    # beam search
 
-# Text-to-speech — Kokoro-82M (real-time on CPU, non-autoregressive StyleTTS2 + ISTFTNet)
+# Text-to-speech — Kokoro-82M (~2× real-time on CPU: RTF 0.48 on M4; StyleTTS2 + ISTFTNet)
 # Speaks aloud through the default output device AND writes the WAV. Add --no-play to only write.
 sapient speak kokoro-82m "Hello, this is sapient speaking."             # plays + writes speech.wav
 sapient speak kokoro-82m "The quick brown fox." --voice af_bella -o fox.wav
@@ -107,10 +107,13 @@ sapient speak kokoro-82m "Save it, don't play it." --no-play -o out.wav  # write
 sapient speak orpheus-3b "The quick brown fox." --voice leo -o fox.wav
 #   voices: tara | leah | jess | leo | dan | mia | zac | zoe
 
-# Voice conversation — mic → speech-to-text → LLM → reply (live mic; Linux needs libasound2-dev)
-# Live mic meter + streamed reply; macOS prompts for mic permission on first run.
-sapient converse openhorizon/qwen2.5-1.5b --stt whisper-base
-sapient converse openhorizon/qwen2.5-1.5b --speak   # speak replies aloud (Kokoro-82M; real-time)
+# Voice conversation — a STREAMING loop: speech is transcribed while you're
+# still talking, the reply starts speaking after its first clause, and you can
+# interrupt it mid-sentence (barge-in). ~2.4 s perceived reply latency on an
+# M-series CPU; per-turn latency breakdown printed live.
+# (Live mic; Linux needs libasound2-dev; macOS prompts for mic permission.)
+sapient converse qwen2.5-1.5b --stt whisper-base
+sapient converse qwen2.5-1.5b --speak   # speak replies aloud (Kokoro-82M)
 
 # Live resource monitor — CPU cores, RAM, and disk used by SAPIENT
 sapient stats        # (aliases: top, monitor) — Ctrl-C to exit
@@ -255,7 +258,7 @@ a speech-to-text model, use `sapient transcribe`").
 | `whisper-tiny` | Whisper | 39M | Speech-to-text — `sapient transcribe` |
 | `whisper-base` | Whisper | 74M | Speech-to-text — `sapient transcribe` |
 | `whisper-small` | Whisper | 244M | Speech-to-text — `sapient transcribe` |
-| `kokoro-82m` | StyleTTS2 + ISTFTNet | 82M | Text-to-speech — `sapient speak` (real-time on CPU) |
+| `kokoro-82m` | StyleTTS2 + ISTFTNet | 82M | Text-to-speech — `sapient speak` (~2× real-time on CPU) |
 | `orpheus-3b` | Llama/Orpheus | 3B | Text-to-speech — `sapient speak` (richer voice, slow) |
 
 **Speech-to-text:** Whisper models power `sapient transcribe <model> <audio>` on all platforms.
