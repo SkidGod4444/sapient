@@ -1161,6 +1161,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn matmul_nt_q8_0_matches_float() {
         // Larger k so several 32-blocks per row exercise the SDOT/NEON path, and
         // an activation outlier to stress per-block activation quantization.
