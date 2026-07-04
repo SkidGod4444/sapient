@@ -115,6 +115,11 @@ impl KokoroTts {
         self
     }
 
+    /// The underlying Kokoro model (streaming probes/tools).
+    pub fn model(&self) -> &sapient_models::forward::kokoro::KokoroModel {
+        &self.model
+    }
+
     /// The voice this backend will speak with.
     pub fn voice(&self) -> &str {
         &self.voice

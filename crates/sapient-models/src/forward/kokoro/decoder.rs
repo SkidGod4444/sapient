@@ -11,7 +11,7 @@ use sapient_core::{Shape, Tensor};
 
 use super::super::conv::{conv1d, conv_transpose1d, snake};
 use super::loader::KokoroConfig;
-use super::ops::{ada_in_1d, istft, leaky_relu_inplace, nsf_harmonic_source, stft_transform};
+use super::ops::{ada_in_1d, istft, leaky_relu_inplace, stft_transform};
 use super::predictor::adain_res_blk1d;
 
 fn get<'a>(w: &'a HashMap<String, Tensor>, k: &str) -> Result<&'a Tensor> {
@@ -130,6 +130,7 @@ fn generator(
     x: &Tensor,
     s: &[f32],
     f0: &[f32],
+    initial_cycles: f64,
 ) -> Result<Vec<f32>> {
     let g = &cfg.istftnet;
     let n_fft = g.gen_istft_n_fft; // 20
@@ -139,7 +140,17 @@ fn generator(
     // ── NSF harmonic source → STFT → [22, frames] ────────────────────────────
     let l_lin_w = get(w, "decoder.generator.m_source.l_linear.weight")?.to_f32_vec(); // [9]
     let l_lin_b = get(w, "decoder.generator.m_source.l_linear.bias")?.to_f32_vec()[0];
-    let har = nsf_harmonic_source(f0, &l_lin_w, l_lin_b, 24000.0, 8, 0.1, 10.0, upsample_scale);
+    let har = super::ops::nsf_harmonic_source_from(
+        f0,
+        &l_lin_w,
+        l_lin_b,
+        24000.0,
+        8,
+        0.1,
+        10.0,
+        upsample_scale,
+        initial_cycles,
+    );
     let (mag, phase, frames) = stft_transform(&har, n_fft, hop);
     let fbins = n_fft / 2 + 1; // 11
     let mut har_cat = vec![0.0f32; (2 * fbins) * frames];
@@ -312,6 +323,23 @@ pub fn decode(
     n: &[f32],
     s: &[f32],
 ) -> Result<Vec<f32>> {
+    decode_with_phase(w, cfg, asr, f0, n, s, 0.0)
+}
+
+/// [`decode`] with an explicit NSF starting phase (accumulated cycles) — the
+/// windowed-streaming entry: a mid-utterance window passes the analytic phase
+/// the full-utterance cumsum would have reached at its first f0 sample, so the
+/// harmonic source is continuous across window joins.
+#[allow(clippy::too_many_arguments)]
+pub fn decode_with_phase(
+    w: &HashMap<String, Tensor>,
+    cfg: &KokoroConfig,
+    asr: &Tensor,
+    f0: &[f32],
+    n: &[f32],
+    s: &[f32],
+    initial_cycles: f64,
+) -> Result<Vec<f32>> {
     let t = asr.shape().dims()[2];
     let f0_t = Tensor::from_f32(f0, Shape::new([1, 1, f0.len()])).map_err(|e| anyhow!("{e}"))?;
     let n_t = Tensor::from_f32(n, Shape::new([1, 1, n.len()])).map_err(|e| anyhow!("{e}"))?;
@@ -359,5 +387,5 @@ pub fn decode(
         }
     }
     let _ = t;
-    generator(w, cfg, &x, s, f0)
+    generator(w, cfg, &x, s, f0, initial_cycles)
 }
