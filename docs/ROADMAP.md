@@ -9,6 +9,11 @@
 > (auto-pick quantization for available RAM, auto CPU/GPU offload, single static binary).
 
 ## Where we are (v0.4.4)
+- 🚧 **Vision-language (Phase 12 first cut)** — `sapient see <image> -p "…"`:
+  SmolVLM-256M (SigLIP tower + pixel-shuffle connector on new `forward/siglip.rs`,
+  embedding-splice into the existing Llama engine). Golden test (red fixture → "Red")
+  + numeric grid-orientation probe. v1: single global 512² image (no sub-image
+  splitting yet). MedGemma requires a Gemma3 text engine — next engine project.
 - 🚧 **Streaming voice loop (Phase 10 first cut)** — incremental STT during speech
   (`LiveStt`, transcript ready at end-of-utterance), early-first-clause TTS handoff,
   barge-in (`SpeakerPlayback::clear` + mic monitor), per-turn latency breakdown.

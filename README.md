@@ -107,6 +107,10 @@ sapient speak kokoro-82m "Save it, don't play it." --no-play -o out.wav  # write
 sapient speak orpheus-3b "The quick brown fox." --voice leo -o fox.wav
 #   voices: tara | leah | jess | leo | dan | mia | zac | zoe
 
+# Vision — ask questions about an image (SmolVLM-256M, fully on-device)
+sapient see photo.jpg -p "What's in this picture?"
+sapient see chart.png -p "Summarize this chart." --model smolvlm-256m
+
 # Voice conversation — a STREAMING loop: speech is transcribed while you're
 # still talking, the reply starts speaking after its first clause, and you can
 # interrupt it mid-sentence (barge-in). ~2.4 s perceived reply latency on an
@@ -259,6 +263,7 @@ a speech-to-text model, use `sapient transcribe`").
 | `whisper-base` | Whisper | 74M | Speech-to-text — `sapient transcribe` |
 | `whisper-small` | Whisper | 244M | Speech-to-text — `sapient transcribe` |
 | `kokoro-82m` | StyleTTS2 + ISTFTNet | 82M | Text-to-speech — `sapient speak` (~2× real-time on CPU) |
+| `smolvlm-256m` | SmolVLM (SigLIP + SmolLM2) | 256M | Vision-language — `sapient see` |
 | `orpheus-3b` | Llama/Orpheus | 3B | Text-to-speech — `sapient speak` (richer voice, slow) |
 
 **Speech-to-text:** Whisper models power `sapient transcribe <model> <audio>` on all platforms.

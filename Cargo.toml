@@ -33,6 +33,7 @@ readme        = "README.md"
 rust-version  = "1.82"
 
 [workspace.dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 # Internal crates — version is required so they can be published to crates.io
 # (cargo uses the version for the registry dep and the path for local builds).
 sapient-core         = { path = "crates/sapient-core", version = "0.5.1" }

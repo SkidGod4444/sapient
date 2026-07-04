@@ -9,6 +9,7 @@ repository.workspace  = true
 rust-version.workspace = true
 
 [dependencies]
+image.workspace = true
 sapient-core       = { workspace = true }
 sapient-ir         = { workspace = true }
 sapient-backends-cpu = { workspace = true }

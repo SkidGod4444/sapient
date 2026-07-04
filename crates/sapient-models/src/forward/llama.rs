@@ -335,8 +335,21 @@ impl LlamaForward {
             .weights
             .get(&self.embed_key)
             .ok_or_else(|| anyhow::anyhow!("missing embedding weights at '{}'", self.embed_key))?;
-        let mut x = embed_tokens(embed, input_ids)?;
+        let x = embed_tokens(embed, input_ids)?;
+        self.forward_hidden_from_embeds(x, input_ids.len(), use_cache)
+    }
 
+    /// Run the transformer from pre-built input embeddings `[1, seq, hidden]`
+    /// instead of token ids — the multimodal entry point: a VLM splices visual
+    /// token embeddings into the text embedding sequence (at the `<image>`
+    /// positions) and prefills through here; subsequent decode steps use the
+    /// normal token-id path against the same KV cache.
+    fn forward_hidden_from_embeds(
+        &mut self,
+        mut x: Tensor,
+        seq_len: usize,
+        use_cache: bool,
+    ) -> Result<Tensor> {
         let start_pos = if use_cache {
             self.cache.first().map(|l| l.seq_len).unwrap_or(0)
         } else {
@@ -344,7 +357,6 @@ impl LlamaForward {
             0
         };
 
-        let seq_len = input_ids.len();
         let positions: Vec<usize> = (start_pos..start_pos + seq_len).collect();
 
         for layer_idx in 0..self.info.num_hidden_layers {
@@ -354,6 +366,24 @@ impl LlamaForward {
         let norm_w = resolve_weight(&self.weights, &self.prefix, "norm")?;
         self.backend
             .rms_norm(&x, norm_w, self.info.rms_norm_eps as f32)
+    }
+
+    /// Gather input embeddings for `input_ids` — `[1, seq, hidden]`. Public for
+    /// the VLM path (which overwrites the `<image>` rows with visual tokens).
+    pub fn token_embeddings(&self, input_ids: &[u32]) -> Result<Tensor> {
+        let embed = self
+            .weights
+            .get(&self.embed_key)
+            .ok_or_else(|| anyhow::anyhow!("missing embedding weights at '{}'", self.embed_key))?;
+        embed_tokens(embed, input_ids)
+    }
+
+    /// [`forward_logits`](Self::forward_logits) from pre-built embeddings —
+    /// last-position logits, appending to the KV cache when `use_cache`.
+    pub fn forward_logits_embeds(&mut self, embeds: Tensor, use_cache: bool) -> Result<Vec<f32>> {
+        let seq = embeds.shape().dims()[1];
+        let hidden = self.forward_hidden_from_embeds(embeds, seq, use_cache)?;
+        self.backend.logits_from_hidden(&hidden, &self.lm_head)
     }
 
     fn forward_layer(
