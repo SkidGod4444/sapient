@@ -193,12 +193,35 @@ impl Gemma3Forward {
             .map_err(|e| anyhow!("{e}"))
     }
 
+    /// Input embeddings for `input_ids`, already ×√hidden (Gemma convention) —
+    /// `[1, seq, hidden]`. The VLM path splices visual features over the
+    /// `<image_soft_token>` rows of this (matching transformers, which scales
+    /// ALL rows then overwrites the image positions).
+    pub fn token_embeddings_scaled(&self, input_ids: &[u32]) -> Result<Tensor> {
+        let embed = self.get(&self.embed_key)?;
+        let x = embed_tokens(embed, input_ids)?;
+        let scale = (self.info.hidden_size as f64).sqrt() as f32;
+        let mut xv = x.to_f32_vec();
+        for v in xv.iter_mut() {
+            *v *= scale;
+        }
+        Tensor::from_f32(&xv, Shape::new([1, input_ids.len(), self.info.hidden_size]))
+            .map_err(|e| anyhow!("{e}"))
+    }
+
     /// Last-position logits; appends to the KV cache when `use_cache`.
     pub fn forward_logits(&mut self, input_ids: &[u32], use_cache: bool) -> Result<Vec<f32>> {
+        let x = self.token_embeddings_scaled(input_ids)?;
+        self.forward_logits_embeds(x, use_cache)
+    }
+
+    /// [`forward_logits`](Self::forward_logits) from pre-built (already-scaled)
+    /// embeddings — the multimodal prefill entry.
+    pub fn forward_logits_embeds(&mut self, embeds: Tensor, use_cache: bool) -> Result<Vec<f32>> {
         if !use_cache {
             self.reset_cache();
         }
-        let seq = input_ids.len();
+        let seq = embeds.shape().dims()[1];
         let pos0 = self.seq_len;
         if pos0 + seq > self.max_seq {
             // Sliding conversations: same pragmatic reset the caches use.
@@ -210,16 +233,8 @@ impl Gemma3Forward {
         let n_heads = self.info.num_attention_heads;
         let n_kv = self.info.num_key_value_heads;
 
-        // Embedding gather × √hidden (Gemma convention).
-        let embed = self.get(&self.embed_key)?;
-        let x = embed_tokens(embed, input_ids)?;
-        let scale = (self.info.hidden_size as f64).sqrt() as f32;
-        let mut xv = x.to_f32_vec();
-        for v in xv.iter_mut() {
-            *v *= scale;
-        }
-        let mut x = Tensor::from_f32(&xv, Shape::new([1, seq, self.info.hidden_size]))
-            .map_err(|e| anyhow!("{e}"))?;
+        let mut x = embeds;
+        let xv = x.to_f32_vec();
 
         let trace = std::env::var("SAPIENT_G3_TRACE").is_ok();
         if trace {

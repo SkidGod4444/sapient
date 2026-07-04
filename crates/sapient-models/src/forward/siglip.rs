@@ -66,10 +66,21 @@ pub struct SiglipVision {
     weights: HashMap<String, Tensor>,
     backend: LlmBackendDispatch,
     head_dim: usize,
+    /// Checkpoint key prefix up to (excluding) `.embeddings…` — SmolVLM uses
+    /// `model.vision_model`, Gemma3/MedGemma use `vision_tower.vision_model`.
+    prefix: String,
 }
 
 impl SiglipVision {
     pub fn new(cfg: SiglipConfig, weights: HashMap<String, Tensor>) -> Result<Self> {
+        Self::with_prefix(cfg, weights, "model.vision_model")
+    }
+
+    pub fn with_prefix(
+        cfg: SiglipConfig,
+        weights: HashMap<String, Tensor>,
+        prefix: &str,
+    ) -> Result<Self> {
         let head_dim = cfg.hidden / cfg.heads;
         let backend = LlmBackendDispatch::from_kind(LlmBackendKind::Cpu)
             .map_err(|e| anyhow!("vision backend: {e}"))?;
@@ -78,6 +89,7 @@ impl SiglipVision {
             weights,
             backend,
             head_dim,
+            prefix: prefix.to_string(),
         })
     }
 
@@ -111,12 +123,13 @@ impl SiglipVision {
             .map_err(|e| anyhow!("{e}"))
     }
 
-    /// Preprocessed pixels `[3, S, S]` (normalized f32) → visual token
-    /// embeddings `[n_visual_tokens · text_hidden]` (row-major).
-    pub fn encode(&self, pixels: &[f32]) -> Result<Vec<f32>> {
+    /// Preprocessed pixels `[3, S, S]` → raw tower features
+    /// `[n_patches · hidden]` (post `post_layernorm`, before any connector).
+    /// The Idefics3 connector continues in [`encode`](Self::encode); Gemma3's
+    /// pool/norm/project connector consumes these directly.
+    pub fn encode_features(&self, pixels: &[f32]) -> Result<Vec<f32>> {
         let s = self.cfg.image_size;
         let c = self.cfg.hidden;
-        let side = self.cfg.n_patches_side();
         let n_patch = self.cfg.n_patches();
         if pixels.len() != 3 * s * s {
             anyhow::bail!("expected {}x{s}x{s} pixels, got {}", 3, pixels.len());
@@ -124,8 +137,11 @@ impl SiglipVision {
 
         // ── 1. patch embedding: conv2d stride=patch → [1, c, side, side] ────
         let x = Tensor::from_f32(pixels, Shape::new([1, 3, s, s])).map_err(|e| anyhow!("{e}"))?;
-        let pw = self.get("model.vision_model.embeddings.patch_embedding.weight")?;
-        let pb = self.opt("model.vision_model.embeddings.patch_embedding.bias");
+        let pw = self.get(&format!(
+            "{}.embeddings.patch_embedding.weight",
+            self.prefix
+        ))?;
+        let pb = self.opt(&format!("{}.embeddings.patch_embedding.bias", self.prefix));
         let patches = sapient_backends_cpu::kernels::conv2d::conv2d(
             &x,
             pw,
@@ -147,7 +163,10 @@ impl SiglipVision {
         }
         // + learned position embeddings [n_patch, c].
         let pos = self
-            .get("model.vision_model.embeddings.position_embedding.weight")?
+            .get(&format!(
+                "{}.embeddings.position_embedding.weight",
+                self.prefix
+            ))?
             .to_f32_vec();
         if pos.len() != h.len() {
             anyhow::bail!("position embedding {} != patches {}", pos.len(), h.len());
@@ -162,7 +181,7 @@ impl SiglipVision {
         let zero_mask = Tensor::from_f32(&vec![0.0f32; n_patch * n_patch], vec![n_patch, n_patch])
             .map_err(|e| anyhow!("{e}"))?;
         for l in 0..self.cfg.layers {
-            let p = format!("model.vision_model.encoder.layers.{l}");
+            let p = format!("{}.encoder.layers.{l}", self.prefix);
             // attn
             let normed = self.layer_norm(&x, &format!("{p}.layer_norm1"))?;
             let q = split_heads(
@@ -193,13 +212,21 @@ impl SiglipVision {
             let down = self.linear(&up, &format!("{p}.mlp.fc2"))?;
             x = self.backend.add(&x, &down).map_err(|e| anyhow!("{e}"))?;
         }
-        let x = self.layer_norm(&x, "model.vision_model.post_layernorm")?;
+        let x = self.layer_norm(&x, &format!("{}.post_layernorm", self.prefix))?;
+        Ok(x.to_f32_vec())
+    }
+
+    /// Idefics3/SmolVLM path: tower features → pixel shuffle → modality
+    /// projection → `[n_visual_tokens · text_hidden]`.
+    pub fn encode(&self, pixels: &[f32]) -> Result<Vec<f32>> {
+        let c = self.cfg.hidden;
+        let side = self.cfg.n_patches_side();
+        let xv = self.encode_features(pixels)?;
 
         // ── 3. pixel shuffle: [side, side, c] → [side/s², c·s²] ──────────────
         let sf = self.cfg.scale_factor;
         let out_side = side / sf;
         let cs2 = c * sf * sf;
-        let xv = x.to_f32_vec();
         let mut shuffled = vec![0.0f32; out_side * out_side * cs2];
         for hj in 0..out_side {
             for wj in 0..out_side {
