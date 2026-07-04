@@ -39,6 +39,8 @@ pub enum ModelCategory {
     SpeechToText,
     /// Text-to-speech (`sapient speak`) — Orpheus, Kokoro.
     TextToSpeech,
+    /// Vision-language (`sapient see`) — SmolVLM.
+    Vision,
 }
 
 impl ModelCategory {
@@ -48,6 +50,7 @@ impl ModelCategory {
             ModelCategory::Chat => "Text generation (chat)",
             ModelCategory::SpeechToText => "Speech-to-text (transcribe)",
             ModelCategory::TextToSpeech => "Text-to-speech (speak)",
+            ModelCategory::Vision => "Vision-language (see)",
         }
     }
 }
@@ -58,6 +61,7 @@ impl SupportedModel {
         match self.family {
             "Whisper" => ModelCategory::SpeechToText,
             "Orpheus" | "Kokoro" => ModelCategory::TextToSpeech,
+            "SmolVLM" => ModelCategory::Vision,
             _ => ModelCategory::Chat,
         }
     }
@@ -336,7 +340,50 @@ pub const CATALOG: &[SupportedModel] = &[
         gated: false,
         extra_aliases: &["kokoro-82m", "kokoro", "kokoro-tts"],
     },
+    // ── SmolVLM (vision-language — `sapient see`) ───────────────────────────
+    // Idefics3: SigLIP tower + pixel-shuffle connector + SmolLM2-135M backbone
+    // (safetensors; loaded by `VlmPipeline`, routed via `is_vlm_model`).
+    SupportedModel {
+        alias: "openhorizon/smolvlm-256m",
+        repo_id: "HuggingFaceTB/SmolVLM-256M-Instruct",
+        family: "SmolVLM",
+        params: "256M",
+        gated: false,
+        extra_aliases: &["smolvlm-256m", "smolvlm", "smolvlm-256m-instruct"],
+    },
 ];
+
+/// Resolve a VLM alias (or raw repo id) to its Hugging Face repo. Catalog
+/// aliases in the `Vision` category resolve normally; anything containing a
+/// `/` passes through as a raw repo id (Idefics3-family only — the pipeline
+/// validates `model_type`).
+pub fn resolve_vlm_repo(model: &str) -> String {
+    let lower = model.to_lowercase();
+    for m in CATALOG {
+        if m.category() == ModelCategory::Vision
+            && (m.alias.eq_ignore_ascii_case(model)
+                || m.extra_aliases
+                    .iter()
+                    .any(|a| a.eq_ignore_ascii_case(&lower)))
+        {
+            return m.repo_id.to_string();
+        }
+    }
+    model.to_string()
+}
+
+/// True when `model` names a catalog VLM (routes the CLI to `sapient see`'s
+/// pipeline instead of the text `Pipeline`).
+pub fn is_vlm_model(model: &str) -> bool {
+    let lower = model.to_lowercase();
+    CATALOG.iter().any(|m| {
+        m.category() == ModelCategory::Vision
+            && (m.alias.eq_ignore_ascii_case(model)
+                || m.extra_aliases
+                    .iter()
+                    .any(|a| a.eq_ignore_ascii_case(&lower)))
+    })
+}
 
 /// All supported models, for display (e.g. `sapient list --available`).
 pub fn catalog() -> &'static [SupportedModel] {

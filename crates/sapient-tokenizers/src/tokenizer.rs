@@ -152,6 +152,11 @@ impl SapientTokenizer {
     }
 
     /// Vocabulary size.
+    /// Id of an exact vocab/special token string (e.g. `"<image>"`), if present.
+    pub fn token_id(&self, token: &str) -> Option<u32> {
+        self.inner.token_to_id(token)
+    }
+
     pub fn vocab_size(&self) -> usize {
         self.inner.get_vocab_size(true)
     }

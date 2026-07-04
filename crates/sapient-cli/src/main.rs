@@ -164,6 +164,24 @@ enum Commands {
 
     /// Synthesise speech from text with a TTS model (text-to-speech).
     #[command(visible_aliases = ["tts", "say"])]
+    /// Ask a vision-language model about an image (SmolVLM — Phase 12)
+    See {
+        /// Image file (png/jpeg/webp).
+        image: PathBuf,
+
+        /// Question / instruction about the image.
+        #[arg(short, long, default_value = "Describe this image.")]
+        prompt: String,
+
+        /// VLM model alias or Idefics3-family repo id.
+        #[arg(short, long, default_value = "smolvlm-256m")]
+        model: String,
+
+        /// Maximum new tokens in the answer.
+        #[arg(long, default_value_t = 192)]
+        max_tokens: usize,
+    },
+
     Speak {
         /// Orpheus model alias or repo id (e.g. `orpheus-3b`).
         model: String,
@@ -490,6 +508,12 @@ async fn dispatch(cli: Cli) -> Result<()> {
             )
             .await
         }
+        Commands::See {
+            image,
+            prompt,
+            model,
+            max_tokens,
+        } => see_command(&image, &prompt, &model, max_tokens).await,
         Commands::Speak {
             model,
             text,
@@ -1148,6 +1172,10 @@ fn models_command() -> Result<()> {
             ModelCategory::TextToSpeech,
             "sapient speak <model> \"<text>\"",
         ),
+        (
+            ModelCategory::Vision,
+            "sapient see <image> -p \"<question>\"",
+        ),
     ];
 
     for (cat, run_hint) in sections {
@@ -1546,6 +1574,29 @@ fn is_kokoro_model(model: &str) -> bool {
     m == "kokoro" || m == "kokoro-82m" || m.contains("kokoro")
 }
 
+async fn see_command(
+    image: &std::path::Path,
+    prompt: &str,
+    model: &str,
+    max_tokens: usize,
+) -> Result<()> {
+    if !image.exists() {
+        anyhow::bail!("image not found: {}", image.display());
+    }
+    let loading = ui::spinner(format!("loading {model}…"));
+    let mut vlm = sapient_generate::VlmPipeline::from_pretrained(model).await?;
+    drop(loading);
+
+    let thinking = ui::spinner("looking at the image…");
+    let image = image.to_path_buf();
+    let prompt_owned = prompt.to_string();
+    let answer = tokio::task::spawn_blocking(move || vlm.answer(&image, &prompt_owned, max_tokens))
+        .await??;
+    drop(thinking);
+    println!("{answer}");
+    Ok(())
+}
+
 async fn speak_command(
     model: &str,
     text: &str,
@@ -1576,6 +1627,10 @@ async fn speak_command(
                  sapient speak orpheus-3b \"<text>\". To chat with '{model}', use: \
                  sapient chat {model}.",
                 m.family
+            ),
+            ModelCategory::Vision => anyhow::bail!(
+                "'{model}' is a vision-language model, not a text-to-speech model. \
+                 Use it with: sapient see <image> --model {model} -p \"<question>\"."
             ),
         }
     }
