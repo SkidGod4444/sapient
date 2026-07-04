@@ -32,6 +32,11 @@ pub struct VadConfig {
     pub sensitivity: f32,
     /// Drop utterances shorter than this many frames (coughs/clicks).
     pub min_utterance_frames: usize,
+    /// Discard finalized utterances whose MEAN frame RMS is below this
+    /// (0.0 = disabled). Guards against low-energy noise/echo tails that pass
+    /// the per-frame threshold long enough to finalize — Whisper hallucinates
+    /// famously on such non-speech ("MBC 뉴스…" class artifacts).
+    pub min_mean_rms: f32,
     /// Force-finalize an utterance once it reaches this many frames.
     pub max_utterance_frames: usize,
     /// Absolute minimum RMS for a frame to count as speech. Floors the adaptive
@@ -56,6 +61,7 @@ impl Default for VadConfig {
             max_utterance_frames: 1500, // 30 s
             min_rms: 0.01,
             end_ratio: 0.35,
+            min_mean_rms: 0.0,
         }
     }
 }
@@ -80,6 +86,8 @@ pub struct EnergyVad {
     /// Recent frames held back during debounce so the utterance keeps its onset.
     lead: Vec<f32>,
     frames_in_utterance: usize,
+    /// Σ frame RMS across the utterance (for the mean-energy gate).
+    rms_sum: f32,
     /// Decaying peak RMS of the in-progress utterance (relative-drop reference).
     peak: f32,
 }
@@ -95,6 +103,7 @@ impl EnergyVad {
             buffer: Vec::new(),
             lead: Vec::new(),
             frames_in_utterance: 0,
+            rms_sum: 0.0,
             peak: 0.0,
         }
     }
@@ -149,6 +158,7 @@ impl EnergyVad {
                     self.buffer.clear();
                     self.buffer.append(&mut self.lead);
                     self.frames_in_utterance = self.run_speech;
+                    self.rms_sum = rms * self.run_speech as f32;
                     self.run_silence = 0;
                     self.peak = rms; // seed the relative-drop reference
                 }
@@ -157,6 +167,7 @@ impl EnergyVad {
             State::Speech => {
                 self.buffer.extend_from_slice(frame);
                 self.frames_in_utterance += 1;
+                self.rms_sum += rms;
                 // Track a slowly-decaying speech peak. A frame keeps the turn
                 // alive only if it's loud both in absolute terms (`threshold`)
                 // and relative to that peak — so a real pause (which drops well
@@ -196,12 +207,36 @@ impl EnergyVad {
         self.lead.clear();
         let frames = self.frames_in_utterance;
         self.frames_in_utterance = 0;
-        let utterance = std::mem::take(&mut self.buffer);
-        if frames >= self.cfg.min_utterance_frames {
-            Some(utterance)
+        let mean_rms = if frames > 0 {
+            self.rms_sum / frames as f32
         } else {
-            None // too short — discard
+            0.0
+        };
+        self.rms_sum = 0.0;
+        let utterance = std::mem::take(&mut self.buffer);
+        let debug = std::env::var("SAPIENT_VAD_DEBUG").is_ok();
+        if frames < self.cfg.min_utterance_frames {
+            if debug {
+                eprintln!(
+                    "[vad] DISCARD short: {frames} frames (min {})",
+                    self.cfg.min_utterance_frames
+                );
+            }
+            return None; // too short — discard
         }
+        if self.cfg.min_mean_rms > 0.0 && mean_rms < self.cfg.min_mean_rms {
+            if debug {
+                eprintln!(
+                    "[vad] DISCARD quiet: mean_rms {mean_rms:.4} < {} over {frames} frames",
+                    self.cfg.min_mean_rms
+                );
+            }
+            return None; // low-energy noise/echo tail — Whisper would hallucinate
+        }
+        if debug {
+            eprintln!("[vad] ACCEPT: {frames} frames, mean_rms {mean_rms:.4}");
+        }
+        Some(utterance)
     }
 }
 
@@ -236,6 +271,61 @@ mod tests {
 
     fn frames(samples: &[f32], n: usize) -> Vec<Vec<f32>> {
         samples.chunks(n).map(|c| c.to_vec()).collect()
+    }
+
+    /// The mean-energy gate discards quiet noise that squeaks past the
+    /// per-frame threshold (the Whisper-hallucination class), while real
+    /// speech passes.
+    #[test]
+    fn mean_rms_gate_discards_quiet_noise() {
+        let cfg = VadConfig {
+            silence_hang_frames: 6,
+            min_utterance_frames: 4,
+            min_mean_rms: 0.05,
+            ..VadConfig::default()
+        };
+        let fs = cfg.frame_samples;
+        // Quiet tone just above the entry threshold (~0.02 rms) → finalizes by
+        // duration but fails the mean gate.
+        let quiet: Vec<f32> = (0..20 * fs)
+            .map(|i| 0.028 * (2.0 * std::f32::consts::PI * 300.0 * i as f32 / 16_000.0).sin())
+            .collect();
+        let mut vad = EnergyVad::new(cfg);
+        let mut got = None;
+        for f in quiet.chunks(fs) {
+            if let Some(u) = vad.push(f) {
+                got = Some(u);
+            }
+        }
+        for _ in 0..10 {
+            if let Some(u) = vad.push(&vec![0.0; fs]) {
+                got = Some(u);
+            }
+        }
+        assert!(got.is_none(), "quiet noise should be gated out");
+
+        // Loud speech-level tone passes.
+        let loud: Vec<f32> = (0..20 * fs)
+            .map(|i| 0.25 * (2.0 * std::f32::consts::PI * 300.0 * i as f32 / 16_000.0).sin())
+            .collect();
+        let mut vad = EnergyVad::new(VadConfig {
+            silence_hang_frames: 6,
+            min_utterance_frames: 4,
+            min_mean_rms: 0.05,
+            ..VadConfig::default()
+        });
+        let mut got = None;
+        for f in loud.chunks(fs) {
+            if let Some(u) = vad.push(f) {
+                got = Some(u);
+            }
+        }
+        for _ in 0..10 {
+            if let Some(u) = vad.push(&vec![0.0; fs]) {
+                got = Some(u);
+            }
+        }
+        assert!(got.is_some(), "real speech must pass the gate");
     }
 
     /// The live-STT taps: `in_speech`/`speech_so_far` expose the in-progress

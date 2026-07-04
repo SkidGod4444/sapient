@@ -18,6 +18,12 @@ pub struct SpeakerPlayback {
     /// steals queued samples from the device callback — instant silence.
     rx_drain: flume::Receiver<f32>,
     sample_rate: u32,
+    /// Per-20 ms RMS envelope of everything submitted (device rate), plus the
+    /// total sample count — lets a barge-in detector ask "how loud is the
+    /// speaker RIGHT NOW?" and gate the mic against expected bleed instead of
+    /// a fixed threshold (echo-referenced gating; there is no real AEC).
+    env: std::sync::Mutex<Vec<f32>>,
+    submitted: std::sync::atomic::AtomicUsize,
 }
 
 impl SpeakerPlayback {
@@ -55,6 +61,8 @@ impl SpeakerPlayback {
             tx,
             rx_drain,
             sample_rate,
+            env: std::sync::Mutex::new(Vec::new()),
+            submitted: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -79,11 +87,49 @@ impl SpeakerPlayback {
     /// device rate. Returns immediately; audio drains on the device thread.
     pub fn submit(&self, samples: &[f32], src_rate: u32) -> Result<()> {
         let out = crate::io::resample(samples, src_rate, self.sample_rate)?;
+        // Track the played-signal envelope (per-20 ms RMS at device rate).
+        {
+            let hop = (self.sample_rate as usize / 50).max(1);
+            let mut env = self.env.lock().unwrap();
+            for chunk in out.chunks(hop) {
+                let r = (chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len() as f32).sqrt();
+                env.push(r);
+            }
+        }
+        self.submitted
+            .fetch_add(out.len(), std::sync::atomic::Ordering::Relaxed);
         for s in out {
             // Unbounded queue — playback is short (a reply); never blocks.
             let _ = self.tx.send(s);
         }
         Ok(())
+    }
+
+    /// RMS of the speaker signal at the CURRENT playback position (0.0 when
+    /// idle) — the echo reference for barge-in: mic energy is compared against
+    /// `α · expected_bleed()` rather than a fixed bar, so a reply that gets
+    /// louder mid-sentence no longer out-shouts a threshold calibrated on its
+    /// quiet opening.
+    pub fn expected_bleed(&self) -> f32 {
+        let submitted = self.submitted.load(std::sync::atomic::Ordering::Relaxed);
+        let pending = self.tx.len();
+        let played = submitted.saturating_sub(pending);
+        let hop = (self.sample_rate as usize / 50).max(1);
+        let idx = played / hop;
+        let env = self.env.lock().unwrap();
+        // Small look-around: device/room latency smears the reference by a few
+        // hops — take the local max so attacks aren't under-estimated.
+        let lo = idx.saturating_sub(3);
+        let hi = (idx + 4).min(env.len());
+        env[lo..hi].iter().cloned().fold(0.0f32, f32::max)
+    }
+
+    /// Drop envelope history — call between turns (after playback has drained
+    /// or been cleared) so the reference stays bounded and re-based at zero.
+    pub fn reset_reference(&self) {
+        self.env.lock().unwrap().clear();
+        self.submitted
+            .store(self.tx.len(), std::sync::atomic::Ordering::Relaxed);
     }
 }
 
