@@ -340,6 +340,29 @@ pub const CATALOG: &[SupportedModel] = &[
         gated: false,
         extra_aliases: &["kokoro-82m", "kokoro", "kokoro-tts"],
     },
+    // ── Gemma3 (text chat — `Gemma3Forward` engine) ─────────────────────────
+    // QK-norm + sandwich norms + alternating sliding/global attention.
+    // gemma-3-1b via the ungated unsloth safetensors mirror.
+    SupportedModel {
+        alias: "openhorizon/gemma-3-1b",
+        repo_id: "unsloth/gemma-3-1b-it",
+        family: "Gemma3",
+        params: "1B",
+        gated: false,
+        extra_aliases: &["gemma-3-1b", "gemma3-1b", "gemma-3-1b-it"],
+    },
+    // MedGemma: Google's medical Gemma3 (gated — accept the Health AI
+    // Developer Foundations terms on HF, then `sapient login`). Multimodal
+    // checkpoint; SAPIENT v1 runs the TEXT side (medical Q&A chat) — the
+    // vision weights are skipped at load.
+    SupportedModel {
+        alias: "openhorizon/medgemma-4b",
+        repo_id: "google/medgemma-4b-it",
+        family: "Gemma3",
+        params: "4B",
+        gated: true,
+        extra_aliases: &["medgemma-4b", "medgemma", "medgemma-4b-it"],
+    },
     // ── SmolVLM (vision-language — `sapient see`) ───────────────────────────
     // Idefics3: SigLIP tower + pixel-shuffle connector + SmolLM2-135M backbone
     // (safetensors; loaded by `VlmPipeline`, routed via `is_vlm_model`).

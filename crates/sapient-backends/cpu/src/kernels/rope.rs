@@ -71,6 +71,19 @@ pub fn apply_rope_partial(
     base: f32,
     rotary_dim: usize,
 ) -> Result<Tensor> {
+    apply_rope_partial_scaled(x, positions, base, rotary_dim, 1.0)
+}
+
+/// [`apply_rope_partial`] with linear position scaling (`rope_scaling` type
+/// "linear": the effective position is `pos / pos_scale`) — Gemma3-4B+ applies
+/// factor 8 on its global-attention layers.
+pub fn apply_rope_partial_scaled(
+    x: &Tensor,
+    positions: &[usize],
+    base: f32,
+    rotary_dim: usize,
+    pos_scale: f32,
+) -> Result<Tensor> {
     let dims = x.shape().dims().to_vec();
     if dims.len() != 4 {
         return Err(SapientError::RankMismatch {
@@ -104,7 +117,8 @@ pub fn apply_rope_partial(
             for (s, &pos) in positions.iter().enumerate() {
                 let base_idx = ((b * n_heads + h) * seq_len + s) * head_dim;
                 for i in 0..half {
-                    let freq = (pos as f32) / base.powf(2.0 * i as f32 / rotary_dim as f32);
+                    let freq =
+                        (pos as f32 / pos_scale) / base.powf(2.0 * i as f32 / rotary_dim as f32);
                     let (sin_f, cos_f) = freq.sin_cos();
                     let x0 = x_data[base_idx + i];
                     let x1 = x_data[base_idx + i + half];

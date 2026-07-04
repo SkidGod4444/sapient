@@ -806,6 +806,7 @@ impl Pipeline {
             match &*engine {
                 ForwardEngine::Llama(f) => return f.backend_label(),
                 ForwardEngine::Phi(_) => {}
+                ForwardEngine::Gemma3(_) => return "cpu (Gemma3 engine)".to_string(),
                 #[cfg(all(target_os = "macos", feature = "mlx"))]
                 ForwardEngine::MlxLlama(_) => return "metal (MLX native graph)".to_string(),
                 #[cfg(feature = "wgpu")]
@@ -949,7 +950,13 @@ fn validate_tokenizer_model_compat(
     tokenizer: &SapientTokenizer,
 ) -> Result<()> {
     let tokenizer_vocab = tokenizer.vocab_size();
-    if tokenizer_vocab > model_info.vocab_size {
+    // A slightly LARGER tokenizer is benign: trailing special tokens the model
+    // can never emit (e.g. Gemma3's <image_soft_token> at id 262144 on a
+    // 262144-vocab text model). The dangerous direction — and the one behind
+    // the Mistral-v0.3 token-salad lesson — is ids beyond the tokenizer or a
+    // REORDERED vocab, so keep the check for big gaps.
+    const VOCAB_SLACK: usize = 64;
+    if tokenizer_vocab > model_info.vocab_size + VOCAB_SLACK {
         anyhow::bail!(
             "tokenizer/model vocab mismatch for '{model_id}': tokenizer has {tokenizer_vocab} tokens but model config vocab_size is {}",
             model_info.vocab_size

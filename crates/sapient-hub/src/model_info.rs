@@ -17,6 +17,9 @@ pub enum ArchType {
     Phi,
     /// Google Gemma / Gemma 2
     Gemma,
+    /// Google Gemma 3 (QK-norm, sandwich norms, sliding/global attention) —
+    /// gemma-3-*b and MedGemma text.
+    Gemma3,
     /// GPT-2, CodeGen, GPT-J
     Gpt2,
     /// BERT, RoBERTa, DistilBERT (encoder-only — for embeddings/classification)
@@ -52,6 +55,10 @@ impl ArchType {
                 Self::Llama
             }
             n if n.contains("Phi") => Self::Phi,
+            // Gemma3 MUST match before the Gemma catch-all ("Gemma3ForCausalLM"
+            // contains "Gemma") or it silently routes to the Llama-family
+            // engine and emits token salad.
+            n if n.contains("Gemma3") => Self::Gemma3,
             n if n.contains("Gemma") => Self::Gemma,
             n if n.contains("GPT2") || n.contains("Gpt2") => Self::Gpt2,
             n if n.contains("Bert") || n.contains("Roberta") => Self::Bert,
@@ -320,6 +327,7 @@ impl ArchType {
             // GGUF arch strings: "phi2" (Phi-1/1.5/2), "phi3" (Phi-3/3.5/4-mini).
             "phi" | "phi2" | "phi3" => Self::Phi,
             "gemma" | "gemma2" => Self::Gemma,
+            "gemma3" | "gemma3_text" => Self::Gemma3,
             "gpt2" => Self::Gpt2,
             "bert" | "roberta" => Self::Bert,
             "qwen2" | "qwen3" => Self::Qwen,
