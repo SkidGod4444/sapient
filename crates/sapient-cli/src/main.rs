@@ -2000,6 +2000,11 @@ async fn converse_command(
             // 400 ms hangover (default 600) — the streaming loop wants a snappy
             // end-of-turn; incremental STT below hides the transcription cost.
             silence_hang_frames: 20,
+            // Real-mic hardening: ≥240 ms of speech, and the utterance's MEAN
+            // energy must look like speech — quiet echo tails otherwise reach
+            // Whisper, which hallucinates on non-speech.
+            min_utterance_frames: 12,
+            min_mean_rms: 0.02,
             ..VadConfig::default()
         })
     };
@@ -2015,6 +2020,15 @@ async fn converse_command(
 
     let backend_label = converse.backend_label();
     ui::converse_banner(src_rate, stt, model, &backend_label, speak, tts_engine);
+
+    // Prewarm STT: the first Whisper pass pays one-time setup (mel plan, cache
+    // alloc, page-in) — ~2 s of extra latency that used to land on the user's
+    // FIRST utterance. Burn it on silence now instead.
+    {
+        let warm = ui::spinner("warming up…");
+        let _ = converse.transcribe_utterance(&vec![0.0f32; 8_000]);
+        drop(warm);
+    }
 
     // Live mic meter + a one-time hint if the mic looks dead (the terminal lacks
     // microphone permission, so cpal delivers only silence).
@@ -2154,8 +2168,16 @@ async fn converse_command(
                             }
                             // Drain queued speaker audio — but keep listening:
                             // sustained mic energy interrupts playback (barge-in).
+                            // No echo cancellation exists, so the threshold is
+                            // CALIBRATED per turn: the first ~350 ms of playback
+                            // measures this room's speaker-bleed level, and only
+                            // sustained input well ABOVE that bleed interrupts.
+                            // (A fixed 0.035 bar self-triggered on every reply —
+                            // real-mic field report.)
                             if let Some(p) = &player {
                                 let mut consec_loud = 0u32;
+                                let mut frames_seen = 0u32;
+                                let mut bleed_peak = 0.0f32;
                                 'drain: while p.pending_secs() > 0.05 {
                                     while let Ok(chunk) = frames.try_recv() {
                                         buf.extend_from_slice(&chunk);
@@ -2165,16 +2187,21 @@ async fn converse_command(
                                         let rms = (f.iter().map(|s| s * s).sum::<f32>()
                                             / f.len() as f32)
                                             .sqrt();
-                                        // High absolute bar: must clear speaker
-                                        // bleed (no echo cancellation yet).
-                                        if rms > 0.035 {
+                                        frames_seen += 1;
+                                        if frames_seen <= 17 {
+                                            // calibration window (~350 ms)
+                                            bleed_peak = bleed_peak.max(rms);
+                                            continue;
+                                        }
+                                        let threshold = (bleed_peak * 3.0).max(0.05);
+                                        if rms > threshold {
                                             consec_loud += 1;
                                         } else {
                                             consec_loud = 0;
                                         }
-                                        if consec_loud >= 10 {
-                                            // ~200 ms of sustained speech-level
-                                            // input → cut playback, listen.
+                                        if consec_loud >= 15 {
+                                            // ~300 ms sustained well above the
+                                            // bleed → the human is talking.
                                             p.clear();
                                             ui::converse_note("(interrupted — listening)");
                                             break 'drain;
@@ -2182,6 +2209,10 @@ async fn converse_command(
                                     }
                                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                                 }
+                                // Echo-tail grace: let the device buffer + room
+                                // reverb decay before we listen again, so the
+                                // tail can't become a phantom "utterance".
+                                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                             }
                         }
 
