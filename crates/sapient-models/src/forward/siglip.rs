@@ -23,7 +23,6 @@
 use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
-use sapient_backends_cpu::kernels::attention::scaled_dot_product_attention;
 use sapient_backends_cpu::kernels::elementwise::gelu;
 use sapient_core::{Shape, Tensor};
 
@@ -178,8 +177,6 @@ impl SiglipVision {
             Tensor::from_f32(&h, Shape::new([1, n_patch, c])).map_err(|e| anyhow!("{e}"))?;
 
         // ── 2. transformer blocks (pre-LN) ───────────────────────────────────
-        let zero_mask = Tensor::from_f32(&vec![0.0f32; n_patch * n_patch], vec![n_patch, n_patch])
-            .map_err(|e| anyhow!("{e}"))?;
         for l in 0..self.cfg.layers {
             let p = format!("{}.encoder.layers.{l}", self.prefix);
             // attn
@@ -199,9 +196,7 @@ impl SiglipVision {
                 self.cfg.heads,
                 self.head_dim,
             )?;
-            let attn =
-                scaled_dot_product_attention(&q, &k, &v, Some(&zero_mask), None, self.cfg.heads)
-                    .map_err(|e| anyhow!("{e}"))?;
+            let attn = dense_full_attention(&q, &k, &v, self.cfg.heads, self.head_dim)?;
             let attn = merge_heads(&attn)?;
             let attn = self.linear(&attn, &format!("{p}.self_attn.out_proj"))?;
             x = self.backend.add(&x, &attn).map_err(|e| anyhow!("{e}"))?;
@@ -248,6 +243,85 @@ impl SiglipVision {
         let proj = self.linear(&shuffled, "model.connector.modality_projection.proj")?;
         Ok(proj.to_f32_vec())
     }
+}
+
+/// Dense NON-CAUSAL attention for the vision tower: per head,
+/// `S = softmax(Q·Kᵀ/√d)`, `O = S·V` — both products through the parallel
+/// blocked SGEMM (`matmul_nt`). For 4096 patches this is far faster than the
+/// flash row-loop (which is shaped for long-KV DECODE, one query row at a
+/// time); the score matrix (64 MB/head at 4096²) is transient per head.
+/// Numerically standard max-subtracted softmax; results match the flash kernel
+/// within f32 reduction-order noise.
+fn dense_full_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    n_heads: usize,
+    head_dim: usize,
+) -> Result<Tensor> {
+    use rayon::prelude::*;
+    let dims = q.shape().dims().to_vec(); // [1, h, seq, hd]
+    let seq = dims[2];
+    let qv = q.to_f32_vec();
+    let kv = k.to_f32_vec();
+    let vv = v.to_f32_vec();
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    let mut out = vec![0.0f32; n_heads * seq * head_dim];
+
+    // Heads are independent — parallelize the OUTER loop (the per-head GEMMs
+    // are thin in K = head_dim and gain little from inner splitting).
+    out.par_chunks_mut(seq * head_dim)
+        .enumerate()
+        .try_for_each(|(h, out_h)| -> Result<()> {
+            let qh = &qv[h * seq * head_dim..(h + 1) * seq * head_dim];
+            let kh = &kv[h * seq * head_dim..(h + 1) * seq * head_dim];
+            let vh = &vv[h * seq * head_dim..(h + 1) * seq * head_dim];
+
+            // S = Q·Kᵀ (matmul_nt computes X·Wᵀ directly).
+            let qt =
+                Tensor::from_f32(qh, Shape::new([seq, head_dim])).map_err(|e| anyhow!("{e}"))?;
+            let kt =
+                Tensor::from_f32(kh, Shape::new([seq, head_dim])).map_err(|e| anyhow!("{e}"))?;
+            let scores = sapient_backends_cpu::kernels::matmul::matmul_nt(&qt, &kt)
+                .map_err(|e| anyhow!("{e}"))?;
+            let mut sv = scores.to_f32_vec();
+
+            // Row-wise softmax (parallel over query rows).
+            sv.par_chunks_mut(seq).for_each(|row| {
+                let mut mx = f32::NEG_INFINITY;
+                for x in row.iter_mut() {
+                    *x *= scale;
+                    if *x > mx {
+                        mx = *x;
+                    }
+                }
+                let mut sum = 0.0f32;
+                for x in row.iter_mut() {
+                    *x = (*x - mx).exp();
+                    sum += *x;
+                }
+                let inv = 1.0 / sum;
+                for x in row.iter_mut() {
+                    *x *= inv;
+                }
+            });
+
+            // O = S·V = matmul_nt(S, Vᵀ).
+            let mut vt = vec![0.0f32; head_dim * seq];
+            for si in 0..seq {
+                for d in 0..head_dim {
+                    vt[d * seq + si] = vh[si * head_dim + d];
+                }
+            }
+            let st = Tensor::from_f32(&sv, Shape::new([seq, seq])).map_err(|e| anyhow!("{e}"))?;
+            let vt =
+                Tensor::from_f32(&vt, Shape::new([head_dim, seq])).map_err(|e| anyhow!("{e}"))?;
+            let o = sapient_backends_cpu::kernels::matmul::matmul_nt(&st, &vt)
+                .map_err(|e| anyhow!("{e}"))?;
+            out_h.copy_from_slice(&o.to_f32_vec());
+            Ok(())
+        })?;
+    Tensor::from_f32(&out, Shape::new([1, n_heads, seq, head_dim])).map_err(|e| anyhow!("{e}"))
 }
 
 #[cfg(test)]

@@ -1590,10 +1590,21 @@ async fn see_command(
     let thinking = ui::spinner("looking at the image…");
     let image = image.to_path_buf();
     let prompt_owned = prompt.to_string();
-    let answer = tokio::task::spawn_blocking(move || vlm.answer(&image, &prompt_owned, max_tokens))
-        .await??;
+    let (answer, stats) = tokio::task::spawn_blocking(move || {
+        vlm.answer_with_stats(&image, &prompt_owned, max_tokens)
+    })
+    .await??;
     drop(thinking);
     println!("{answer}");
+    eprintln!(
+        "⏱ vision {} ms · prefill {} ms ({} tok) · decode {} tok in {} ms ({:.1} tok/s)",
+        stats.vision_ms,
+        stats.prefill_ms,
+        stats.prompt_tokens,
+        stats.gen_tokens,
+        stats.decode_ms,
+        stats.decode_tps()
+    );
     Ok(())
 }
 

@@ -196,6 +196,7 @@ impl VlmPipeline {
         let mut text_w: HashMap<String, Tensor> = HashMap::new();
         for (name, tensor) in all {
             if name.contains("vision_model") || name.contains("connector") {
+                let tensor = maybe_quantize_vision(&name, tensor);
                 vision_w.insert(name, tensor);
             } else if let Some(rest) = name.strip_prefix("model.text_model.") {
                 // → the names LlamaForward expects ("model.layers.N...", etc.)
@@ -267,6 +268,7 @@ impl VlmPipeline {
         let mut text_w: HashMap<String, Tensor> = HashMap::new();
         for (name, tensor) in all {
             if name.contains("vision_tower") {
+                let tensor = maybe_quantize_vision(&name, tensor);
                 vision_w.insert(name, tensor);
             } else if name.contains("multi_modal_projector") {
                 projector.insert(name, tensor);
@@ -334,7 +336,19 @@ impl VlmPipeline {
     /// One vision-language turn: describe/answer `question` about the image.
     /// Greedy decode, up to `max_new` tokens. Returns the reply text.
     pub fn answer(&mut self, image: &Path, question: &str, max_new: usize) -> Result<String> {
+        Ok(self.answer_with_stats(image, question, max_new)?.0)
+    }
+
+    /// [`answer`](Self::answer) + per-stage timing (the numbers `sapient see`
+    /// prints): vision tower+connector, prefill, decode.
+    pub fn answer_with_stats(
+        &mut self,
+        image: &Path,
+        question: &str,
+        max_new: usize,
+    ) -> Result<(String, VlmStats)> {
         // 1. Vision: pixels → visual token embeddings in text space.
+        let t_vision = std::time::Instant::now();
         let pixels = self.preprocess_image(image)?;
         let text_hidden = self.vision.config().text_hidden;
         let (vis, n_vis, prompt) = match &self.flavor {
@@ -374,6 +388,7 @@ impl VlmPipeline {
             }
         };
 
+        let vision_ms = t_vision.elapsed().as_millis();
         let ids = self.tokenizer.encode_ids(&prompt, false)?;
 
         // 2. Splice: overwrite the image-token rows with the vision embeddings.
@@ -399,7 +414,11 @@ impl VlmPipeline {
             .map_err(|e| anyhow!("{e}"))?;
 
         // 3. Prefill (builds the KV cache), then greedy decode on token ids.
+        let prompt_tokens = ids.len();
+        let t_prefill = std::time::Instant::now();
         let mut logits = self.engine.forward_logits_embeds(embeds, true)?;
+        let prefill_ms = t_prefill.elapsed().as_millis();
+        let t_decode = std::time::Instant::now();
         let mut out_ids: Vec<u32> = Vec::new();
         for _ in 0..max_new {
             let next = argmax(&logits);
@@ -409,8 +428,58 @@ impl VlmPipeline {
             out_ids.push(next);
             logits = self.engine.forward_logits(&[next], true)?;
         }
+        let decode_ms = t_decode.elapsed().as_millis();
         self.engine.reset_cache();
-        Ok(self.tokenizer.decode(&out_ids, true)?.trim().to_string())
+        let text = self.tokenizer.decode(&out_ids, true)?.trim().to_string();
+        Ok((
+            text,
+            VlmStats {
+                vision_ms,
+                prompt_tokens,
+                prefill_ms,
+                gen_tokens: out_ids.len(),
+                decode_ms,
+            },
+        ))
+    }
+}
+
+/// Online-quantize an eligible vision-tower linear to Q8_0 (the exact rule the
+/// text engines use — conv/embed/norm/bias weights pass through untouched).
+/// Near-lossless, and it routes the tower's matmuls onto the parallel W8A8
+/// kernels instead of f32 GEMM.
+fn maybe_quantize_vision(name: &str, t: Tensor) -> Tensor {
+    // Q8_0 needs in-features % 32 == 0 (Gemma3's vision MLP is 4304-wide —
+    // 4304 % 32 = 16 — so its fc2 stays f32 on the parallel SGEMM path).
+    let k_ok = t.shape().dims().last().is_some_and(|d| d % 32 == 0);
+    if k_ok && sapient_models::forward::common::should_quantize_online(name, &t) {
+        sapient_models::forward::common::quantize_tensor_to_q8_0(t)
+    } else {
+        t
+    }
+}
+
+/// Per-stage timing for one [`VlmPipeline::answer_with_stats`] turn.
+#[derive(Debug, Clone, Copy)]
+pub struct VlmStats {
+    /// Image preprocessing + vision tower + connector.
+    pub vision_ms: u128,
+    /// Prompt length in tokens (text + image tokens).
+    pub prompt_tokens: usize,
+    /// Prefill (cache-building forward over the spliced embeddings).
+    pub prefill_ms: u128,
+    /// Generated token count.
+    pub gen_tokens: usize,
+    /// Total decode wall time.
+    pub decode_ms: u128,
+}
+
+impl VlmStats {
+    pub fn decode_tps(&self) -> f32 {
+        if self.decode_ms == 0 {
+            return 0.0;
+        }
+        self.gen_tokens as f32 / (self.decode_ms as f32 / 1000.0)
     }
 }
 

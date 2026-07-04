@@ -356,25 +356,41 @@ fn matmul_nt_float(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resu
                 }
             });
     } else {
-        // Batched SGEMM for prefill. W is [N, K] contiguous; row-stride=1, col-stride=K.
-        unsafe {
-            matrixmultiply::sgemm(
-                m,
-                k,
-                n,
-                1.0,
-                x_data.as_ptr(),
-                k as isize,
-                1,
-                w_data.as_ptr(),
-                1,
-                k as isize,
-                0.0,
-                out.as_mut_ptr(),
-                n as isize,
-                1,
-            );
-        }
+        // Batched SGEMM for prefill — split across X row blocks so it uses
+        // every core (one big single-threaded sgemm left most of the machine
+        // idle; the SigLIP-896 tower spends its life here). Each block is an
+        // independent sgemm over the same K reduction writing a disjoint
+        // output slice → bit-identical to the single call.
+        let flops = m * k * n;
+        let mblock = if m >= 2 && flops >= (1 << 20) {
+            m.div_ceil(rayon::current_num_threads().max(1)).max(4)
+        } else {
+            m
+        };
+        out.par_chunks_mut(mblock * n)
+            .enumerate()
+            .for_each(|(bi, out_block)| {
+                let m0 = bi * mblock;
+                let mc = out_block.len() / n;
+                unsafe {
+                    matrixmultiply::sgemm(
+                        mc,
+                        k,
+                        n,
+                        1.0,
+                        x_data[m0 * k..].as_ptr(),
+                        k as isize,
+                        1,
+                        w_data.as_ptr(),
+                        1,
+                        k as isize,
+                        0.0,
+                        out_block.as_mut_ptr(),
+                        n as isize,
+                        1,
+                    );
+                }
+            });
     }
 
     Tensor::from_f32_vec(out, Shape::new([m, n]))
