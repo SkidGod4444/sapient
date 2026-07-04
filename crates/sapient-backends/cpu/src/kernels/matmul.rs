@@ -491,6 +491,58 @@ fn matmul_nt_q8_0(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
     // All Apple M-series and DGX Spark (Grace ARM64) support dotprod.
     #[cfg(target_arch = "aarch64")]
     if std::arch::is_aarch64_feature_detected!("dotprod") {
+        // ── Blocked W8A8 GEMM (m ≥ 8: prefill / vision towers) ───────────────
+        // The per-row loop below runs one rayon fork-join and one activation
+        // quantization PER ROW — 4096 barriers for a SigLIP-896 tower. Here:
+        // all rows quantize once, ONE parallel region over weight-row chunks,
+        // and each weight row's bytes stay L1-resident across every activation
+        // row (output built row-major-transposed, then flipped). Per-element
+        // math is the same kernel with the same scales → bit-identical to the
+        // per-row path.
+        if m >= 8 {
+            let bpr = k / QUANT_BLOCK_SIZE; // activation blocks per row
+            let mut x_i8 = vec![0i8; m * k];
+            let mut x_scales = vec![0.0f32; m * bpr];
+            x_i8.par_chunks_mut(k)
+                .zip(x_scales.par_chunks_mut(bpr))
+                .enumerate()
+                .for_each(|(i, (xi, xs))| {
+                    let (qi, qs) = quant::quantize_row_to_i8_blocks(&x_data[i * k..(i + 1) * k]);
+                    xi.copy_from_slice(&qi);
+                    xs.copy_from_slice(&qs);
+                });
+
+            let mut out_t = vec![0.0f32; n * m]; // [n, m]
+            let wchunk = gemv_chunk(n);
+            out_t
+                .par_chunks_mut(wchunk * m)
+                .enumerate()
+                .for_each(|(ci, oc)| {
+                    let j0 = ci * wchunk;
+                    for (jl, orow) in oc.chunks_mut(m).enumerate() {
+                        let j = j0 + jl;
+                        let wrow = &w_blocks[j * row_bytes..(j + 1) * row_bytes];
+                        for (i, slot) in orow.iter_mut().enumerate() {
+                            // SAFETY: dotprod verified above.
+                            *slot = unsafe {
+                                quant::dot_q8_0_row_sdot(
+                                    wrow,
+                                    &x_i8[i * k..(i + 1) * k],
+                                    &x_scales[i * bpr..(i + 1) * bpr],
+                                )
+                            };
+                        }
+                    }
+                });
+            // Transpose [n, m] → [m, n] (parallel over output rows).
+            out.par_chunks_mut(n).enumerate().for_each(|(i, orow)| {
+                for (j, o) in orow.iter_mut().enumerate() {
+                    *o = out_t[j * m + i];
+                }
+            });
+            return Tensor::from_f32_vec(out, Shape::new([m, n]));
+        }
+
         for i in 0..m {
             let x_row = &x_data[i * k..(i + 1) * k];
             // Per-block activation scales — a single per-row scale is destroyed by
@@ -1062,6 +1114,50 @@ mod tests {
             // dequantizes). Both paths start from the same blocks, so values match exactly.
             // Both paths use the same Q4_0 blocks; differences are accumulation order only.
             assert!((r - q).abs() < 5e-3, "row {i}: ref={r} quant={q}");
+        }
+    }
+
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn q8_0_gemm_path_matches_per_row_path() {
+        if !std::arch::is_aarch64_feature_detected!("dotprod") {
+            return;
+        }
+        // m = 16 triggers the blocked GEMM; compare each row against the m = 1
+        // (per-row GEMV) path — same kernel, same scales → bit-identical.
+        let (m, k, n) = (16usize, 96usize, 24usize);
+        let mut seed = 0x8A8Au64;
+        let mut nf = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
+        };
+        let xv: Vec<f32> = (0..m * k).map(|_| nf() * 0.5).collect();
+        let wv: Vec<f32> = (0..n * k).map(|_| nf() * 0.2).collect();
+        // Build raw Q8_0 blocks for W (row-major, per-32 blocks).
+        let mut wb: Vec<u8> = Vec::with_capacity(n * k / 32 * 34);
+        for row in wv.chunks(k) {
+            for blk in row.chunks(32) {
+                wb.extend_from_slice(&crate::kernels::quant::quantize_q8_0_block(blk));
+            }
+        }
+        let w_q8 = Tensor::from_quant_bytes(&wb, vec![n, k], sapient_core::DType::Q8_0).unwrap();
+
+        let x_all = Tensor::from_f32(&xv, Shape::new([m, k])).unwrap();
+        let full = matmul_nt(&x_all, &w_q8).unwrap().to_f32_vec();
+        for i in 0..m {
+            let x_row = Tensor::from_f32(&xv[i * k..(i + 1) * k], Shape::new([1, k])).unwrap();
+            let want = matmul_nt(&x_row, &w_q8).unwrap().to_f32_vec();
+            for j in 0..n {
+                assert_eq!(
+                    full[i * n + j].to_bits(),
+                    want[j].to_bits(),
+                    "row {i} col {j}: {} vs {}",
+                    full[i * n + j],
+                    want[j]
+                );
+            }
         }
     }
 
