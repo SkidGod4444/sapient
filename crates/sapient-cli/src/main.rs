@@ -1897,6 +1897,13 @@ async fn converse_command(
                 turn.tts_ms
             );
         }
+        println!(
+            "  TTFT  {:>6} ms   (reply start → first token)",
+            turn.ttft_ms
+        );
+        if let Some(fa) = turn.first_audio_ms {
+            println!("  audio {:>6} ms   (reply start → first audio chunk)", fa);
+        }
         let total = stt_ms + turn.gen_ms + turn.tts_ms;
         println!("  total {:>6} ms", total);
         return Ok(());
@@ -1924,11 +1931,21 @@ async fn converse_command(
     let new_vad = || {
         EnergyVad::new(VadConfig {
             frame_samples,
+            // 400 ms hangover (default 600) — the streaming loop wants a snappy
+            // end-of-turn; incremental STT below hides the transcription cost.
+            silence_hang_frames: 20,
             ..VadConfig::default()
         })
     };
     let mut vad = new_vad();
     let mut buf: Vec<f32> = Vec::new();
+
+    // Incremental STT: while the user is still talking, a background worker
+    // re-transcribes the utterance-so-far (snapshots every ~0.5 s). At
+    // end-of-utterance only the silence hangover is new audio, so the last
+    // incremental transcript is used directly — STT leaves the critical path.
+    let live = converse.live_stt();
+    let mut frames_since_feed = 0u32;
 
     let backend_label = converse.backend_label();
     ui::converse_banner(src_rate, stt, model, &backend_label, speak, tts_engine);
@@ -1977,15 +1994,39 @@ async fn converse_command(
                         ui::converse_warn(microphone_guidance());
                     }
 
-                    if let Some(utt) = vad.push(&frame) {
+                    let finalized = vad.push(&frame);
+                    if finalized.is_none() && vad.in_speech() {
+                        frames_since_feed += 1;
+                        if frames_since_feed >= 25 {
+                            // ~every 0.5 s of speech: hand the utterance-so-far
+                            // to the background transcriber (16 kHz mono).
+                            frames_since_feed = 0;
+                            let snap =
+                                sapient_audio::io::resample(vad.speech_so_far(), src_rate, 16_000)?;
+                            live.feed(snap);
+                        }
+                    }
+                    if let Some(utt) = finalized {
                         clear_meter(&mut meter_shown);
+                        frames_since_feed = 0;
                         // Resample the finalized utterance (device rate → 16 kHz) for STT.
                         let utt16 = sapient_audio::io::resample(&utt, src_rate, 16_000)?;
                         let audio_secs = utt16.len() as f32 / 16_000.0;
 
                         ui::converse_status("transcribing…");
                         let t_stt = std::time::Instant::now();
-                        let transcript = converse.transcribe_utterance(&utt16)?;
+                        // Prefer the incremental transcript when it covers the
+                        // utterance minus the trailing hangover (~0.5 s tolerance);
+                        // otherwise fall back to one full pass.
+                        let (inc_text, covered) = live.settle(std::time::Duration::from_millis(900));
+                        let stt_hidden = !inc_text.is_empty()
+                            && utt16.len().saturating_sub(covered) <= 8_000;
+                        let transcript = if stt_hidden {
+                            inc_text
+                        } else {
+                            converse.transcribe_utterance(&utt16)?
+                        };
+                        live.reset();
                         let stt_elapsed = t_stt.elapsed();
 
                         if transcript.is_empty() {
@@ -2029,10 +2070,51 @@ async fn converse_command(
                                 std::time::Duration::from_millis(turn.gen_ms as u64),
                                 tts_info,
                             );
-                            // Wait for queued speaker audio to finish draining.
+                            // Per-stage latency (Phase 10.5): what the user waited.
+                            {
+                                let stt_part = if stt_hidden {
+                                    "stt hidden (streamed)".to_string()
+                                } else {
+                                    format!("stt {} ms", stt_elapsed.as_millis())
+                                };
+                                let audio_part = match turn.first_audio_ms {
+                                    Some(ms) => format!(" · first audio {ms} ms"),
+                                    None => String::new(),
+                                };
+                                ui::converse_note(&format!(
+                                    "⏱ {stt_part} · first token {} ms{audio_part}",
+                                    turn.ttft_ms
+                                ));
+                            }
+                            // Drain queued speaker audio — but keep listening:
+                            // sustained mic energy interrupts playback (barge-in).
                             if let Some(p) = &player {
-                                while p.pending_secs() > 0.05 {
-                                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                let mut consec_loud = 0u32;
+                                'drain: while p.pending_secs() > 0.05 {
+                                    while let Ok(chunk) = frames.try_recv() {
+                                        buf.extend_from_slice(&chunk);
+                                    }
+                                    while buf.len() >= frame_samples {
+                                        let f: Vec<f32> = buf.drain(..frame_samples).collect();
+                                        let rms = (f.iter().map(|s| s * s).sum::<f32>()
+                                            / f.len() as f32)
+                                            .sqrt();
+                                        // High absolute bar: must clear speaker
+                                        // bleed (no echo cancellation yet).
+                                        if rms > 0.035 {
+                                            consec_loud += 1;
+                                        } else {
+                                            consec_loud = 0;
+                                        }
+                                        if consec_loud >= 10 {
+                                            // ~200 ms of sustained speech-level
+                                            // input → cut playback, listen.
+                                            p.clear();
+                                            ui::converse_note("(interrupted — listening)");
+                                            break 'drain;
+                                        }
+                                    }
+                                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                                 }
                             }
                         }

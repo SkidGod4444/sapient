@@ -70,6 +70,12 @@ pub struct Turn {
     pub gen_ms: u128,
     /// Wall-clock time spent synthesizing TTS audio (0 with [`NoopTts`]).
     pub tts_ms: u128,
+    /// Time from reply-start to the first LLM token (prefill latency).
+    pub ttft_ms: u128,
+    /// Time from reply-start to the first audio chunk handed to `on_audio`
+    /// (`None` when no audio was produced — e.g. [`NoopTts`]). This is the
+    /// number the voice loop optimizes: silence between user and assistant.
+    pub first_audio_ms: Option<u128>,
 }
 
 /// Orchestrates STT → LLM → TTS across a conversation, holding chat history.
@@ -124,6 +130,15 @@ impl ConversePipeline {
     /// backend kind, so this reflects the whole compute path's accelerator.
     pub fn backend_label(&self) -> String {
         self.llm.backend_display_label()
+    }
+
+    /// Build a [`LiveStt`] — a background incremental transcriber sharing this
+    /// pipeline's STT engine and options. Feed it snapshots of the in-progress
+    /// utterance while the user is still speaking; by end-of-utterance the
+    /// transcript is (usually) already computed, taking STT off the
+    /// perceived-latency critical path entirely.
+    pub fn live_stt(&self) -> LiveStt {
+        LiveStt::new(self.stt.clone(), self.stt_opts.clone())
     }
 
     /// Transcribe one utterance (mono 16 kHz) to text — STT only, no history
@@ -189,11 +204,16 @@ impl ConversePipeline {
         });
 
         let total_start = Instant::now();
+        let mut ttft_ms = 0u128;
+        let mut first_audio_ms: Option<u128> = None;
         let mut reply = String::new();
         let mut gen_tokens = 0usize;
         let gen_ms; // set exactly once, on the stream-end branch below
         let mut all_audio: Vec<f32> = Vec::new();
-        let mut chunker = SentenceChunker::new(8, 200);
+        // Early-first-clause mode: the speaker starts after the first ~24
+        // chars at a clause boundary instead of the first full sentence —
+        // time-to-first-audio ≈ TTS RTF × one clause, not × one sentence.
+        let mut chunker = SentenceChunker::new(8, 200).with_early_first(24);
         let mut stream = self.llm.chat_stream(&self.history).await;
 
         // Drive the LLM stream and drain synthesized audio concurrently.
@@ -203,6 +223,8 @@ impl ConversePipeline {
                     match got {
                         Some(Ok(audio)) => {
                             if !audio.is_empty() {
+                                first_audio_ms
+                                    .get_or_insert_with(|| total_start.elapsed().as_millis());
                                 on_audio(&audio, sr);
                                 all_audio.extend_from_slice(&audio);
                             }
@@ -214,6 +236,9 @@ impl ConversePipeline {
                 tok = stream.next() => {
                     match tok {
                         Some(t) => {
+                            if gen_tokens == 0 {
+                                ttft_ms = total_start.elapsed().as_millis();
+                            }
                             gen_tokens += 1;
                             reply.push_str(&t);
                             on_token(&t);
@@ -241,6 +266,7 @@ impl ConversePipeline {
             match got {
                 Ok(audio) => {
                     if !audio.is_empty() {
+                        first_audio_ms.get_or_insert_with(|| total_start.elapsed().as_millis());
                         on_audio(&audio, sr);
                         all_audio.extend_from_slice(&audio);
                     }
@@ -260,6 +286,8 @@ impl ConversePipeline {
             gen_tokens,
             gen_ms,
             tts_ms,
+            ttft_ms,
+            first_audio_ms,
         })
     }
 
@@ -295,6 +323,8 @@ impl ConversePipeline {
             gen_tokens: 0,
             gen_ms,
             tts_ms,
+            ttft_ms: 0,
+            first_audio_ms: None,
         }))
     }
 }
@@ -318,6 +348,114 @@ impl<F: Fn(&str) -> Result<Vec<f32>> + Send + Sync> Tts for FnTts<F> {
     }
     fn sample_rate(&self) -> u32 {
         self.sample_rate
+    }
+}
+
+/// Background incremental speech-to-text over a growing utterance.
+///
+/// The live loop feeds monotonically-growing snapshots of the in-progress
+/// utterance (mono 16 kHz); a worker thread re-transcribes the newest snapshot
+/// whenever it is idle (intermediate snapshots are skipped, so the worker never
+/// falls behind). When the utterance finalizes, [`settle`](Self::settle) waits
+/// for the in-flight pass and returns the latest transcript plus how many
+/// samples it covered — if only trailing silence arrived since, the caller can
+/// use it directly and skip the final full transcription.
+pub struct LiveStt {
+    tx: std::sync::mpsc::Sender<Vec<f32>>,
+    state: Arc<(Mutex<LiveSttState>, std::sync::Condvar)>,
+}
+
+#[derive(Default)]
+struct LiveSttState {
+    transcript: String,
+    covered_samples: usize,
+    /// Snapshots submitted vs completed — settle() waits for equality.
+    fed_seq: u64,
+    done_seq: u64,
+}
+
+impl LiveStt {
+    /// Build directly from a transcriber (the [`ConversePipeline::live_stt`]
+    /// path is the normal route; this exists for tests/tools that stream STT
+    /// without a full converse pipeline).
+    pub fn for_transcriber(stt: TranscribePipeline, opts: TranscribeOptions) -> Self {
+        Self::new(stt, opts)
+    }
+
+    fn new(stt: TranscribePipeline, opts: TranscribeOptions) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
+        let state: Arc<(Mutex<LiveSttState>, std::sync::Condvar)> = Arc::default();
+        let wstate = Arc::clone(&state);
+        std::thread::Builder::new()
+            .name("live-stt".into())
+            .spawn(move || {
+                while let Ok(mut snapshot) = rx.recv() {
+                    // Drain to the newest snapshot; count everything as handled.
+                    let mut skipped = 0u64;
+                    while let Ok(newer) = rx.try_recv() {
+                        snapshot = newer;
+                        skipped += 1;
+                    }
+                    let covered = snapshot.len();
+                    let text = stt
+                        .transcribe_samples(&snapshot, &opts)
+                        .map(|t| t.trim().to_string())
+                        .unwrap_or_default();
+                    let (lock, cvar) = &*wstate;
+                    let mut st = lock.lock().unwrap();
+                    // A longer pass may already have landed (shouldn\'t happen
+                    // with one worker, but keep the invariant explicit).
+                    if covered >= st.covered_samples {
+                        st.covered_samples = covered;
+                        st.transcript = text;
+                    }
+                    st.done_seq += 1 + skipped;
+                    cvar.notify_all();
+                }
+            })
+            .expect("spawning live-stt worker");
+        Self { tx, state }
+    }
+
+    /// Feed the utterance-so-far (mono 16 kHz). Non-blocking; the worker picks
+    /// up the newest pending snapshot when idle.
+    pub fn feed(&self, utterance_so_far: Vec<f32>) {
+        if utterance_so_far.is_empty() {
+            return;
+        }
+        let (lock, _) = &*self.state;
+        lock.lock().unwrap().fed_seq += 1;
+        let _ = self.tx.send(utterance_so_far);
+    }
+
+    /// Wait (up to `max_wait`) for all fed snapshots to be transcribed, then
+    /// return `(transcript, samples_covered)` — the caller compares
+    /// `samples_covered` against the finalized utterance length to decide
+    /// whether a final full pass is still needed.
+    pub fn settle(&self, max_wait: std::time::Duration) -> (String, usize) {
+        let (lock, cvar) = &*self.state;
+        let deadline = std::time::Instant::now() + max_wait;
+        let mut st = lock.lock().unwrap();
+        while st.done_seq < st.fed_seq {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let (next, timeout) = cvar.wait_timeout(st, deadline - now).unwrap();
+            st = next;
+            if timeout.timed_out() {
+                break;
+            }
+        }
+        (st.transcript.clone(), st.covered_samples)
+    }
+
+    /// Reset between utterances so a stale transcript can never leak forward.
+    pub fn reset(&self) {
+        let (lock, _) = &*self.state;
+        let mut st = lock.lock().unwrap();
+        st.transcript.clear();
+        st.covered_samples = 0;
     }
 }
 

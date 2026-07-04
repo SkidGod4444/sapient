@@ -106,6 +106,24 @@ impl EnergyVad {
         (self.noise_floor * mult).max(self.cfg.min_rms)
     }
 
+    /// True while inside an utterance (the speech state) — the live loop uses
+    /// this to drive incremental STT on the in-progress utterance.
+    pub fn in_speech(&self) -> bool {
+        matches!(self.state, State::Speech)
+    }
+
+    /// Snapshot of the in-progress utterance samples (empty outside speech).
+    /// Grows as frames are pushed; a streaming transcriber can re-transcribe
+    /// this while the speaker is still talking so the final transcript is
+    /// ready the moment the utterance ends.
+    pub fn speech_so_far(&self) -> &[f32] {
+        if self.in_speech() {
+            &self.buffer
+        } else {
+            &[]
+        }
+    }
+
     /// Push one frame (`cfg.frame_samples` samples). Returns the finalized
     /// utterance samples once a full speech→silence turn completes.
     pub fn push(&mut self, frame: &[f32]) -> Option<Vec<f32>> {
@@ -218,6 +236,50 @@ mod tests {
 
     fn frames(samples: &[f32], n: usize) -> Vec<Vec<f32>> {
         samples.chunks(n).map(|c| c.to_vec()).collect()
+    }
+
+    /// The live-STT taps: `in_speech`/`speech_so_far` expose the in-progress
+    /// utterance while speaking and go quiet after finalization.
+    #[test]
+    fn live_taps_track_in_progress_utterance() {
+        let cfg = VadConfig {
+            silence_hang_frames: 10,
+            min_utterance_frames: 5,
+            ..VadConfig::default()
+        };
+        let mut vad = EnergyVad::new(cfg);
+        let fs = cfg.frame_samples;
+        assert!(!vad.in_speech());
+        assert!(vad.speech_so_far().is_empty());
+
+        // 300 Hz tone frames = speech.
+        let tone: Vec<f32> = (0..30 * fs)
+            .map(|i| 0.25 * (2.0 * std::f32::consts::PI * 300.0 * i as f32 / 16_000.0).sin())
+            .collect();
+        let mut grew = 0usize;
+        for f in tone.chunks(fs) {
+            assert!(vad.push(f).is_none());
+            if vad.in_speech() {
+                let now = vad.speech_so_far().len();
+                assert!(now >= grew, "snapshot must grow monotonically");
+                grew = now;
+            }
+        }
+        assert!(vad.in_speech());
+        assert!(grew >= 20 * fs, "most of the tone should be buffered");
+
+        // Silence until finalization.
+        let silence = vec![0.0f32; fs];
+        let mut fin = None;
+        for _ in 0..20 {
+            if let Some(u) = vad.push(&silence) {
+                fin = Some(u);
+                break;
+            }
+        }
+        assert!(fin.is_some(), "utterance should finalize");
+        assert!(!vad.in_speech());
+        assert!(vad.speech_so_far().is_empty());
     }
 
     /// A tone burst surrounded by silence segments into exactly one utterance.

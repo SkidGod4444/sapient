@@ -18,6 +18,14 @@ pub struct SentenceChunker {
     min_chars: usize,
     /// Force a flush once the buffer reaches this length even without a boundary.
     max_chars: usize,
+    /// Time-to-first-audio mode: while no chunk has been emitted yet, ALSO
+    /// break at a clause boundary (`,;:` + whitespace) once this many chars
+    /// have accumulated — the speaker starts after the first *clause* instead
+    /// of the first sentence. `0` disables. Subsequent chunks use normal
+    /// sentence boundaries (clause-level joins cost a little prosody, so pay
+    /// that price only where it buys perceived latency).
+    early_first_chars: usize,
+    emitted_any: bool,
 }
 
 impl SentenceChunker {
@@ -28,7 +36,16 @@ impl SentenceChunker {
             buf: String::new(),
             min_chars: min_chars.max(1),
             max_chars: max_chars.max(2),
+            early_first_chars: 0,
+            emitted_any: false,
         }
+    }
+
+    /// Enable early-first-chunk mode (see the field docs): the FIRST emitted
+    /// chunk may end at a clause boundary once `n_chars` have accumulated.
+    pub fn with_early_first(mut self, n_chars: usize) -> Self {
+        self.early_first_chars = n_chars;
+        self
     }
 
     /// Feed a streamed text fragment; return any sentences that are now complete.
@@ -54,7 +71,23 @@ impl SentenceChunker {
         // (or end-of-buffer) and sits past `min_chars` of content.
         let bytes = self.buf.as_bytes();
         let mut boundary: Option<usize> = None;
+        // Early-first: before anything has been emitted, a clause boundary
+        // past `early_first_chars` is good enough to start the speaker.
+        if !self.emitted_any && self.early_first_chars > 0 {
+            for (i, &b) in bytes.iter().enumerate() {
+                if matches!(b, b',' | b';' | b':')
+                    && bytes.get(i + 1).is_none_or(|c| c.is_ascii_whitespace())
+                    && self.buf[..=i].trim().chars().count() >= self.early_first_chars
+                {
+                    boundary = Some(i + 1);
+                    break;
+                }
+            }
+        }
         for (i, &b) in bytes.iter().enumerate() {
+            if boundary.is_some_and(|bd| bd <= i) {
+                break; // an earlier (clause) boundary already won
+            }
             if matches!(b, b'.' | b'!' | b'?' | b'\n') {
                 // A newline is itself a terminator. For `.!?`, require the next
                 // char to be whitespace/end so "3.14" / "u.s.a" don't trigger.
@@ -67,8 +100,16 @@ impl SentenceChunker {
                 }
             }
         }
-        // Fall back to a hard flush at a whitespace near max_chars.
-        if boundary.is_none() && self.buf.len() >= self.max_chars {
+        // Fall back to a hard flush at a whitespace near max_chars — with a
+        // much smaller cap for the FIRST chunk in early-first mode (2× the
+        // clause threshold): a reply whose first comma comes late must not
+        // stall the speaker; a word-boundary cut is the bounded worst case.
+        let cap = if !self.emitted_any && self.early_first_chars > 0 {
+            (self.early_first_chars * 2).min(self.max_chars)
+        } else {
+            self.max_chars
+        };
+        if boundary.is_none() && self.buf.len() >= cap {
             // Split at the last whitespace within the buffer to avoid cutting a word.
             boundary = self
                 .buf
@@ -85,6 +126,7 @@ impl SentenceChunker {
             // Boundary was pure whitespace; loop will try again or stop.
             None
         } else {
+            self.emitted_any = true;
             Some(sentence)
         }
     }
@@ -92,6 +134,56 @@ impl SentenceChunker {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn early_first_breaks_at_clause_then_reverts_to_sentences() {
+        let mut c = super::SentenceChunker::new(8, 200).with_early_first(10);
+        // First chunk: clause boundary after >=10 chars.
+        let got = c.push("Sure thing, here is the plan. We start now. ");
+        assert_eq!(
+            got,
+            vec![
+                "Sure thing,".to_string(),
+                "here is the plan.".to_string(),
+                "We start now.".to_string()
+            ]
+        );
+        // After the first emission, commas no longer split.
+        let got = c.push("Second reply, with a comma. ");
+        assert_eq!(got, vec!["Second reply, with a comma.".to_string()]);
+    }
+
+    #[test]
+    fn early_first_word_caps_a_late_clause() {
+        let mut c = super::SentenceChunker::new(8, 200).with_early_first(24);
+        // Streamed word-by-word (like real LLM tokens): no comma in the first
+        // 48 chars → the first chunk hard-cuts at a word boundary at the cap,
+        // BEFORE the sentence's final "." ever arrives.
+        let text = "As a nation built on the principles of freedom and opportunity we act. ";
+        let mut chunks: Vec<String> = Vec::new();
+        for w in text.split_inclusive(' ') {
+            chunks.extend(c.push(w));
+        }
+        chunks.extend(c.flush());
+        assert!(
+            chunks.len() >= 2,
+            "expected an early word-cut chunk: {chunks:?}"
+        );
+        // Bounded by the cap plus at most the word that crossed it.
+        assert!(
+            chunks[0].chars().count() <= 60,
+            "first chunk should be capped: {:?}",
+            chunks[0]
+        );
+        assert!(!chunks[0].ends_with(char::is_whitespace));
+    }
+
+    #[test]
+    fn early_first_disabled_keeps_old_behavior() {
+        let mut c = super::SentenceChunker::new(8, 200);
+        let got = c.push("Sure thing, here is the plan. ");
+        assert_eq!(got, vec!["Sure thing, here is the plan.".to_string()]);
+    }
+
     use super::*;
 
     #[test]

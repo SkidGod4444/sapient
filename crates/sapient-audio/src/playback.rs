@@ -14,6 +14,9 @@ use cpal::SizedSample;
 pub struct SpeakerPlayback {
     _stream: cpal::Stream,
     tx: flume::Sender<f32>,
+    /// Second receiver handle onto the same queue (flume is MPMC): draining it
+    /// steals queued samples from the device callback — instant silence.
+    rx_drain: flume::Receiver<f32>,
     sample_rate: u32,
 }
 
@@ -33,6 +36,7 @@ impl SpeakerPlayback {
         let config: cpal::StreamConfig = supported.into();
 
         let (tx, rx) = flume::unbounded::<f32>();
+        let rx_drain = rx.clone();
 
         let stream = match fmt {
             cpal::SampleFormat::F32 => build_output(&device, &config, channels, rx, |s: f32| s)?,
@@ -49,6 +53,7 @@ impl SpeakerPlayback {
         Ok(Self {
             _stream: stream,
             tx,
+            rx_drain,
             sample_rate,
         })
     }
@@ -61,6 +66,13 @@ impl SpeakerPlayback {
     /// caller wait for playback to finish draining after the last `submit`.
     pub fn pending_secs(&self) -> f32 {
         self.tx.len() as f32 / self.sample_rate.max(1) as f32
+    }
+
+    /// Drop all queued (unplayed) audio immediately — the barge-in primitive.
+    /// The device callback keeps running and emits silence until the next
+    /// [`submit`](Self::submit).
+    pub fn clear(&self) {
+        while self.rx_drain.try_recv().is_ok() {}
     }
 
     /// Queue mono `samples` (at `src_rate`) for playback, resampling to the

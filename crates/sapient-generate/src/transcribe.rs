@@ -134,6 +134,7 @@ impl Default for TranscribeOptions {
 }
 
 /// A loaded Whisper speech-to-text pipeline.
+#[derive(Clone)]
 pub struct TranscribePipeline {
     engine: Arc<Mutex<AudioEngine>>,
     tokenizer: Arc<WhisperTokenizer>,
