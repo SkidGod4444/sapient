@@ -22,6 +22,9 @@ use crate::config::MelConfig;
 
 /// Reusable log-mel front-end: holds the Hann window, mel filterbank, and FFT
 /// plan so repeated `log_mel` calls allocate only per-chunk scratch.
+/// `Clone` is cheap (the FFT plan is an `Arc`) — a live loop clones one for a
+/// background incremental transcriber.
+#[derive(Clone)]
 pub struct MelFrontend {
     cfg: MelConfig,
     window: Vec<f32>,                 // Hann, length n_fft

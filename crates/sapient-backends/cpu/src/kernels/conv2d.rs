@@ -8,6 +8,11 @@ use sapient_core::error::{Result, SapientError};
 use sapient_core::{Shape, Tensor};
 
 /// 2-D convolution: (N, C_in, H, W) → (N, C_out, H_out, W_out).
+/// Per-op profiling counters (accumulated nanoseconds for the im2col build
+/// vs the GEMM inside `conv2d`); the Kokoro decoder profile drains these.
+pub static IM2COL_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static GEMM_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub fn conv2d(
     x: &Tensor,
     weight: &Tensor,
@@ -66,74 +71,116 @@ pub fn conv2d(
     for batch in 0..n {
         for group in 0..g {
             // Build im2col matrix for this (batch, group).
+            let _t_col = std::time::Instant::now();
             let mut col = vec![0.0f32; col_rows * col_cols];
 
             let c_start = group * c_in_g;
 
-            for ci in 0..c_in_g {
-                for ki in 0..kh {
-                    for kj in 0..kw {
-                        let row = (ci * kh + ki) * kw + kj;
+            {
+                use rayon::prelude::*;
+                // Each im2col row is a disjoint slice of `col`; fill rows in
+                // parallel. For the common 1-D case (kh=1, width-only) the
+                // inner loop is a strided gather; stride-1 rows become
+                // contiguous copies.
+                col.par_chunks_mut(col_cols)
+                    .enumerate()
+                    .for_each(|(row, dst)| {
+                        let kj = row % kw;
+                        let ki = (row / kw) % kh;
+                        let ci = row / (kh * kw);
+                        let c = c_start + ci;
+                        let base = batch * (c_in * h_in * w_in) + c * (h_in * w_in);
                         for oh in 0..h_out {
-                            for ow in 0..w_out {
-                                let ih = oh as isize * strides[0] as isize
-                                    + ki as isize * dilations[0] as isize
-                                    - pads[0] as isize;
-                                let iw = ow as isize * strides[1] as isize
-                                    + kj as isize * dilations[1] as isize
-                                    - pads[1] as isize;
-
-                                let val = if ih >= 0
-                                    && ih < h_in as isize
-                                    && iw >= 0
-                                    && iw < w_in as isize
-                                {
-                                    let c = c_start + ci;
-                                    let flat = batch * (c_in * h_in * w_in)
-                                        + c * (h_in * w_in)
-                                        + ih as usize * w_in
-                                        + iw as usize;
-                                    x_data[flat]
-                                } else {
-                                    0.0 // zero-padding
-                                };
-
-                                col[row * col_cols + oh * w_out + ow] = val;
+                            let ih = oh as isize * strides[0] as isize
+                                + ki as isize * dilations[0] as isize
+                                - pads[0] as isize;
+                            let drow = &mut dst[oh * w_out..(oh + 1) * w_out];
+                            if ih < 0 || ih >= h_in as isize {
+                                drow.fill(0.0);
+                                continue;
+                            }
+                            let xrow =
+                                &x_data[base + ih as usize * w_in..base + (ih as usize + 1) * w_in];
+                            let off = kj as isize * dilations[1] as isize - pads[1] as isize;
+                            if strides[1] == 1 {
+                                // Contiguous middle, zero edges.
+                                for (ow, d) in drow.iter_mut().enumerate() {
+                                    let iw = ow as isize + off;
+                                    *d = if iw >= 0 && (iw as usize) < w_in {
+                                        xrow[iw as usize]
+                                    } else {
+                                        0.0
+                                    };
+                                }
+                            } else {
+                                for (ow, d) in drow.iter_mut().enumerate() {
+                                    let iw = ow as isize * strides[1] as isize + off;
+                                    *d = if iw >= 0 && (iw as usize) < w_in {
+                                        xrow[iw as usize]
+                                    } else {
+                                        0.0
+                                    };
+                                }
                             }
                         }
-                    }
-                }
+                    });
             }
-
+            IM2COL_NS.fetch_add(
+                _t_col.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            let _t_gemm = std::time::Instant::now();
             // GEMM: W_group × col → output.
-            // W_group shape: (c_out_g, col_rows)
-            // col shape:     (col_rows, col_cols)
-            // output:        (c_out_g, col_cols)
+            //   W_group (c_out_g, col_rows) × col (col_rows, col_cols)
             let w_off = group * c_out_g * (c_in_g * kh * kw);
             let m = c_out_g;
             let k = col_rows;
             let n2 = col_cols;
-
             let mut gemm_out = vec![0.0f32; m * n2];
-            unsafe {
-                matrixmultiply::sgemm(
-                    m,
-                    k,
-                    n2,
-                    1.0,
-                    w_data[w_off..].as_ptr(),
-                    k as isize,
-                    1,
-                    col.as_ptr(),
-                    n2 as isize,
-                    1,
-                    0.0,
-                    gemm_out.as_mut_ptr(),
-                    n2 as isize,
-                    1,
-                );
+            // Split the GEMM across output-channel row blocks: each block is an
+            // independent sgemm over the SAME k reduction (per-element math and
+            // order unchanged → bit-identical to the single call), writing a
+            // disjoint slice. This was the Kokoro-decoder bottleneck: one
+            // single-threaded sgemm per conv while the other cores idled.
+            {
+                use rayon::prelude::*;
+                let flops = m * k * n2;
+                let mblock = if flops >= (1 << 20) {
+                    m.div_ceil(rayon::current_num_threads().max(1)).max(8)
+                } else {
+                    m // small conv: single block, no spawn overhead
+                };
+                gemm_out
+                    .par_chunks_mut(mblock * n2)
+                    .enumerate()
+                    .for_each(|(bi, out_block)| {
+                        let m0 = bi * mblock;
+                        let mc = out_block.len() / n2;
+                        unsafe {
+                            matrixmultiply::sgemm(
+                                mc,
+                                k,
+                                n2,
+                                1.0,
+                                w_data[w_off + m0 * k..].as_ptr(),
+                                k as isize,
+                                1,
+                                col.as_ptr(),
+                                n2 as isize,
+                                1,
+                                0.0,
+                                out_block.as_mut_ptr(),
+                                n2 as isize,
+                                1,
+                            );
+                        }
+                    });
             }
 
+            GEMM_NS.fetch_add(
+                _t_gemm.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
             // Copy gemm_out into output tensor.
             let c_out_start = group * c_out_g;
             for co in 0..c_out_g {

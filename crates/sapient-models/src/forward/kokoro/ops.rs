@@ -284,7 +284,25 @@ pub fn ada_layer_norm(
 /// `(1 + γ)·x̂ + β`, `[γ, β] = fc(s)`. `x` is `[1, C, L]`, `s` is `[style_dim]`,
 /// `fc_w` is `[2C, style_dim]`, `fc_b` is `[2C]`. Returns `[1, C, L]`.
 /// Used by the predictor's F0/N blocks and the decoder's ResBlocks.
+pub static ADAIN_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub fn ada_in_1d(
+    x: &Tensor,
+    s: &[f32],
+    fc_w: &Tensor,
+    fc_b: Option<&Tensor>,
+    eps: f32,
+) -> Result<Tensor> {
+    let _t = std::time::Instant::now();
+    let r = ada_in_1d_inner(x, s, fc_w, fc_b, eps);
+    ADAIN_NS.fetch_add(
+        _t.elapsed().as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    r
+}
+
+fn ada_in_1d_inner(
     x: &Tensor,
     s: &[f32],
     fc_w: &Tensor,
@@ -452,10 +470,39 @@ pub fn nsf_harmonic_source(
     voiced_threshold: f32,
     upsample_scale: usize,
 ) -> Vec<f32> {
+    nsf_harmonic_source_from(
+        f0_frames,
+        l_linear_w,
+        l_linear_b,
+        sr,
+        harmonic_num,
+        sine_amp,
+        voiced_threshold,
+        upsample_scale,
+        0.0,
+    )
+}
+
+/// [`nsf_harmonic_source`] with an explicit starting phase (in accumulated
+/// cycles). A windowed decode starting at f0 index `a` passes
+/// `Σ_{i<a} f0[i] · upsample / sr` — the exact value the full-utterance cumsum
+/// would have reached — so the sine phase is continuous across window joins.
+#[allow(clippy::too_many_arguments)]
+pub fn nsf_harmonic_source_from(
+    f0_frames: &[f32],
+    l_linear_w: &[f32],
+    l_linear_b: f32,
+    sr: f32,
+    harmonic_num: usize,
+    sine_amp: f32,
+    voiced_threshold: f32,
+    upsample_scale: usize,
+    initial_cycles: f64,
+) -> Vec<f32> {
     let dim = harmonic_num + 1; // fundamental + harmonics (9 for Kokoro)
     let t_up = f0_frames.len() * upsample_scale;
     let mut har = vec![0.0f32; t_up];
-    let mut cycles = 0.0f64; // accumulated cycles = Σ f0/sr (inclusive cumsum)
+    let mut cycles = initial_cycles; // accumulated cycles = Σ f0/sr (inclusive cumsum)
     let two_pi = 2.0 * std::f64::consts::PI;
     for t in 0..t_up {
         let f0 = f0_frames[t / upsample_scale];
@@ -694,6 +741,21 @@ mod tests {
         let want = b.tanh();
         for &v in &sil {
             assert!((v - want).abs() < 1e-6);
+        }
+
+        // Split-with-carried-phase equals one pass (windowed-decode continuity).
+        let f0_all = [120.0f32, 140.0, 90.0, 200.0];
+        let full = nsf_harmonic_source(&f0_all, &w, b, sr, hnum, amp, thr, up);
+        let head = nsf_harmonic_source(&f0_all[..2], &w, b, sr, hnum, amp, thr, up);
+        let carried: f64 = f0_all[..2]
+            .iter()
+            .map(|&f| f as f64 * up as f64 / sr as f64)
+            .sum();
+        let tail = nsf_harmonic_source_from(&f0_all[2..], &w, b, sr, hnum, amp, thr, up, carried);
+        let stitched: Vec<f32> = head.iter().chain(tail.iter()).copied().collect();
+        assert_eq!(stitched.len(), full.len());
+        for (i, (a, c)) in full.iter().zip(&stitched).enumerate() {
+            assert!((a - c).abs() < 1e-4, "sample {i}: {a} vs {c}");
         }
 
         // Constant voiced f0 = 100 Hz → period = sr/f0 = 240 samples; har is

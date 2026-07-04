@@ -9,6 +9,10 @@
 > (auto-pick quantization for available RAM, auto CPU/GPU offload, single static binary).
 
 ## Where we are (v0.4.4)
+- 🚧 **Streaming voice loop (Phase 10 first cut)** — incremental STT during speech
+  (`LiveStt`, transcript ready at end-of-utterance), early-first-clause TTS handoff,
+  barge-in (`SpeakerPlayback::clear` + mic monitor), per-turn latency breakdown.
+  Perceived latency ~4.4 → ~3.1 s (M4 CPU); floor is now Kokoro first-fragment RTF.
 - ✅ **On-device audio (Phase 6)** — `sapient transcribe` (Whisper STT), `sapient speak`
   (Kokoro-82M real-time TTS + Orpheus-3B), and `sapient converse` (live mic→STT→LLM→reply, with
   `--speak` voicing the reply via Kokoro). All pure-Rust, cross-platform, in the default binary.

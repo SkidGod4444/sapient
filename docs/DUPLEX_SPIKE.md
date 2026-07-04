@@ -147,3 +147,39 @@ If, after amortizing the backbone, decoder-only per-chunk latency + minimum
 stable look-ahead for a ≤0.4 s chunk exceeds ~600 ms on commodity CPU, the
 streaming non-AR duplex path is not viable and the fallback is a tightened
 cascade (which the verified evidence does **not** establish is inferior).
+
+
+## Gate 3 (2026-07-04): windowed decoding is NOT viable — measured
+
+Built and measured three streaming designs on the real model (branch
+`feat/kokoro-streaming`, kept as infra + regression record):
+
+1. **Growing-prefix (doubling) schedule** — perceptually fine (prefix decoding
+   is what gate 2 validated) but total decode cost is ~2.3× ⇒ **RTF 1.55 > 1**:
+   underruns mid-reply. Prefix chains can never be gap-free at decoder-RTF
+   ≈ 0.53 (the re-decode sum diverges).
+2. **Rolling windows + halo** (`decode_window`, analytic NSF phase carry —
+   `nsf_harmonic_source_from`): bookkeeping and phase are **byte-exact**
+   (halo = t → max diff 0.000000 vs full decode), but mid-utterance windows
+   diverge **0.45 / 0.34 / 0.20 max-diff at halo 16/32/64**
+   (`kokoro_window_probe`). The slow decay is not a receptive field — it is
+   **AdaIN/InstanceNorm's global time statistics**. Gate 2's "global
+   component" is hereby identified. Rolling windows need a streaming-norm
+   redesign (running/cumulative statistics) to be viable.
+3. **Geometric text ramp** (3→5→8… word pieces, each an independent full
+   synthesis): first audio 5216 → **1001 ms** on a 12-word-lead sentence, but
+   the speak→transcribe round-trip catches real damage — Whisper hears
+   sentence-final prosody at every join ("the quick brown. fox jumps over
+   there. lazy dog") including a mispronunciation. Word-level joins are
+   audibly wrong; clause-level joins are already provided upstream by the
+   converse `SentenceChunker` early-first mode, so a Kokoro-side ramp adds
+   nothing to the live loop.
+
+**Stage profile of a first-clause fragment** (M4, `SAPIENT_KOKORO_TIMING=1`):
+albert 98 ms · prosody 162 ms · f0/n 111 ms · text_encoder 39 ms ·
+**decoder 1332 ms (76%)**. Conclusion: the time-to-first-audio floor is the
+decoder's RTF itself. The two viable paths, in order: **decoder kernel
+optimization** (convs are the 76%), then a **streaming-norm redesign** to
+unlock rolling windows. Until one lands, converse's clause-level pipeline is
+the correct granularity and `Tts::synthesize_streaming`'s default (batch per
+sentence) is what Kokoro uses.
