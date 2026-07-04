@@ -284,7 +284,25 @@ pub fn ada_layer_norm(
 /// `(1 + γ)·x̂ + β`, `[γ, β] = fc(s)`. `x` is `[1, C, L]`, `s` is `[style_dim]`,
 /// `fc_w` is `[2C, style_dim]`, `fc_b` is `[2C]`. Returns `[1, C, L]`.
 /// Used by the predictor's F0/N blocks and the decoder's ResBlocks.
+pub static ADAIN_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub fn ada_in_1d(
+    x: &Tensor,
+    s: &[f32],
+    fc_w: &Tensor,
+    fc_b: Option<&Tensor>,
+    eps: f32,
+) -> Result<Tensor> {
+    let _t = std::time::Instant::now();
+    let r = ada_in_1d_inner(x, s, fc_w, fc_b, eps);
+    ADAIN_NS.fetch_add(
+        _t.elapsed().as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    r
+}
+
+fn ada_in_1d_inner(
     x: &Tensor,
     s: &[f32],
     fc_w: &Tensor,

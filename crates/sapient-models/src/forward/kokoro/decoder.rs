@@ -306,6 +306,15 @@ fn generator(
     }
     let wav = istft(&spec, &ph, fbins, lf, n_fft, hop);
     if timing {
+        use std::sync::atomic::Ordering::Relaxed;
+        let im2col = sapient_backends_cpu::kernels::conv2d::IM2COL_NS.swap(0, Relaxed) / 1_000_000;
+        let gemm = sapient_backends_cpu::kernels::conv2d::GEMM_NS.swap(0, Relaxed) / 1_000_000;
+        let convt = crate::forward::conv::CONVT_NS.swap(0, Relaxed) / 1_000_000;
+        let snake_ms = crate::forward::conv::SNAKE_NS.swap(0, Relaxed) / 1_000_000;
+        let adain_ms = super::ops::ADAIN_NS.swap(0, Relaxed) / 1_000_000;
+        eprintln!(
+            "    [ops] im2col {im2col} ms · gemm {gemm} ms · conv_transpose {convt} ms · snake {snake_ms} ms · adain {adain_ms} ms (thread-summed)"
+        );
         eprintln!(
             "    [gen] src+convs {t_src_convs} ms · resblocks {t_resblocks} ms · post+istft {} ms",
             _tp.elapsed().as_millis()
