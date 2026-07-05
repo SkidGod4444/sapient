@@ -129,7 +129,18 @@ impl ForwardEngine {
                 Self::from_gguf_with_backend(info, path, backend)
             }
             WeightFormat::Safetensors | WeightFormat::PyTorchBin => match info.arch {
-                ArchType::Llama | ArchType::Qwen | ArchType::Gemma | ArchType::Mixtral => {
+                ArchType::Llama
+                | ArchType::Qwen
+                | ArchType::Gemma
+                | ArchType::Mixtral
+                | ArchType::Glm4Moe => {
+                    // MoE (Mixtral etc.) runs only on the CPU engine so far, and is
+                    // detected by config, not ArchType (a Mixtral safetensors repo
+                    // is ArchType::Mixtral, but a Qwen-MoE one is ArchType::Qwen).
+                    if info.is_moe() {
+                        let weights = crate::weights::load_hf_weights(weight_paths)?;
+                        return Self::build_moe_cpu(info, weights, backend);
+                    }
                     // wgpu when explicitly requested or auto-selected on a -gpu build
                     // (MLX/Metal is handled inside LlamaForward's backend dispatch).
                     if use_wgpu_engine(backend) && !use_mlx_engine(backend) {
@@ -207,7 +218,18 @@ impl ForwardEngine {
             )?;
         }
         match info.arch {
-            ArchType::Llama | ArchType::Qwen | ArchType::Gemma | ArchType::Mixtral => {
+            ArchType::Llama
+            | ArchType::Qwen
+            | ArchType::Gemma
+            | ArchType::Mixtral
+            | ArchType::Glm4Moe => {
+                // MoE (detected by config, not ArchType — a Mixtral GGUF reports
+                // `general.architecture = "llama"`). Stacked expert tensors are
+                // split into per-expert 2-D weights, then the CPU engine runs it.
+                if info.is_moe() {
+                    crate::gguf_weights::split_moe_gguf_experts(&mut weights, &info)?;
+                    return Self::build_moe_cpu(info, weights, backend);
+                }
                 // Backend precedence (so the compiled binary variant decides):
                 // 1. MLX (Metal) — native lazy-graph, preferred on Apple Silicon.
                 if use_mlx_engine(backend) {
@@ -251,6 +273,37 @@ impl ForwardEngine {
                  try a Llama-family GGUF model or use safetensors weights"
             ),
         }
+    }
+
+    /// Build a Mixture-of-Experts model on the CPU `LlamaForward` engine.
+    ///
+    /// MoE is CPU-only for this first cut: MLX (`MlxForwardEngine`) and wgpu know
+    /// nothing about experts, so an explicitly-requested GPU backend errors, and
+    /// `Auto` on an accelerated build silently falls back to CPU with a warning.
+    fn build_moe_cpu(
+        info: ModelInfo,
+        weights: std::collections::HashMap<String, sapient_core::Tensor>,
+        backend: LlmBackendKind,
+    ) -> Result<Self> {
+        match backend {
+            LlmBackendKind::Metal | LlmBackendKind::Wgpu => bail!(
+                "Mixture-of-Experts models are only supported on the CPU backend so far \
+                 — re-run with `--backend cpu` (MoE on Metal/wgpu is not implemented yet)"
+            ),
+            _ => {
+                if use_mlx_engine(backend) || use_wgpu_engine(backend) {
+                    tracing::warn!(
+                        "MoE model detected — using the CPU engine \
+                         (GPU-accelerated MoE is not implemented yet)"
+                    );
+                }
+            }
+        }
+        Ok(Self::Llama(LlamaForward::from_weights_with_backend(
+            info,
+            weights,
+            LlmBackendKind::Cpu,
+        )?))
     }
 
     /// Build the wgpu GPU engine from already-loaded weights (GGUF path).

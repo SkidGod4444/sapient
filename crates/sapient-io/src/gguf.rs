@@ -227,6 +227,13 @@ impl GgufValue {
             _ => None,
         }
     }
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(v) => Some(*v),
+            Self::U8(v) => Some(*v != 0),
+            _ => None,
+        }
+    }
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Self::Str(s) => Some(s.as_str()),

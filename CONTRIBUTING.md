@@ -132,10 +132,15 @@ When adding a dependency, keep layers acyclic — lower crates must not depend o
 
 ### Key subsystems to know before contributing
 
-**Two forward engines, not one per architecture.** Only `LlamaForward` and `PhiForward` are wired
-to the live chat `Pipeline`. Architecture builders in `sapient-models/src/architectures/` target
-the IR graph path and are **not** used during inference. Adding a new model means adding a forward
-engine, not an architecture builder (unless it is for the graph path).
+**Forward engines, not one per architecture.** `LlamaForward`, `PhiForward`, and `Gemma3Forward`
+are wired to the live chat `Pipeline`. Architecture builders in `sapient-models/src/architectures/`
+target the IR graph path and are **not** used during inference. Adding a new model usually means
+adding (or extending) a forward engine, not an architecture builder (unless it is for the graph
+path). Some variants extend an existing engine rather than fork it: **Mixtral-class sparse MoE**
+lives as a per-layer `Ffn::{Dense, Moe}` branch **inside `LlamaForward`** (shared attention/KV/RoPE;
+only the FFN block differs), detected by config (`ModelInfo.moe`), not `ArchType` — a Mixtral GGUF
+reports arch `llama`. See the MoE section in `CLAUDE.md` for the routing math, the two GGUF expert
+formats, and the CPU-only backend gate.
 
 **Audio (speech-to-text) is a separate path.** `WhisperForward`/`AudioEngine`
 (`forward/whisper.rs`) and `TranscribePipeline` (`sapient-generate`) are independent of the text

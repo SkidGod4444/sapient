@@ -5,21 +5,48 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use sapient_core::{DType, Tensor};
+use sapient_hub::model_info::ModelInfo;
 
 const HF_PREFIX: &str = "model.";
 
-/// Load a GGUF file and remap tensor names to HuggingFace `model.*` keys.
+/// Expand a GGUF path to all shards of its split set (`-NNNNN-of-MMMMM.gguf`),
+/// discovered as sibling files in the same directory; a single-file GGUF returns
+/// just itself. So the caller only needs shard 1 (which carries the metadata).
+fn gguf_shard_paths(path: &Path) -> Vec<std::path::PathBuf> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    match sapient_hub::gguf_split_shards(name) {
+        Some(shard_names) => {
+            let dir = path.parent().unwrap_or_else(|| Path::new("."));
+            shard_names.into_iter().map(|n| dir.join(n)).collect()
+        }
+        None => vec![path.to_path_buf()],
+    }
+}
+
+/// Load a GGUF file (or all shards of a split set) and remap tensor names to
+/// HuggingFace `model.*` keys.
 pub fn load_gguf_hf_weights(path: &Path) -> Result<HashMap<String, Tensor>> {
-    let raw = sapient_io::GgufLoader::load_tensors(path)
-        .with_context(|| format!("failed to load GGUF {}", path.display()))?;
+    let mut raw = HashMap::new();
+    for shard in gguf_shard_paths(path) {
+        let t = sapient_io::GgufLoader::load_tensors(&shard)
+            .with_context(|| format!("failed to load GGUF {}", shard.display()))?;
+        raw.extend(t);
+    }
     map_gguf_tensors_to_hf(raw)
 }
 
-/// Load a GGUF file via memory-mapping and remap tensor names to HF layout.
+/// Load a GGUF file (or split set) via memory-mapping and remap to HF layout.
 /// Q4_0/Q8_0 tensors point directly into the mmap'd file — zero heap copy.
 pub fn load_gguf_hf_weights_mmap(path: &Path) -> Result<HashMap<String, Tensor>> {
-    let (_, raw) = sapient_io::GgufLoader::load_tensors_mmap(path)
-        .with_context(|| format!("failed to mmap GGUF {}", path.display()))?;
+    let mut raw = HashMap::new();
+    for shard in gguf_shard_paths(path) {
+        let (_, t) = sapient_io::GgufLoader::load_tensors_mmap(&shard)
+            .with_context(|| format!("failed to mmap GGUF {}", shard.display()))?;
+        raw.extend(t);
+    }
     map_gguf_tensors_to_hf(raw)
 }
 
@@ -164,6 +191,77 @@ fn slice_rows(t: &Tensor, start_row: usize, nrows: usize) -> Result<Tensor> {
     }
 }
 
+/// Split the **stacked** 3-D MoE expert tensors of a GGUF into per-expert 2-D
+/// weights, so the CPU MoE forward path is format-agnostic (identical keys to the
+/// HF safetensors layout).
+///
+/// llama.cpp packs a layer's experts into one tensor per projection:
+/// `ffn_gate_exps` / `ffn_up_exps` / `ffn_down_exps` (mapped here to
+/// `block_sparse_moe.experts_stacked.{w1,w3,w2}`), loaded in ggml `ne` order
+/// `[d0, d1, n_expert]` with the expert axis **outermost** (slowest-varying). So
+/// expert `e`'s matrix is the contiguous byte range `[e·eb, (e+1)·eb)` and its HF
+/// `[out, in]` shape is `[d1, d0]` — the same axis swap the 2-D loader applies.
+/// `d0·d1` is always a whole number of quant blocks (hidden/ff are multiples of
+/// 256), so the byte split never straddles a block boundary. This runs before the
+/// engine's online-quant / repack passes, which then see ordinary 2-D experts.
+pub fn split_moe_gguf_experts(
+    weights: &mut HashMap<String, Tensor>,
+    info: &ModelInfo,
+) -> Result<()> {
+    let Some(moe) = &info.moe else {
+        return Ok(());
+    };
+    let n_expert = moe.num_experts;
+    for layer in 0..info.num_hidden_layers {
+        for w in ["w1", "w3", "w2"] {
+            let key =
+                format!("{HF_PREFIX}layers.{layer}.block_sparse_moe.experts_stacked.{w}.weight");
+            let Some(t) = weights.remove(&key) else {
+                continue;
+            };
+            let dims = t.shape().dims().to_vec();
+            if dims.len() != 3 {
+                bail!("stacked MoE tensor '{key}' expected 3-D [d0,d1,n_expert], got {dims:?}");
+            }
+            let (d0, d1, ne) = (dims[0], dims[1], dims[2]);
+            if ne != n_expert {
+                bail!("stacked MoE tensor '{key}' has {ne} experts, config declares {n_expert}");
+            }
+            let dtype = t.dtype();
+            let expert_bytes = dtype.byte_count(d0 * d1);
+            if expert_bytes * ne > t.as_bytes().len() {
+                bail!(
+                    "stacked MoE tensor '{key}' buffer too small: {} < {}",
+                    t.as_bytes().len(),
+                    expert_bytes * ne
+                );
+            }
+            // ZERO-COPY: each per-expert tensor SHARES the stacked buffer (mmap or
+            // heap) at a byte offset — no expert data is copied. All MoE models
+            // mmap, so this keeps peak RSS ≈ file size instead of ~2× (a 63 GB
+            // GLM-4.5-Air measured 119 GB with the byte-copy → near-OOM thrashing
+            // on the 122 GB box, decode 0.34 tok/s). The per-expert views stay
+            // mmap'd, so the aarch64 Q4_K→R4 repack (heap-only) skips them — fine,
+            // since R4 doesn't help m=1 decode anyway.
+            for e in 0..ne {
+                // Per-expert HF 2-D shape is [out, in] = [d1, d0] (reverse of ggml ne).
+                let expert = Tensor::from_buffer(
+                    sapient_core::Shape::new(vec![d1, d0]),
+                    dtype,
+                    t.buffer().clone(),
+                    t.offset() + e * expert_bytes,
+                )
+                .map_err(|err| anyhow::anyhow!("{err}"))?;
+                weights.insert(
+                    format!("{HF_PREFIX}layers.{layer}.block_sparse_moe.experts.{e}.{w}.weight"),
+                    expert,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Prepare Phi-family GGUF weights for `PhiForward`. Phi GGUFs fuse Q/K/V into one
 /// `attn_qkv` tensor (mapped to `self_attn.qkv_proj`) which we split into separate
 /// q/k/v by GQA dims; Phi-3/4 additionally fuse gate+up into `ffn_up` (mapped to
@@ -264,9 +362,39 @@ pub fn map_gguf_tensor_name(name: &str) -> Option<String> {
         "output_norm.weight" | "norm.weight" => Some(format!("{HF_PREFIX}norm.weight")),
         "output.weight" | "lm_head.weight" => Some("lm_head.weight".into()),
         key if key.starts_with("model.") => Some(key.to_string()),
+        // GLM4-MoE / DeepSeek router correction bias `blk.{i}.exp_probs_b.bias`.
+        // Handled here (not `map_blk_tensor`, which would append a stray `.bias`)
+        // so the key exactly matches the `e_score_correction_bias` lookup in moe_ffn.
+        key if key.starts_with("blk.") && key.contains(".exp_probs_b") => {
+            let layer = key.strip_prefix("blk.")?.split('.').next()?;
+            if !layer.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            Some(format!(
+                "{HF_PREFIX}layers.{layer}.block_sparse_moe.gate.e_score_correction_bias"
+            ))
+        }
         key if key.starts_with("blk.") => map_blk_tensor(key),
         _ => None,
     }
+}
+
+/// Parse an older-style MoE per-expert projection suffix (`ffn_gate.3`,
+/// `ffn_up.0`, `ffn_down.7`) into `(canonical_proj, expert_index)` — e.g.
+/// `("w1", "3")`. Returns `None` for dense projections (`ffn_gate`, no index) and
+/// everything else, so it never shadows the dense arms.
+fn expert_proj_2d(suffix: &str) -> Option<(&'static str, &str)> {
+    let (proj, e) = suffix.rsplit_once('.')?;
+    if e.is_empty() || !e.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let w = match proj {
+        "ffn_gate" => "w1",
+        "ffn_up" => "w3",
+        "ffn_down" => "w2",
+        _ => return None,
+    };
+    Some((w, e))
 }
 
 fn map_blk_tensor(key: &str) -> Option<String> {
@@ -296,9 +424,29 @@ fn map_blk_tensor(key: &str) -> Option<String> {
         "attn_qkv" => format!("layers.{layer}.self_attn.qkv_proj"),
         "attn_output" => format!("layers.{layer}.self_attn.o_proj"),
         "ffn_norm" => format!("layers.{layer}.post_attention_layernorm"),
+        // GLM4-MoE names the post-attention norm `post_attention_norm`.
+        "post_attention_norm" => format!("layers.{layer}.post_attention_layernorm"),
         "ffn_gate" => format!("layers.{layer}.mlp.gate_proj"),
         "ffn_up" => format!("layers.{layer}.mlp.up_proj"),
         "ffn_down" => format!("layers.{layer}.mlp.down_proj"),
+        // GLM4-MoE / DeepSeek shared expert (`*_shexp`, always-on FFN).
+        "ffn_gate_shexp" => format!("layers.{layer}.block_sparse_moe.shared_expert.w1"),
+        "ffn_up_shexp" => format!("layers.{layer}.block_sparse_moe.shared_expert.w3"),
+        "ffn_down_shexp" => format!("layers.{layer}.block_sparse_moe.shared_expert.w2"),
+        // MoE router (Mixtral folded into the `llama` arch).
+        "ffn_gate_inp" => format!("layers.{layer}.block_sparse_moe.gate"),
+        // MoE experts, NEWER stacked format: `*_exps` is all experts in one 3-D
+        // blob `[.., .., n_expert]` — `split_moe_gguf_experts` slices them per-expert.
+        "ffn_gate_exps" => format!("layers.{layer}.block_sparse_moe.experts_stacked.w1"),
+        "ffn_up_exps" => format!("layers.{layer}.block_sparse_moe.experts_stacked.w3"),
+        "ffn_down_exps" => format!("layers.{layer}.block_sparse_moe.experts_stacked.w2"),
+        // MoE experts, OLDER per-expert format (TheBloke Mixtral): each expert is
+        // its own 2-D tensor `ffn_{gate,up,down}.{e}` — maps straight to the
+        // canonical per-expert key (no split needed).
+        s if expert_proj_2d(s).is_some() => {
+            let (w, e) = expert_proj_2d(s).unwrap();
+            format!("layers.{layer}.block_sparse_moe.experts.{e}.{w}")
+        }
         _ => return None,
     };
 
@@ -368,5 +516,138 @@ mod tests {
             map_gguf_tensor_name("output.weight").as_deref(),
             Some("lm_head.weight")
         );
+    }
+
+    #[test]
+    fn maps_mixtral_moe_gguf_names() {
+        // Router.
+        assert_eq!(
+            map_gguf_tensor_name("blk.0.ffn_gate_inp.weight").as_deref(),
+            Some("model.layers.0.block_sparse_moe.gate.weight")
+        );
+        // NEWER stacked format (Qwen3-A3B / modern Mixtral requants): `*_exps`.
+        assert_eq!(
+            map_gguf_tensor_name("blk.3.ffn_gate_exps.weight").as_deref(),
+            Some("model.layers.3.block_sparse_moe.experts_stacked.w1.weight")
+        );
+        assert_eq!(
+            map_gguf_tensor_name("blk.3.ffn_up_exps.weight").as_deref(),
+            Some("model.layers.3.block_sparse_moe.experts_stacked.w3.weight")
+        );
+        assert_eq!(
+            map_gguf_tensor_name("blk.3.ffn_down_exps.weight").as_deref(),
+            Some("model.layers.3.block_sparse_moe.experts_stacked.w2.weight")
+        );
+        // OLDER per-expert format (TheBloke Mixtral): `ffn_{gate,up,down}.{e}`.
+        assert_eq!(
+            map_gguf_tensor_name("blk.0.ffn_gate.5.weight").as_deref(),
+            Some("model.layers.0.block_sparse_moe.experts.5.w1.weight")
+        );
+        assert_eq!(
+            map_gguf_tensor_name("blk.0.ffn_up.5.weight").as_deref(),
+            Some("model.layers.0.block_sparse_moe.experts.5.w3.weight")
+        );
+        assert_eq!(
+            map_gguf_tensor_name("blk.7.ffn_down.0.weight").as_deref(),
+            Some("model.layers.7.block_sparse_moe.experts.0.w2.weight")
+        );
+        // Dense projections (no expert index) must NOT be mistaken for experts.
+        assert_eq!(
+            map_gguf_tensor_name("blk.0.ffn_gate.weight").as_deref(),
+            Some("model.layers.0.mlp.gate_proj.weight")
+        );
+    }
+
+    #[test]
+    fn maps_glm4moe_gguf_names() {
+        // GLM4-MoE FFN norm name + shared expert + correction bias.
+        assert_eq!(
+            map_gguf_tensor_name("blk.1.post_attention_norm.weight").as_deref(),
+            Some("model.layers.1.post_attention_layernorm.weight")
+        );
+        assert_eq!(
+            map_gguf_tensor_name("blk.1.ffn_gate_shexp.weight").as_deref(),
+            Some("model.layers.1.block_sparse_moe.shared_expert.w1.weight")
+        );
+        assert_eq!(
+            map_gguf_tensor_name("blk.1.ffn_down_shexp.weight").as_deref(),
+            Some("model.layers.1.block_sparse_moe.shared_expert.w2.weight")
+        );
+        // Correction bias: NO stray `.bias` — must match the moe_ffn lookup exactly.
+        assert_eq!(
+            map_gguf_tensor_name("blk.1.exp_probs_b.bias").as_deref(),
+            Some("model.layers.1.block_sparse_moe.gate.e_score_correction_bias")
+        );
+        // Stacked experts + router are shared with Mixtral.
+        assert_eq!(
+            map_gguf_tensor_name("blk.1.ffn_gate_exps.weight").as_deref(),
+            Some("model.layers.1.block_sparse_moe.experts_stacked.w1.weight")
+        );
+    }
+
+    // A tiny MoE ModelInfo with `n_expert` experts and one layer.
+    fn tiny_moe_info(n_expert: usize) -> ModelInfo {
+        let cfg = format!(
+            r#"{{"architectures":["MixtralForCausalLM"],"model_type":"mixtral",
+                 "vocab_size":32,"hidden_size":4,"num_hidden_layers":1,
+                 "num_attention_heads":2,"num_key_value_heads":2,"intermediate_size":6,
+                 "max_position_embeddings":64,"rms_norm_eps":1e-5,"rope_theta":1e6,
+                 "num_local_experts":{n_expert},"num_experts_per_tok":2}}"#
+        );
+        ModelInfo::from_json_str(&cfg).unwrap()
+    }
+
+    #[test]
+    fn split_moe_experts_slices_stacked_blob_correctly() {
+        // Real GGUF experts are quantized (Q4_K/Q6_K/Q8_0); use Q8_0 here so the test
+        // exercises the actual byte path (`as_quant_blocks`), and — since the split is
+        // now ZERO-COPY (per-expert views sharing the stacked buffer at a byte offset)
+        // — proves each view reads exactly its own expert's bytes, not the neighbour's.
+        // Stacked ggml layout is `[d0, d1, n_expert]`, expert axis outermost; each
+        // per-expert output is `[d1, d0]` = HF `[out, in]`.
+        let (d0, d1, ne) = (32usize, 2usize, 2usize); // d0*d1 = 64 = 2 Q8_0 blocks/expert
+        let eb = DType::Q8_0.byte_count(d0 * d1); // 68 bytes/expert
+                                                  // Distinct bytes per expert so any mis-slice (or unbounded read) is detectable.
+        let expert0: Vec<u8> = (0..eb).map(|i| (i % 251) as u8).collect();
+        let expert1: Vec<u8> = (0..eb).map(|i| (100 + i % 151) as u8).collect();
+        let mut buf = expert0.clone();
+        buf.extend_from_slice(&expert1);
+        let stacked = Tensor::from_quant_bytes(&buf, vec![d0, d1, ne], DType::Q8_0).unwrap();
+
+        let mut weights = HashMap::new();
+        weights.insert(
+            "model.layers.0.block_sparse_moe.experts_stacked.w1.weight".to_string(),
+            stacked,
+        );
+        split_moe_gguf_experts(&mut weights, &tiny_moe_info(ne)).unwrap();
+
+        // The stacked key is consumed; per-expert 2-D [d1,d0] tensors appear.
+        assert!(!weights.contains_key("model.layers.0.block_sparse_moe.experts_stacked.w1.weight"));
+        let e0 = weights
+            .get("model.layers.0.block_sparse_moe.experts.0.w1.weight")
+            .unwrap();
+        let e1 = weights
+            .get("model.layers.0.block_sparse_moe.experts.1.w1.weight")
+            .unwrap();
+        assert_eq!(
+            e0.shape().dims(),
+            &[d1, d0],
+            "per-expert shape is [out, in]"
+        );
+        assert_eq!(e0.as_quant_blocks(), expert0.as_slice());
+        assert_eq!(e1.as_quant_blocks(), expert1.as_slice());
+    }
+
+    #[test]
+    fn split_moe_experts_rejects_expert_count_mismatch() {
+        let (d0, d1, ne) = (4usize, 6usize, 3usize);
+        let stacked = Tensor::from_f32_vec(vec![0.0; d0 * d1 * ne], vec![d0, d1, ne]).unwrap();
+        let mut weights = HashMap::new();
+        weights.insert(
+            "model.layers.0.block_sparse_moe.experts_stacked.w1.weight".to_string(),
+            stacked,
+        );
+        // Config declares 2 experts but the blob has 3 → must error, not silently mis-split.
+        assert!(split_moe_gguf_experts(&mut weights, &tiny_moe_info(2)).is_err());
     }
 }

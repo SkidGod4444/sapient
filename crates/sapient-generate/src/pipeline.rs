@@ -164,12 +164,15 @@ impl Pipeline {
         // GGUF-only repos: the hub's config_path is a sentinel pointing at the
         // GGUF file itself.  Route directly to from_gguf_opts instead of
         // trying to parse a config.json that doesn't exist.
-        let single_gguf = model_files.weight_paths.len() == 1
-            && model_files.weight_paths[0]
-                .extension()
-                .and_then(|e| e.to_str())
-                == Some("gguf");
-        if single_gguf {
+        // GGUF-only repo (no config.json) — including a multi-shard split GGUF
+        // (GLM-4.5-Air Q4_K_M is 2 shards). Route to the GGUF path; shard 1
+        // (weight_paths[0]) carries the metadata and the loader discovers the rest.
+        let is_gguf = !model_files.weight_paths.is_empty()
+            && model_files
+                .weight_paths
+                .iter()
+                .all(|p| p.extension().and_then(|e| e.to_str()) == Some("gguf"));
+        if is_gguf {
             return Self::from_gguf_opts(&model_files.weight_paths[0], backend, opts.force_mmap)
                 .await;
         }
@@ -307,16 +310,23 @@ impl Pipeline {
         let model_info = ModelInfo::from_gguf_metadata(&metadata)
             .context("failed to build ModelInfo from GGUF metadata")?;
 
-        // Decide loading strategy: mmap if forced or if file won't fit in free RAM.
+        // Decide loading strategy: mmap if forced, for MoE models, or if the file
+        // won't fit in free RAM. MoE models are large (the "big models on edge"
+        // case) and the heap loader copies each tensor out of a whole-file buffer
+        // (~2× file peak — e.g. 49 GB for a 26 GB Mixtral); mmap makes the weights
+        // zero-copy (RSS ≈ file size) and, as a bonus, skips the Q4_K→R4 expert
+        // repack, which measured *slower* for m=1 MoE decode.
         let file_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         let avail = available_ram_bytes();
-        let use_mmap = force_mmap || (avail > 0 && file_bytes > avail * 4 / 5);
+        let use_mmap =
+            force_mmap || model_info.is_moe() || (avail > 0 && file_bytes > avail * 4 / 5);
 
         if use_mmap {
             debug!(
-                "Using mmap GGUF loading (file {:.1} GB, available RAM {:.1} GB)",
+                "Using mmap GGUF loading (file {:.1} GB, available RAM {:.1} GB, moe={})",
                 file_bytes as f64 / 1e9,
                 avail as f64 / 1e9,
+                model_info.is_moe(),
             );
         }
 

@@ -181,6 +181,7 @@ impl VlmPipeline {
             rope_theta: t["rope_theta"].as_f64().unwrap_or(100_000.0),
             partial_rotary_factor: 1.0,
             head_dim: hidden / heads,
+            moe: None,
             raw: serde_json::Value::Null,
         };
 

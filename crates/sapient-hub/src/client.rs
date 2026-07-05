@@ -265,6 +265,19 @@ impl HubClient {
             match fmt.as_str() {
                 "gguf" => {
                     if let Some(name) = select_best_gguf(&filenames) {
+                        // Split GGUF (`-NNNNN-of-MMMMM.gguf`, e.g. GLM-4.5-Air Q4_K_M
+                        // ≈ 63 GB) → download ALL shards. Sorted so weight_paths[0]
+                        // is shard 1 (it carries the full metadata).
+                        if let Some(shards) = crate::gguf::gguf_split_shards(name) {
+                            debug!("Split GGUF: {} shards", shards.len());
+                            let mut paths = if shards.len() > 1 && self.opts.fast_download {
+                                self.download_files_parallel(model_id, &shards).await?
+                            } else {
+                                self.download_files_sequential(repo, &shards).await?
+                            };
+                            paths.sort();
+                            return Ok(paths);
+                        }
                         let path = repo
                             .get(name)
                             .await
