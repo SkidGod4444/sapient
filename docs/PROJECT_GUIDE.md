@@ -276,7 +276,10 @@ The real generation math: how to run a Phi or Llama-style model layer by layer.
     **Mixtral-class sparse-MoE** path as a per-layer `Ffn::{Dense, Moe}` branch — the router
     (softmax → top-k → renorm) picks a few of many experts per token, so a 47B model decodes at
     ~13B cost. Detected by config (`ModelInfo.moe`), not architecture; CPU-only for now; handles
-    both GGUF expert layouts (stacked `*_exps` and per-expert 2-D) and safetensors. See `CLAUDE.md`.
+    both GGUF expert layouts (stacked `*_exps` and per-expert 2-D) and safetensors. Also runs
+    **GLM-4.5-Air** (`Glm4Moe`, 106B-A12B) — the DeepSeek-V3-style sigmoid gate + correction bias
+    + shared expert + partial RoPE, with split-GGUF loading and a zero-copy stacked-expert split;
+    decode-verified coherent on a Jetson. See `CLAUDE.md`.
   - `forward/phi.rs` — the **Phi engine**: LayerNorm with biases, partial RoPE, parallel
     attention+MLP block, and the `<final_layernorm>` + `lm_head` bias.
   - `forward/mlx_engine.rs` — the **native Metal engine** (`MlxForwardEngine`, Apple

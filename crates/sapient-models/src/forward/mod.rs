@@ -129,7 +129,11 @@ impl ForwardEngine {
                 Self::from_gguf_with_backend(info, path, backend)
             }
             WeightFormat::Safetensors | WeightFormat::PyTorchBin => match info.arch {
-                ArchType::Llama | ArchType::Qwen | ArchType::Gemma | ArchType::Mixtral => {
+                ArchType::Llama
+                | ArchType::Qwen
+                | ArchType::Gemma
+                | ArchType::Mixtral
+                | ArchType::Glm4Moe => {
                     // MoE (Mixtral etc.) runs only on the CPU engine so far, and is
                     // detected by config, not ArchType (a Mixtral safetensors repo
                     // is ArchType::Mixtral, but a Qwen-MoE one is ArchType::Qwen).
@@ -214,7 +218,11 @@ impl ForwardEngine {
             )?;
         }
         match info.arch {
-            ArchType::Llama | ArchType::Qwen | ArchType::Gemma | ArchType::Mixtral => {
+            ArchType::Llama
+            | ArchType::Qwen
+            | ArchType::Gemma
+            | ArchType::Mixtral
+            | ArchType::Glm4Moe => {
                 // MoE (detected by config, not ArchType — a Mixtral GGUF reports
                 // `general.architecture = "llama"`). Stacked expert tensors are
                 // split into per-expert 2-D weights, then the CPU engine runs it.

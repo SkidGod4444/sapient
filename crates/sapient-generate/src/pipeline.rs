@@ -164,12 +164,15 @@ impl Pipeline {
         // GGUF-only repos: the hub's config_path is a sentinel pointing at the
         // GGUF file itself.  Route directly to from_gguf_opts instead of
         // trying to parse a config.json that doesn't exist.
-        let single_gguf = model_files.weight_paths.len() == 1
-            && model_files.weight_paths[0]
-                .extension()
-                .and_then(|e| e.to_str())
-                == Some("gguf");
-        if single_gguf {
+        // GGUF-only repo (no config.json) — including a multi-shard split GGUF
+        // (GLM-4.5-Air Q4_K_M is 2 shards). Route to the GGUF path; shard 1
+        // (weight_paths[0]) carries the metadata and the loader discovers the rest.
+        let is_gguf = !model_files.weight_paths.is_empty()
+            && model_files
+                .weight_paths
+                .iter()
+                .all(|p| p.extension().and_then(|e| e.to_str()) == Some("gguf"));
+        if is_gguf {
             return Self::from_gguf_opts(&model_files.weight_paths[0], backend, opts.force_mmap)
                 .await;
         }

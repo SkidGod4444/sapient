@@ -145,10 +145,10 @@ impl LlamaForward {
     ) -> Result<Self> {
         let prefix = detect_weight_prefix(&weights);
 
-        // MoE support gate: this first cut implements Mixtral-class routing
-        // (softmax gate, top-k renorm, no shared experts). DeepSeek/GLM sigmoid
-        // routing (group-limited, scaled) and shared experts are parsed but not
-        // yet executed — fail loudly rather than route silently-wrong.
+        // MoE support gate: softmax (Mixtral) and sigmoid (GLM-4.5-Air: correction
+        // bias + shared expert) routing are implemented; group-limited routing
+        // (`n_group > 1`, DeepSeek-V3/GLM-5.2) fails loudly rather than route
+        // silently-wrong.
         if let Some(moe) = &info.moe {
             validate_moe_support(moe)?;
         }
@@ -461,8 +461,18 @@ impl LlamaForward {
             let mut k = split_heads(&k, n_kv, head_dim)?;
             let v = split_heads(&v, n_kv, head_dim)?;
 
-            q = bk.apply_rope_positions(&q, positions, rope_theta)?;
-            k = bk.apply_rope_positions(&k, positions, rope_theta)?;
+            // Partial RoPE (GLM4-MoE `partial_rotary_factor` 0.5, Phi 0.4): only
+            // the first `rotary_dim` (NEOX) channels rotate. Factor 1.0 (Llama,
+            // Qwen, Mistral) keeps the existing full-RoPE path unchanged.
+            let pf = self.info.partial_rotary_factor;
+            if pf < 1.0 {
+                let rotary_dim = ((head_dim as f64 * pf).round() as usize) & !1;
+                q = bk.apply_rope_partial(&q, positions, rope_theta, rotary_dim)?;
+                k = bk.apply_rope_partial(&k, positions, rope_theta, rotary_dim)?;
+            } else {
+                q = bk.apply_rope_positions(&q, positions, rope_theta)?;
+                k = bk.apply_rope_positions(&k, positions, rope_theta)?;
+            }
 
             // x_residual is needed for the residual add after attention — borrow ends here.
             (q, k, v, x)
@@ -560,11 +570,28 @@ impl LlamaForward {
         let router_logits = bk.linear_3d(h, gate_w)?;
         let logits = router_logits.as_f32_slice();
 
+        // Sigmoid-gate correction bias (`e_score_correction_bias`, GLM/DeepSeek) —
+        // biases WHICH experts win, not their weights. Absent for Mixtral.
+        let correction_bias: Option<Vec<f32>> = self
+            .weights
+            .get(&format!(
+                "{}{pfx}.gate.e_score_correction_bias",
+                self.prefix
+            ))
+            .map(|t| t.to_f32_vec());
+
         // Per-token routing → build each active expert's token list with weights.
         let mut expert_tokens: Vec<Vec<(usize, f32)>> = vec![Vec::new(); num_experts];
         for t in 0..seq {
             let row = &logits[t * num_experts..(t + 1) * num_experts];
-            let (idx, wts) = route_topk(row, moe.top_k, moe.scoring_func, moe.norm_topk_prob)?;
+            let (idx, wts) = route_topk(
+                row,
+                moe.top_k,
+                moe.scoring_func,
+                moe.norm_topk_prob,
+                correction_bias.as_deref(),
+                moe.routed_scaling_factor,
+            )?;
             for (ei, w) in idx.into_iter().zip(wts) {
                 expert_tokens[ei].push((t, w));
             }
@@ -610,6 +637,26 @@ impl LlamaForward {
             }
         }
 
+        // Shared expert (GLM-4.5-Air / DeepSeek): an always-on SwiGLU run over
+        // EVERY token and added **unweighted** to the routed output.
+        if moe.num_shared_experts > 0 {
+            let sp = format!("{pfx}.shared_expert");
+            let w1 = resolve_weight(&self.weights, &self.prefix, &format!("{sp}.w1"))?;
+            let w3 = resolve_weight(&self.weights, &self.prefix, &format!("{sp}.w3"))?;
+            let w2 = resolve_weight(&self.weights, &self.prefix, &format!("{sp}.w2"))?;
+            let (g, u) = if bk.is_cpu() {
+                let (gr, ur) = rayon::join(|| bk.linear_3d(h, w1), || bk.linear_3d(h, w3));
+                (gr?, ur?)
+            } else {
+                (bk.linear_3d(h, w1)?, bk.linear_3d(h, w3)?)
+            };
+            let mid = bk.mul(&bk.silu(&g)?, &u)?;
+            let shared = bk.linear_3d(&mid, w2)?;
+            for (o, &s) in out.iter_mut().zip(shared.as_f32_slice()) {
+                *o += s;
+            }
+        }
+
         Ok(Tensor::from_f32_vec(out, vec![1, seq, hidden])?)
     }
 
@@ -627,61 +674,81 @@ impl LlamaForward {
     }
 }
 
-/// Reject MoE features this first cut does not execute yet, so unsupported
-/// models fail at load rather than routing silently-wrong. Only Mixtral-class
-/// routing (softmax gate, top-k renorm, no shared experts) is implemented.
+/// Reject MoE features this cut does not execute yet, so unsupported models fail
+/// at load rather than routing silently-wrong. Softmax (Mixtral) and sigmoid
+/// (GLM-4.5-Air: correction bias + shared expert) routing are implemented;
+/// **group-limited** routing (`n_group > 1` — DeepSeek-V3, GLM-5.2) is not.
 fn validate_moe_support(moe: &MoeConfig) -> Result<()> {
-    if !matches!(moe.scoring_func, MoeScoring::Softmax) {
+    if moe.n_group > 1 {
         bail!(
-            "this MoE model uses sigmoid router gating (DeepSeek/GLM-style, \
-             group-limited) which is not yet supported — only softmax top-k \
-             routing (Mixtral/Qwen-MoE) is implemented"
-        );
-    }
-    if moe.num_shared_experts > 0 {
-        bail!(
-            "this MoE model has {} shared expert(s) (DeepSeek/Qwen-MoE), which are \
-             not yet supported — only Mixtral-class routed experts are implemented",
-            moe.num_shared_experts
+            "group-limited MoE routing (n_group={}, DeepSeek-V3/GLM-5.2) is not yet \
+             supported — only single-group top-k (Mixtral, GLM-4.5-Air) is implemented",
+            moe.n_group
         );
     }
     Ok(())
 }
 
 /// Route one token through the MoE gate: score all experts, select the top-k,
-/// and (optionally) renormalise their weights.
+/// (optionally) renormalise, and scale.
 ///
-/// The order is Mixtral's and must match exactly — softmax over **all** experts,
-/// then top-k by softmax value, then renormalise the k weights to sum to 1.
-/// Reordering these degrades quality without producing garbage, so it can't be
-/// caught by a "does it emit coherent tokens" check — only by a numeric gate.
+/// Two gate flavours, each order-sensitive (a wrong order degrades quality
+/// *silently* — gated numerically, not by "does it emit words"):
+/// - **Softmax** (Mixtral): softmax over all experts → top-k by that value →
+///   renorm. Selection score == weight score.
+/// - **Sigmoid** (GLM-4.5-Air / DeepSeek): `sigmoid(logits)` are the weights;
+///   selection uses `sigmoid + e_score_correction_bias` (the aux-loss-free bias
+///   biases *which* experts win but NOT their weights); renorm (`+1e-20` denom),
+///   then `* routed_scaling_factor`.
 fn route_topk(
     logits: &[f32],
     k: usize,
     scoring: MoeScoring,
     norm_topk_prob: bool,
+    correction_bias: Option<&[f32]>,
+    routed_scaling: f32,
 ) -> Result<(Vec<usize>, Vec<f32>)> {
-    let scores = match scoring {
-        MoeScoring::Softmax => softmax(logits),
+    let n = logits.len();
+    // `weight_score` becomes the routing weight; `choice_score` selects the top-k
+    // (differs only for the sigmoid gate's correction bias).
+    let (weight_score, choice_score): (Vec<f32>, Vec<f32>) = match scoring {
+        MoeScoring::Softmax => {
+            let s = softmax(logits);
+            (s.clone(), s)
+        }
         MoeScoring::Sigmoid => {
-            bail!("sigmoid MoE routing (DeepSeek/GLM group-limited gate) is not yet implemented")
+            let s: Vec<f32> = logits.iter().map(|&x| sigmoid(x)).collect();
+            let choice = match correction_bias {
+                Some(b) => s.iter().zip(b).map(|(v, bb)| v + bb).collect(),
+                None => s.clone(),
+            };
+            (s, choice)
         }
     };
-    let k = k.min(scores.len());
-    // Select the top-k experts by score (descending); ties break by lower index.
-    let mut idx: Vec<usize> = (0..scores.len()).collect();
-    idx.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
+    let k = k.min(n);
+    // Select the top-k by choice score (descending); ties break by lower index.
+    let mut idx: Vec<usize> = (0..n).collect();
+    idx.sort_by(|&a, &b| choice_score[b].total_cmp(&choice_score[a]).then(a.cmp(&b)));
     idx.truncate(k);
-    let mut wts: Vec<f32> = idx.iter().map(|&i| scores[i]).collect();
+    let mut wts: Vec<f32> = idx.iter().map(|&i| weight_score[i]).collect();
     if norm_topk_prob {
-        let sum: f32 = wts.iter().sum();
-        if sum > 0.0 {
-            for w in &mut wts {
-                *w /= sum;
-            }
+        // +1e-20 matches the reference; in f32 it's a no-op for Mixtral's O(1) sums.
+        let sum: f32 = wts.iter().sum::<f32>() + 1e-20;
+        for w in &mut wts {
+            *w /= sum;
+        }
+    }
+    if routed_scaling != 1.0 {
+        for w in &mut wts {
+            *w *= routed_scaling;
         }
     }
     Ok((idx, wts))
+}
+
+/// Logistic sigmoid.
+fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
 }
 
 /// Numerically-stable softmax over a slice.
@@ -753,7 +820,15 @@ mod moe_tests {
         // top-2 → experts {2, 1}; renorm over their softmax values:
         //   0.643915/(0.643915+0.236882) = 0.731049
         //   0.236882/(0.643915+0.236882) = 0.268951
-        let (idx, wts) = route_topk(&[1.0, 2.0, 3.0, 0.0], 2, MoeScoring::Softmax, true).unwrap();
+        let (idx, wts) = route_topk(
+            &[1.0, 2.0, 3.0, 0.0],
+            2,
+            MoeScoring::Softmax,
+            true,
+            None,
+            1.0,
+        )
+        .unwrap();
         assert_eq!(
             idx,
             vec![2, 1],
@@ -769,7 +844,15 @@ mod moe_tests {
 
     #[test]
     fn route_topk_without_renorm_keeps_raw_softmax() {
-        let (idx, wts) = route_topk(&[1.0, 2.0, 3.0, 0.0], 2, MoeScoring::Softmax, false).unwrap();
+        let (idx, wts) = route_topk(
+            &[1.0, 2.0, 3.0, 0.0],
+            2,
+            MoeScoring::Softmax,
+            false,
+            None,
+            1.0,
+        )
+        .unwrap();
         assert_eq!(idx, vec![2, 1]);
         // Raw softmax values (NOT renormalised) → sum < 1.
         assert!((wts[0] - 0.643915).abs() < 1e-4, "wts[0]={}", wts[0]);
@@ -780,13 +863,82 @@ mod moe_tests {
     #[test]
     fn route_topk_ties_break_by_lower_index() {
         // Equal logits → equal softmax; the first `k` experts by index must win.
-        let (idx, _) = route_topk(&[1.0, 1.0, 1.0, 1.0], 2, MoeScoring::Softmax, true).unwrap();
+        let (idx, _) = route_topk(
+            &[1.0, 1.0, 1.0, 1.0],
+            2,
+            MoeScoring::Softmax,
+            true,
+            None,
+            1.0,
+        )
+        .unwrap();
         assert_eq!(idx, vec![0, 1]);
     }
 
     #[test]
-    fn route_topk_sigmoid_is_rejected() {
-        // DeepSeek/GLM sigmoid gating isn't implemented — must error, not mis-route.
-        assert!(route_topk(&[1.0, 2.0], 1, MoeScoring::Sigmoid, true).is_err());
+    fn route_topk_glm_sigmoid_gate_matches_hand_computed() {
+        // GLM-4.5-Air / DeepSeek gate. logits=[1,2,3,0], correction_bias=[0.5,0,-1,0.4].
+        //   sigmoid = [0.731059, 0.880797, 0.952574, 0.5]        (these are the WEIGHTS)
+        //   choice  = sigmoid + bias = [1.231059, 0.880797, -0.047426, 0.9]  (SELECTION)
+        // top-2 by CHOICE → experts {0, 3} — note the bias FLIPS the pick away from
+        // {2,1} (the raw-sigmoid top-2), proving the bias steers selection.
+        // weights = RAW sigmoid at {0,3} = [0.731059, 0.5], renorm → [0.593846, 0.406154].
+        let bias = [0.5f32, 0.0, -1.0, 0.4];
+        let (idx, wts) = route_topk(
+            &[1.0, 2.0, 3.0, 0.0],
+            2,
+            MoeScoring::Sigmoid,
+            true,
+            Some(&bias),
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(idx, vec![0, 3], "correction bias must steer SELECTION");
+        assert!(
+            (wts[0] - 0.593846).abs() < 1e-4,
+            "wts[0]={} (raw sigmoid, not bias-corrected)",
+            wts[0]
+        );
+        assert!((wts[1] - 0.406154).abs() < 1e-4, "wts[1]={}", wts[1]);
+    }
+
+    #[test]
+    fn route_topk_sigmoid_no_bias_selects_by_sigmoid() {
+        // Without a correction bias, selection == raw-sigmoid top-k (experts 2,1).
+        let (idx, _) = route_topk(
+            &[1.0, 2.0, 3.0, 0.0],
+            2,
+            MoeScoring::Sigmoid,
+            true,
+            None,
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(idx, vec![2, 1]);
+    }
+
+    #[test]
+    fn route_topk_routed_scaling_multiplies_weights() {
+        let (_, base) = route_topk(
+            &[1.0, 2.0, 3.0, 0.0],
+            2,
+            MoeScoring::Softmax,
+            true,
+            None,
+            1.0,
+        )
+        .unwrap();
+        let (_, scaled) = route_topk(
+            &[1.0, 2.0, 3.0, 0.0],
+            2,
+            MoeScoring::Softmax,
+            true,
+            None,
+            2.5,
+        )
+        .unwrap();
+        for (b, s) in base.iter().zip(&scaled) {
+            assert!((s - b * 2.5).abs() < 1e-6);
+        }
     }
 }

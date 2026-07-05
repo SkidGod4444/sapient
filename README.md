@@ -261,6 +261,7 @@ a speech-to-text model, use `sapient transcribe`").
 | `openhorizon/llama-3.2-3b` | Llama | 3B | Gated — run `sapient login` |
 | `openhorizon/mistral-7b` | Mistral | 7B | Gated — run `sapient login` |
 | `openhorizon/mixtral-8x7b-q4` | Mixtral (sparse MoE) | 47B-A13B | 8 experts top-2; Q4_K_M ≈ 26 GB — needs a 32 GB+ device; CPU-only |
+| `openhorizon/glm-4.5-air-q4` | GLM-4.5 (sigmoid-gate MoE) | 106B-A12B | 128 experts top-8 + shared expert; Q4_K_M ≈ 63 GB (2-shard split) — needs a 96 GB+ device; CPU-only |
 | `whisper-tiny` | Whisper | 39M | Speech-to-text — `sapient transcribe` |
 | `whisper-base` | Whisper | 74M | Speech-to-text — `sapient transcribe` |
 | `whisper-small` | Whisper | 244M | Speech-to-text — `sapient transcribe` |

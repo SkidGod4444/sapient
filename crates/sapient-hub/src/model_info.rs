@@ -28,6 +28,10 @@ pub enum ArchType {
     Qwen,
     /// Mixtral (MoE)
     Mixtral,
+    /// Zhipu GLM-4.5 MoE family (GLM-4.5-Air) — sigmoid gate + correction bias +
+    /// shared expert + partial RoPE + q/k/v attention biases. NEOX RoPE (NOT
+    /// q/k-permuted in GGUF). Runs on `LlamaForward`'s MoE path.
+    Glm4Moe,
     /// Falcon
     Falcon,
     /// MPT (MosaicML)
@@ -64,6 +68,8 @@ impl ArchType {
             n if n.contains("Bert") || n.contains("Roberta") => Self::Bert,
             n if n.contains("Qwen") => Self::Qwen,
             n if n.contains("Mixtral") => Self::Mixtral,
+            // GLM-4.5 MoE (Glm4MoeForCausalLM). Match before any GLM catch-all.
+            n if n.contains("Glm4Moe") || n.contains("Glm4MoE") => Self::Glm4Moe,
             n if n.contains("Falcon") => Self::Falcon,
             n if n.contains("MPT") => Self::Mpt,
             n if n.contains("Bloom") => Self::Bloom,
@@ -115,6 +121,12 @@ pub struct MoeConfig {
     pub norm_topk_prob: bool,
     /// Router scoring function (softmax vs sigmoid).
     pub scoring_func: MoeScoring,
+    /// Multiply the final routing weights by this (`routed_scaling_factor`,
+    /// DeepSeek/GLM). 1.0 = no-op (Mixtral, GLM-4.5-Air).
+    pub routed_scaling_factor: f32,
+    /// Expert groups for group-limited routing (`n_group`). 1 = no grouping
+    /// (Mixtral, GLM-4.5-Air); >1 (DeepSeek-V3, GLM-5.2) is not yet implemented.
+    pub n_group: usize,
 }
 
 /// Parse MoE hyperparameters from a `config.json` value. Returns `None` for
@@ -135,10 +147,16 @@ fn parse_moe_config(cfg: &serde_json::Value, intermediate_size: usize) -> Option
     let num_shared_experts = cfg["n_shared_experts"].as_u64().unwrap_or(0) as usize;
     let first_k_dense = cfg["first_k_dense_replace"].as_u64().unwrap_or(0) as usize;
     let norm_topk_prob = cfg["norm_topk_prob"].as_bool().unwrap_or(true);
+    // `scoring_func` is explicit for DeepSeek; GLM4-MoE omits it but is a sigmoid
+    // gate — infer from the model_type when the field is absent.
     let scoring_func = match cfg["scoring_func"].as_str() {
         Some("sigmoid") => MoeScoring::Sigmoid,
+        Some("softmax") => MoeScoring::Softmax,
+        _ if cfg["model_type"].as_str() == Some("glm4_moe") => MoeScoring::Sigmoid,
         _ => MoeScoring::Softmax,
     };
+    let routed_scaling_factor = cfg["routed_scaling_factor"].as_f64().unwrap_or(1.0) as f32;
+    let n_group = cfg["n_group"].as_u64().unwrap_or(1) as usize;
     Some(MoeConfig {
         num_experts,
         top_k,
@@ -147,6 +165,8 @@ fn parse_moe_config(cfg: &serde_json::Value, intermediate_size: usize) -> Option
         first_k_dense,
         norm_topk_prob,
         scoring_func,
+        routed_scaling_factor,
+        n_group,
     })
 }
 
@@ -235,7 +255,12 @@ impl ModelInfo {
             })
             .unwrap_or(32000) as usize;
         let hidden_size = u32v(&format!("{p}.embedding_length")).unwrap_or(4096) as usize;
-        let num_hidden_layers = u32v(&format!("{p}.block_count")).unwrap_or(32) as usize;
+        // `block_count` includes Multi-Token-Prediction (nextn) head layers for
+        // GLM4-MoE / DeepSeek-V3 — those aren't standard transformer layers and
+        // must be skipped (GLM-4.5-Air: block_count 47 − nextn 1 = 46). Absent
+        // key ⇒ no change for every other arch.
+        let num_hidden_layers = (u32v(&format!("{p}.block_count")).unwrap_or(32) as usize)
+            .saturating_sub(u32v(&format!("{p}.nextn_predict_layers")).unwrap_or(0) as usize);
         let num_attention_heads = u32v(&format!("{p}.attention.head_count")).unwrap_or(32) as usize;
         let num_key_value_heads = u32v(&format!("{p}.attention.head_count_kv"))
             .unwrap_or(num_attention_heads as u32) as usize;
@@ -245,7 +270,14 @@ impl ModelInfo {
             .or_else(|| f64v(&format!("{p}.attention.layer_norm_epsilon")))
             .unwrap_or(1e-5);
         let rope_theta = f64v(&format!("{p}.rope.freq_base")).unwrap_or(10000.0);
-        let head_dim = hidden_size / num_attention_heads.max(1);
+        // Explicit `attention.key_length` when present (GLM4-MoE: 128, ≠
+        // hidden/heads = 4096/96 = 42); else the usual hidden/heads. Getting this
+        // wrong reshapes the q projection to the wrong head layout → shape panic.
+        let head_dim = u32v(&format!("{p}.attention.key_length"))
+            .map(|d| d as usize)
+            .unwrap_or_else(|| hidden_size / num_attention_heads.max(1));
+        // `rope.dimension_count` is the ABSOLUTE rotary width (GLM4-MoE: 64 of
+        // 128 head dims), so partial factor = that / head_dim (= 0.5).
         let partial_rotary_factor = u32v(&format!("{p}.rope.dimension_count"))
             .map(|d| d as f64 / head_dim as f64)
             .unwrap_or(1.0);
@@ -278,6 +310,9 @@ impl ModelInfo {
                 Some(2) => MoeScoring::Sigmoid,
                 _ => MoeScoring::Softmax,
             };
+            let routed_scaling_factor =
+                f64v(&format!("{p}.expert_weights_scale")).unwrap_or(1.0) as f32;
+            let n_group = u32v(&format!("{p}.expert_group_count")).unwrap_or(1) as usize;
             Some(MoeConfig {
                 num_experts,
                 top_k,
@@ -286,6 +321,8 @@ impl ModelInfo {
                 first_k_dense,
                 norm_topk_prob,
                 scoring_func,
+                routed_scaling_factor,
+                n_group,
             })
         } else {
             None
@@ -457,6 +494,8 @@ impl ArchType {
             "bert" | "roberta" => Self::Bert,
             "qwen2" | "qwen3" => Self::Qwen,
             "mixtral" => Self::Mixtral,
+            // config.json `glm4_moe` and GGUF `general.architecture = glm4moe`.
+            "glm4_moe" | "glm4moe" => Self::Glm4Moe,
             "falcon" => Self::Falcon,
             "mpt" => Self::Mpt,
             "bloom" => Self::Bloom,
@@ -623,5 +662,48 @@ mod tests {
         let info = ModelInfo::from_json_str(LLAMA_CONFIG).unwrap();
         assert!(info.moe.is_none());
         assert!(!info.is_moe());
+    }
+
+    // GLM-4.5-Air: sigmoid gate (config OMITS scoring_func), shared expert,
+    // leading dense layer, partial RoPE, single group.
+    const GLM4_MOE_CONFIG: &str = r#"{
+        "architectures": ["Glm4MoeForCausalLM"],
+        "model_type": "glm4_moe",
+        "vocab_size": 151552,
+        "hidden_size": 4096,
+        "num_hidden_layers": 46,
+        "num_attention_heads": 96,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "intermediate_size": 10944,
+        "moe_intermediate_size": 1408,
+        "partial_rotary_factor": 0.5,
+        "rope_theta": 1000000,
+        "rms_norm_eps": 1e-5,
+        "n_routed_experts": 128,
+        "num_experts_per_tok": 8,
+        "n_shared_experts": 1,
+        "first_k_dense_replace": 1,
+        "norm_topk_prob": true,
+        "routed_scaling_factor": 1.0,
+        "n_group": 1
+    }"#;
+
+    #[test]
+    fn parse_glm4_moe_config() {
+        let info = ModelInfo::from_json_str(GLM4_MOE_CONFIG).unwrap();
+        assert_eq!(info.arch, ArchType::Glm4Moe);
+        assert_eq!(info.head_dim, 128); // explicit, independent of hidden/heads
+        assert!((info.partial_rotary_factor - 0.5).abs() < 1e-9);
+        let moe = info.moe.as_ref().expect("GLM-4.5-Air is MoE");
+        assert_eq!(moe.num_experts, 128);
+        assert_eq!(moe.top_k, 8);
+        assert_eq!(moe.expert_intermediate_size, 1408);
+        assert_eq!(moe.num_shared_experts, 1);
+        assert_eq!(moe.first_k_dense, 1);
+        // scoring_func absent from config → inferred sigmoid from model_type.
+        assert_eq!(moe.scoring_func, MoeScoring::Sigmoid);
+        assert_eq!(moe.n_group, 1);
+        assert_eq!(moe.routed_scaling_factor, 1.0);
     }
 }

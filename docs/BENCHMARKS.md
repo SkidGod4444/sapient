@@ -97,6 +97,32 @@ kernel library.
 --release -- --ignored --nocapture` (SAPIENT, separates prefill/decode/peak-RSS;
 `MOE_BENCH_MODEL` to swap models) · `llama-bench -m <gguf> -t 14 -p 512 -n 128`.
 
+### GLM-4.5-Air — a 106B sigmoid-gate MoE on the same Jetson
+
+> Same box (Thor, 14 threads). `openhorizon/glm-4.5-air-q4` — Q4_K_M, a **2-shard
+> split ≈ 63 GB**. Measured 2026-07-06.
+
+The DeepSeek-V3-style sibling of Mixtral: sigmoid gate + aux-loss-free correction
+bias + a shared expert + partial RoPE, 128 experts top-8. **Decode-verified
+coherent on Thor** ("The Roman Empire, one of history's most influential
+civilizations, emerged from the Roman Republic in 27 BCE when Octavian was granted
+the title Augustus…"). A **106-billion-parameter model, pure Rust, zero CUDA.**
+
+| | decode | prefill | peak RSS | note |
+|---|---:|---:|---:|---|
+| byte-copy split | 0.34 tok/s | — | 119 GB | experts pinned in heap → thrash |
+| **zero-copy split** | **2.45 tok/s** | 0.80 | 118.6 GB | per-expert **mmap views** → 7× decode |
+
+The **zero-copy stacked-expert split** was the lever: the naïve version copied every
+expert out of the mmap into non-evictable heap (~57 GB pinned), so at 119/122 GB the
+box thrashed. Sharing the stacked buffer via byte-offset `Tensor::from_buffer` views
+keeps the experts as evictable page-cache → **7× decode** at the same peak RSS (a
+high-watermark from prefill faulting the whole model) — and it fits smaller boxes the
+copy would OOM. Also new for GLM: **split-GGUF loading** (shard-set download + merge),
+head_dim from `key_length` (128 ≠ hidden/heads), and the MTP-layer cap. The real Thor
+run caught four bugs no synthetic test could (split-routing gate, GGUF head_dim, MTP
+cap, the heap-copy RSS). RSS ~118 GB is a documented follow-up.
+
 ## Head-to-head vs llama.cpp & Ollama (v0.5.0, 2026-07-03)
 
 Same GGUF **files** (Q4_K_M, byte-identical where both engines read GGUF), same

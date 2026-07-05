@@ -1,5 +1,35 @@
 //! GGUF file selection helpers for HuggingFace Hub downloads.
 
+/// If `name` is one shard of a split GGUF (`<base>-<NNNNN>-of-<MMMMM>.gguf`, the
+/// llama.cpp `gguf-split` convention), return the filenames of **all** shards in
+/// the set (in order). Returns `None` for a single-file GGUF.
+///
+/// Large models (GLM-4.5-Air Q4_K_M ≈ 63 GB) exceed HF's 50 GB per-file limit and
+/// ship as 2+ shards; both the downloader and the tensor loader expand a shard
+/// name to the full set through this.
+pub fn gguf_split_shards(name: &str) -> Option<Vec<String>> {
+    let stem = name.strip_suffix(".gguf")?;
+    let (before_of, total_str) = stem.rsplit_once("-of-")?;
+    let (base, idx_str) = before_of.rsplit_once('-')?;
+    // NNNNN and MMMMM are 5-digit, 1-based.
+    if idx_str.len() != 5
+        || total_str.len() != 5
+        || !idx_str.bytes().all(|b| b.is_ascii_digit())
+        || !total_str.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let total: usize = total_str.parse().ok()?;
+    if total <= 1 {
+        return None;
+    }
+    Some(
+        (1..=total)
+            .map(|i| format!("{base}-{i:05}-of-{total:05}.gguf"))
+            .collect(),
+    )
+}
+
 /// Pick the best GGUF file from a sorted list of repo filenames.
 ///
 /// Prefers Q4_K_M (the edge sweet spot — small + near-lossless) over Q8_0 and other
@@ -163,6 +193,12 @@ pub fn tokenizer_fallback_model(model_id: &str) -> Option<&'static str> {
     if id.contains("mixtral") {
         return Some("mistralai/Mistral-7B-Instruct-v0.2");
     }
+    // GLM-4.5 MoE (arch `glm4moe`, vocab 151552). GGUF repos don't bundle a
+    // tokenizer; the ungated model repo carries it (weights aren't fetched — only
+    // tokenizer files).
+    if id.contains("glm-4.5") || id.contains("glm4.5") || id.contains("glm4moe") {
+        return Some("zai-org/GLM-4.5-Air");
+    }
     // Mistral v0.3 (vocab 32768) REORDERED the vocabulary vs v0.1/v0.2 (vocab
     // 32000) — the tokenizers are NOT interchangeable. Loading a v0.1 tokenizer for
     // a v0.3 GGUF mis-encodes the prompt and mis-decodes output into mixed-script
@@ -213,6 +249,33 @@ pub fn tokenizer_fallback_model(model_id: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gguf_split_shards_expands_the_set() {
+        let shards = gguf_split_shards("GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf").unwrap();
+        assert_eq!(
+            shards,
+            vec![
+                "GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf".to_string(),
+                "GLM-4.5-Air-Q4_K_M-00002-of-00002.gguf".to_string(),
+            ]
+        );
+        // Any shard of the set expands to the whole set.
+        assert_eq!(
+            gguf_split_shards("GLM-4.5-Air-Q4_K_M-00002-of-00002.gguf")
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn gguf_split_shards_ignores_single_files() {
+        assert!(gguf_split_shards("mixtral-8x7b-instruct-v0.1.Q4_K_M.gguf").is_none());
+        assert!(gguf_split_shards("model.gguf").is_none());
+        // A `-of-` in the base name without the 5-digit shard pattern must not match.
+        assert!(gguf_split_shards("weights-of-doom.gguf").is_none());
+    }
 
     #[test]
     fn quant_override_picks_matching_file() {

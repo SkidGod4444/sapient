@@ -132,6 +132,8 @@ fn moe_config(first_k_dense: usize, norm_topk_prob: bool) -> MoeConfig {
         first_k_dense,
         norm_topk_prob,
         scoring_func: MoeScoring::Softmax,
+        routed_scaling_factor: 1.0,
+        n_group: 1,
     }
 }
 
@@ -316,6 +318,8 @@ fn moe_q4k_identical_experts_matches_dense() {
         first_k_dense: 0,
         norm_topk_prob: true,
         scoring_func: MoeScoring::Softmax,
+        routed_scaling_factor: 1.0,
+        n_group: 1,
     };
     let mut moe = LlamaForward::from_weights(mk_info(Some(moe_cfg)), moe_w).unwrap();
 
@@ -486,4 +490,168 @@ fn moe_block(
         }
     }
     out
+}
+
+/// GLM-4.5-Air / DeepSeek MoE reference: sigmoid gate, correction bias steers
+/// SELECTION only, weights are raw sigmoid (renorm `+1e-20`), plus an unweighted
+/// shared expert added to every token.
+fn glm_moe_block(
+    h: &[f32],
+    router: &Tensor,
+    bias: &[f32],
+    experts: &[(Tensor, Tensor, Tensor)],
+    shared: &(Tensor, Tensor, Tensor),
+    top_k: usize,
+) -> Vec<f32> {
+    let logits = linear(h, router, NUM_EXPERTS, HIDDEN);
+    let sig: Vec<f32> = logits.iter().map(|&x| 1.0 / (1.0 + (-x).exp())).collect();
+    let choice: Vec<f32> = sig.iter().zip(bias).map(|(s, b)| s + b).collect();
+    let mut idx: Vec<usize> = (0..NUM_EXPERTS).collect();
+    idx.sort_by(|&a, &b| choice[b].total_cmp(&choice[a]).then(a.cmp(&b)));
+    idx.truncate(top_k);
+    let wsum: f32 = idx.iter().map(|&i| sig[i]).sum::<f32>() + 1e-20;
+    let mut out = vec![0f32; HIDDEN];
+    for &e in &idx {
+        let w = sig[e] / wsum;
+        let (w1, w3, w2) = &experts[e];
+        for (o, v) in out.iter_mut().zip(swiglu(h, w1, w3, w2, EXPERT_INTER)) {
+            *o += w * v;
+        }
+    }
+    // Shared expert — unweighted.
+    let (s1, s3, s2) = shared;
+    for (o, v) in out.iter_mut().zip(swiglu(h, s1, s3, s2, EXPERT_INTER)) {
+        *o += v;
+    }
+    out
+}
+
+// ── Test 3: GLM-4.5-Air MoE (sigmoid + correction bias + shared expert) ────────
+#[test]
+fn glm_moe_matches_reference() {
+    let mut next = lcg(0x61C886);
+    let first_k_dense = 1; // layer 0 dense, layer 1 GLM MoE
+    let mut w = common_weights(&mut next, true); // v=0 → attention neutralised
+
+    let dg = mat(INTER, HIDDEN, 0.15, &mut next);
+    let du = mat(INTER, HIDDEN, 0.15, &mut next);
+    let dd = mat(HIDDEN, INTER, 0.15, &mut next);
+    w.insert("model.layers.0.mlp.gate_proj.weight".into(), dg.clone());
+    w.insert("model.layers.0.mlp.up_proj.weight".into(), du.clone());
+    w.insert("model.layers.0.mlp.down_proj.weight".into(), dd.clone());
+
+    let router = mat(NUM_EXPERTS, HIDDEN, 0.3, &mut next);
+    // Correction bias with real spread so it actually flips some selections.
+    let bias_vec: Vec<f32> = (0..NUM_EXPERTS).map(|_| next() * 0.6).collect();
+    let mut experts: Vec<(Tensor, Tensor, Tensor)> = Vec::new();
+    for _ in 0..NUM_EXPERTS {
+        experts.push((
+            mat(EXPERT_INTER, HIDDEN, 0.2, &mut next),
+            mat(EXPERT_INTER, HIDDEN, 0.2, &mut next),
+            mat(HIDDEN, EXPERT_INTER, 0.2, &mut next),
+        ));
+    }
+    let shared = (
+        mat(EXPERT_INTER, HIDDEN, 0.2, &mut next),
+        mat(EXPERT_INTER, HIDDEN, 0.2, &mut next),
+        mat(HIDDEN, EXPERT_INTER, 0.2, &mut next),
+    );
+    let p = "model.layers.1.block_sparse_moe";
+    w.insert(format!("{p}.gate.weight"), router.clone());
+    w.insert(
+        format!("{p}.gate.e_score_correction_bias"),
+        Tensor::from_f32_vec(bias_vec.clone(), Shape::new([NUM_EXPERTS])).unwrap(),
+    );
+    for (e, (w1, w3, w2)) in experts.iter().enumerate() {
+        w.insert(format!("{p}.experts.{e}.w1.weight"), w1.clone());
+        w.insert(format!("{p}.experts.{e}.w3.weight"), w3.clone());
+        w.insert(format!("{p}.experts.{e}.w2.weight"), w2.clone());
+    }
+    w.insert(format!("{p}.shared_expert.w1.weight"), shared.0.clone());
+    w.insert(format!("{p}.shared_expert.w3.weight"), shared.1.clone());
+    w.insert(format!("{p}.shared_expert.w2.weight"), shared.2.clone());
+
+    let embed = tensor_rows(w.get("model.embed_tokens.weight").unwrap(), HIDDEN);
+    let final_norm = w.get("model.norm.weight").unwrap().to_f32_vec();
+    let lm_head = tensor_rows(w.get("lm_head.weight").unwrap(), HIDDEN);
+    let post_norm: Vec<Vec<f32>> = (0..LAYERS)
+        .map(|i| {
+            w.get(&format!("model.layers.{i}.post_attention_layernorm.weight"))
+                .unwrap()
+                .to_f32_vec()
+        })
+        .collect();
+
+    let moe_cfg = MoeConfig {
+        num_experts: NUM_EXPERTS,
+        top_k: TOP_K,
+        expert_intermediate_size: EXPERT_INTER,
+        num_shared_experts: 1,
+        first_k_dense,
+        norm_topk_prob: true,
+        scoring_func: MoeScoring::Sigmoid,
+        routed_scaling_factor: 1.0,
+        n_group: 1,
+    };
+    let mut engine = LlamaForward::from_weights(base_info(Some(moe_cfg)), w).unwrap();
+    let ids = [2u32, 7, 1, 5];
+    let engine_logits = engine.forward_logits(&ids, false).unwrap();
+
+    let mut x: Vec<Vec<f32>> = ids.iter().map(|&id| embed[id as usize].clone()).collect();
+    for (layer, pnorm) in post_norm.iter().enumerate() {
+        for xt in x.iter_mut() {
+            let h = rms_norm(xt, pnorm);
+            let ffn = if layer < first_k_dense {
+                dense_swiglu(&h, &dg, &du, &dd)
+            } else {
+                glm_moe_block(&h, &router, &bias_vec, &experts, &shared, TOP_K)
+            };
+            for (o, f) in xt.iter_mut().zip(ffn) {
+                *o += f;
+            }
+        }
+    }
+    let last = rms_norm(x.last().unwrap(), &final_norm);
+    let ref_logits: Vec<f32> = lm_head.iter().map(|row| dot(&last, row)).collect();
+    let err = max_abs_err(&engine_logits, &ref_logits);
+    assert!(
+        err < 1e-4,
+        "GLM MoE (sigmoid+bias+shared) must match reference (max_err={err})"
+    );
+}
+
+// ── Test 4: partial RoPE is actually applied (wiring check) ────────────────────
+#[test]
+fn partial_rope_changes_logits() {
+    // A dense model (v != 0 → attention active) must give DIFFERENT logits with
+    // partial_rotary_factor 0.5 than with full RoPE (1.0) — proving the partial
+    // path is wired, not silently ignored.
+    let build = |pf: f64| {
+        let mut next = lcg(0x0DDBA11);
+        let mut w = common_weights(&mut next, false);
+        for i in 0..LAYERS {
+            let pp = format!("model.layers.{i}");
+            w.insert(
+                format!("{pp}.mlp.gate_proj.weight"),
+                mat(INTER, HIDDEN, 0.1, &mut next),
+            );
+            w.insert(
+                format!("{pp}.mlp.up_proj.weight"),
+                mat(INTER, HIDDEN, 0.1, &mut next),
+            );
+            w.insert(
+                format!("{pp}.mlp.down_proj.weight"),
+                mat(HIDDEN, INTER, 0.1, &mut next),
+            );
+        }
+        let mut info = base_info(None);
+        info.partial_rotary_factor = pf;
+        let mut e = LlamaForward::from_weights(info, w).unwrap();
+        e.forward_logits(&[3u32, 1, 4, 1, 5], false).unwrap()
+    };
+    let err = max_abs_err(&build(1.0), &build(0.5));
+    assert!(
+        err > 1e-3,
+        "partial RoPE (0.5) must differ from full (1.0); err={err}"
+    );
 }

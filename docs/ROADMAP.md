@@ -25,6 +25,16 @@
   loss** vs llama.cpp (greedy token-identical ~28 tokens). SAPIENT loads the
   classic per-expert Mixtral GGUFs current llama.cpp rejects. See
   [BENCHMARKS.md](BENCHMARKS.md).
+- ✅ **GLM-4.5-Air (`Glm4Moe`) — the DeepSeek-V3-style sigmoid-gate MoE**, built on
+  the Mixtral foundation and **decode-verified on Thor** (106B-A12B, pure Rust,
+  zero CUDA, coherent output, decode 2.45 tok/s). New: sigmoid gate + aux-loss-free
+  correction bias + always-on shared expert, partial RoPE 0.5, head_dim from
+  `key_length`, MTP-layer cap, and **split-GGUF loading** (Q4_K_M is a 2-shard
+  ~63 GB set) with a **zero-copy stacked-expert split** (per-expert mmap views, no
+  heap copy — 7× decode over the byte-copy). `ArchType::Glm4Moe` (NEOX → no q/k
+  unpermute). Registry `openhorizon/glm-4.5-air-q4` (96 GB+ device). Four
+  real-model bugs the Thor run caught that synthetic tests couldn't. GLM-5.2 stays
+  out of scope (MLA + DeepSeek Sparse Attention + group-limited routing).
 - ⏳ **Server-ARM decode kernels (parity project, NOT MoE-specific)** — the Thor
   benchmark surfaced that SAPIENT is ~3.16× behind llama.cpp on *dense* Neoverse
   CPU decode (bigger than the 1.8× MoE gap → MoE is fine), decomposing to ~1.94×
