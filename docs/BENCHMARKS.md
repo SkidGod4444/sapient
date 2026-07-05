@@ -31,6 +31,72 @@ a blocked W8A8 GEMM for m≫1 activations (the W8A8 path is per-row today) and
 resolution options. Decode at 15 tok/s makes the *reading* fast — it's the
 *looking* that needs the next rung.
 
+## Sparse MoE — Mixtral-8x7B on a Jetson (v0.5.x, pure Rust, zero CUDA)
+
+> Hardware: **NVIDIA Jetson AGX Thor · 14× Arm Neoverse · 122 GB · aarch64 Linux**.
+> Same GGUF file (`mixtral-8x7b-instruct-v0.1.Q4_K_M`, 24.6 GB), matched **14
+> threads**, greedy/temp-0. SAPIENT = pure-Rust CPU engine; llama.cpp = build
+> `b1928` (see the compatibility note). Measured 2026-07-05.
+
+A **47-billion-parameter** model (8 experts, top-2 → ~13 B active) running fully
+on-device in pure Rust with **zero CUDA/JetPack** — cross-shipped one binary over
+ssh. This is the "big models on small devices" thesis, demonstrated.
+
+| Metric | SAPIENT | llama.cpp | Notes |
+|---|---|---:|---|
+| **Decode** | 5.49 tok/s | **9.95** | llama.cpp 1.8× (see decomposition) |
+| **Prefill** | ~6–9 tok/s | ~15 | |
+| **Peak RSS** | **25.6 GB** (mmap) | ~25 GB | ≈ file size; MoE now mmaps by default |
+| **Quality** | coherent, correct | coherent, correct | **greedy token-identical for ~28 tokens**, then one f32-order flip |
+
+**Zero quality loss vs llama.cpp.** Same prompt, temp 0, both engines produce the
+*identical* tokens for ~28 steps ("The Roman Empire, one of the most powerful and
+influential civilizations in world history, began its journey as a small
+settlement on the Italian Peninsula…"), then differ by one near-tie word (SAPIENT
+"in", llama.cpp "around") — *late* divergence from f32 reduction order, not an
+early routing/math bug. Both decode the same Q4_K/Q6_K blocks: **no quality is
+traded** at a given quant.
+
+**Compatibility win.** *Current* llama.cpp **cannot load** the classic per-expert
+Mixtral GGUFs (TheBloke, MaziyarPanahi — the ones most people have): it dropped
+the per-expert tensor layout for stacked `*_exps` and errors with `missing tensor
+'blk.0.ffn_down_exps.weight'`. SAPIENT loads **both** layouts. (The llama.cpp
+number above therefore uses an older per-expert-capable build, `b1928`, on the
+exact same file — the honest same-file comparison.)
+
+### Where the 1.8× goes — and why it isn't MoE
+
+An honest decomposition, using a **dense control** (Qwen2.5-1.5B Q4_K_M, same
+Q4_K + Q6_K quant profile, cached on the same box):
+
+| | SAPIENT | llama.cpp | gap |
+|---|---:|---:|---:|
+| Mixtral (MoE) decode | 5.49 | 9.95 | **1.8×** |
+| Qwen dense decode, 14 threads | 26.68 | 84.45 | **3.16×** |
+| Qwen dense decode, **1 thread** | 3.60 | 6.97 | **1.94×** (kernel) |
+| Multicore scaling 1→14 | 7.4× (53%) | 12.1× (86%) | **1.6×** (threading) |
+
+The **dense gap (3.16×) is larger than the MoE gap (1.8×)** — so MoE is *not* the
+bottleneck; it's SAPIENT's relatively strong case, and a fused-MoE kernel would
+buy nothing. The real gap decomposes into **~1.94× single-core kernel quality**
+(llama.cpp uses Arm's hand-tuned **KleidiAI** microkernels) **× ~1.6× multicore
+scaling** (SAPIENT's per-GEMV rayon fork/join vs a persistent threadpool).
+
+Two things ruled out by measurement: **SVE is a dead end here** — Thor's SVE
+vector length is **128-bit (= NEON width)**, so porting kernels to SVE gains
+nothing (llama.cpp's per-core edge is kernel *engineering* at the same width, not
+a wider ISA); and **task granularity is already optimal** (a `SAPIENT_GEMV_TPC`
+sweep showed the default 4-tasks/core beats 2 and 1). Closing the gap is therefore
+real, deep work — KleidiAI-class NEON microkernels + a lower-overhead decode
+threadpool — not a config knob. Tracked as its own project (see ROADMAP).
+SAPIENT's decode moves ~26 GB/s of weight traffic vs Thor's ~200 GB/s roofline,
+so the headroom is real; the question is engineering effort vs a dedicated Arm
+kernel library.
+
+*Reproduce:* `RAYON_NUM_THREADS=14 cargo test -p sapient-generate --test moe_bench
+--release -- --ignored --nocapture` (SAPIENT, separates prefill/decode/peak-RSS;
+`MOE_BENCH_MODEL` to swap models) · `llama-bench -m <gguf> -t 14 -p 512 -n 128`.
+
 ## Head-to-head vs llama.cpp & Ollama (v0.5.0, 2026-07-03)
 
 Same GGUF **files** (Q4_K_M, byte-identical where both engines read GGUF), same

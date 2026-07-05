@@ -421,7 +421,19 @@ fn gemv_chunk(n: usize) -> usize {
         // Governed: one task per allowed thread; no upper chunk cap.
         (n / eff.max(1)).max(16)
     } else {
-        (n / (ncpus * 4)).clamp(16, 512)
+        // Tasks per core (default 4, for load balancing). Env-tunable to probe
+        // rayon fork/join overhead on high-core hosts where fewer, coarser tasks
+        // per GEMV scale better (Neoverse: decode is coordination-bound, not
+        // bandwidth-bound, so ×4 over-splits). The env path drops the 512 cap so
+        // TPC=1 gives exactly one task per core.
+        match std::env::var("SAPIENT_GEMV_TPC")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&v| v >= 1)
+        {
+            Some(tpc) => (n / (ncpus * tpc)).max(16),
+            None => (n / (ncpus * 4)).clamp(16, 512),
+        }
     }
 }
 

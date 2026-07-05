@@ -51,8 +51,11 @@ pub fn should_quantize_online(name: &str, t: &Tensor) -> bool {
     if numel < 32 || numel % 32 != 0 {
         return false;
     }
-    // Skip small helper tensors and anything already quantized.
-    let skip = ["norm", "bias", "embed", "lm_head"];
+    // Skip small helper tensors and anything already quantized. The MoE router
+    // gate (`block_sparse_moe.gate`) is precision-sensitive — routing decisions
+    // flip under Q8_0 rounding — and llama.cpp keeps it full precision, so skip
+    // it too. (Dense `mlp.gate_proj` does NOT contain "block_sparse_moe.gate".)
+    let skip = ["norm", "bias", "embed", "lm_head", "block_sparse_moe.gate"];
     if skip.iter().any(|s| name.contains(s)) {
         return false;
     }

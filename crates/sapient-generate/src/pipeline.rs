@@ -307,16 +307,23 @@ impl Pipeline {
         let model_info = ModelInfo::from_gguf_metadata(&metadata)
             .context("failed to build ModelInfo from GGUF metadata")?;
 
-        // Decide loading strategy: mmap if forced or if file won't fit in free RAM.
+        // Decide loading strategy: mmap if forced, for MoE models, or if the file
+        // won't fit in free RAM. MoE models are large (the "big models on edge"
+        // case) and the heap loader copies each tensor out of a whole-file buffer
+        // (~2× file peak — e.g. 49 GB for a 26 GB Mixtral); mmap makes the weights
+        // zero-copy (RSS ≈ file size) and, as a bonus, skips the Q4_K→R4 expert
+        // repack, which measured *slower* for m=1 MoE decode.
         let file_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         let avail = available_ram_bytes();
-        let use_mmap = force_mmap || (avail > 0 && file_bytes > avail * 4 / 5);
+        let use_mmap =
+            force_mmap || model_info.is_moe() || (avail > 0 && file_bytes > avail * 4 / 5);
 
         if use_mmap {
             debug!(
-                "Using mmap GGUF loading (file {:.1} GB, available RAM {:.1} GB)",
+                "Using mmap GGUF loading (file {:.1} GB, available RAM {:.1} GB, moe={})",
                 file_bytes as f64 / 1e9,
                 avail as f64 / 1e9,
+                model_info.is_moe(),
             );
         }
 

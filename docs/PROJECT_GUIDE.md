@@ -272,7 +272,11 @@ The real generation math: how to run a Phi or Llama-style model layer by layer.
   - `forward/backend.rs` — the backend interface (CPU vs Metal) and the default helpers
     like "linear with bias" and "partial RoPE."
   - `forward/llama.rs` — the **Llama engine** (also runs Qwen2.5, SmolLM2, TinyLlama,
-    Mistral): RMSNorm, RoPE, SwiGLU MLP, optional Q/K/V biases for Qwen.
+    Mistral): RMSNorm, RoPE, SwiGLU MLP, optional Q/K/V biases for Qwen. Also hosts the
+    **Mixtral-class sparse-MoE** path as a per-layer `Ffn::{Dense, Moe}` branch — the router
+    (softmax → top-k → renorm) picks a few of many experts per token, so a 47B model decodes at
+    ~13B cost. Detected by config (`ModelInfo.moe`), not architecture; CPU-only for now; handles
+    both GGUF expert layouts (stacked `*_exps` and per-expert 2-D) and safetensors. See `CLAUDE.md`.
   - `forward/phi.rs` — the **Phi engine**: LayerNorm with biases, partial RoPE, parallel
     attention+MLP block, and the `<final_layernorm>` + `lm_head` bias.
   - `forward/mlx_engine.rs` — the **native Metal engine** (`MlxForwardEngine`, Apple

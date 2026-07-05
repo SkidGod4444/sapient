@@ -49,6 +49,7 @@ fn tiny_llama() -> (ModelInfo, HashMap<String, Tensor>) {
         rope_theta: 10000.0,
         partial_rotary_factor: 1.0,
         head_dim,
+        moe: None,
         raw: serde_json::Value::Null,
     };
 
@@ -224,6 +225,7 @@ fn tiny_llama_q4_k() -> (ModelInfo, HashMap<String, Tensor>) {
         rope_theta: 10000.0,
         partial_rotary_factor: 1.0,
         head_dim,
+        moe: None,
         raw: serde_json::Value::Null,
     };
 

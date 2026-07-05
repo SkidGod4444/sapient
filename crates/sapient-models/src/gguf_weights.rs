@@ -5,6 +5,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use sapient_core::{DType, Tensor};
+use sapient_hub::model_info::ModelInfo;
 
 const HF_PREFIX: &str = "model.";
 
@@ -164,6 +165,85 @@ fn slice_rows(t: &Tensor, start_row: usize, nrows: usize) -> Result<Tensor> {
     }
 }
 
+/// Build a tensor of `dims` from raw little-endian bytes in the given dtype.
+fn tensor_from_bytes(bytes: &[u8], dims: Vec<usize>, dtype: DType) -> Result<Tensor> {
+    match dtype {
+        DType::F32 => {
+            let f: Vec<f32> = bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            Tensor::from_f32(&f, dims).map_err(|e| anyhow::anyhow!("{e}"))
+        }
+        DType::F16 => Tensor::from_f16_bytes(bytes, dims).map_err(|e| anyhow::anyhow!("{e}")),
+        DType::BF16 => Tensor::from_bf16_bytes(bytes, dims).map_err(|e| anyhow::anyhow!("{e}")),
+        d if d.is_quantized() => {
+            Tensor::from_quant_bytes(bytes, dims, d).map_err(|e| anyhow::anyhow!("{e}"))
+        }
+        other => bail!("tensor_from_bytes: unsupported dtype {other:?}"),
+    }
+}
+
+/// Split the **stacked** 3-D MoE expert tensors of a GGUF into per-expert 2-D
+/// weights, so the CPU MoE forward path is format-agnostic (identical keys to the
+/// HF safetensors layout).
+///
+/// llama.cpp packs a layer's experts into one tensor per projection:
+/// `ffn_gate_exps` / `ffn_up_exps` / `ffn_down_exps` (mapped here to
+/// `block_sparse_moe.experts_stacked.{w1,w3,w2}`), loaded in ggml `ne` order
+/// `[d0, d1, n_expert]` with the expert axis **outermost** (slowest-varying). So
+/// expert `e`'s matrix is the contiguous byte range `[e·eb, (e+1)·eb)` and its HF
+/// `[out, in]` shape is `[d1, d0]` — the same axis swap the 2-D loader applies.
+/// `d0·d1` is always a whole number of quant blocks (hidden/ff are multiples of
+/// 256), so the byte split never straddles a block boundary. This runs before the
+/// engine's online-quant / repack passes, which then see ordinary 2-D experts.
+pub fn split_moe_gguf_experts(
+    weights: &mut HashMap<String, Tensor>,
+    info: &ModelInfo,
+) -> Result<()> {
+    let Some(moe) = &info.moe else {
+        return Ok(());
+    };
+    let n_expert = moe.num_experts;
+    for layer in 0..info.num_hidden_layers {
+        for w in ["w1", "w3", "w2"] {
+            let key =
+                format!("{HF_PREFIX}layers.{layer}.block_sparse_moe.experts_stacked.{w}.weight");
+            let Some(t) = weights.remove(&key) else {
+                continue;
+            };
+            let dims = t.shape().dims().to_vec();
+            if dims.len() != 3 {
+                bail!("stacked MoE tensor '{key}' expected 3-D [d0,d1,n_expert], got {dims:?}");
+            }
+            let (d0, d1, ne) = (dims[0], dims[1], dims[2]);
+            if ne != n_expert {
+                bail!("stacked MoE tensor '{key}' has {ne} experts, config declares {n_expert}");
+            }
+            let dtype = t.dtype();
+            let expert_bytes = dtype.byte_count(d0 * d1);
+            let src = t.as_bytes();
+            if expert_bytes * ne > src.len() {
+                bail!(
+                    "stacked MoE tensor '{key}' buffer too small: {} < {}",
+                    src.len(),
+                    expert_bytes * ne
+                );
+            }
+            for e in 0..ne {
+                let bytes = &src[e * expert_bytes..(e + 1) * expert_bytes];
+                // Per-expert HF 2-D shape is [out, in] = [d1, d0] (reverse of ggml ne).
+                let expert = tensor_from_bytes(bytes, vec![d1, d0], dtype)?;
+                weights.insert(
+                    format!("{HF_PREFIX}layers.{layer}.block_sparse_moe.experts.{e}.{w}.weight"),
+                    expert,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Prepare Phi-family GGUF weights for `PhiForward`. Phi GGUFs fuse Q/K/V into one
 /// `attn_qkv` tensor (mapped to `self_attn.qkv_proj`) which we split into separate
 /// q/k/v by GQA dims; Phi-3/4 additionally fuse gate+up into `ffn_up` (mapped to
@@ -269,6 +349,24 @@ pub fn map_gguf_tensor_name(name: &str) -> Option<String> {
     }
 }
 
+/// Parse an older-style MoE per-expert projection suffix (`ffn_gate.3`,
+/// `ffn_up.0`, `ffn_down.7`) into `(canonical_proj, expert_index)` — e.g.
+/// `("w1", "3")`. Returns `None` for dense projections (`ffn_gate`, no index) and
+/// everything else, so it never shadows the dense arms.
+fn expert_proj_2d(suffix: &str) -> Option<(&'static str, &str)> {
+    let (proj, e) = suffix.rsplit_once('.')?;
+    if e.is_empty() || !e.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let w = match proj {
+        "ffn_gate" => "w1",
+        "ffn_up" => "w3",
+        "ffn_down" => "w2",
+        _ => return None,
+    };
+    Some((w, e))
+}
+
 fn map_blk_tensor(key: &str) -> Option<String> {
     // blk.{layer}.{component}.(weight|bias)
     let rest = key.strip_prefix("blk.")?;
@@ -299,6 +397,20 @@ fn map_blk_tensor(key: &str) -> Option<String> {
         "ffn_gate" => format!("layers.{layer}.mlp.gate_proj"),
         "ffn_up" => format!("layers.{layer}.mlp.up_proj"),
         "ffn_down" => format!("layers.{layer}.mlp.down_proj"),
+        // MoE router (Mixtral folded into the `llama` arch).
+        "ffn_gate_inp" => format!("layers.{layer}.block_sparse_moe.gate"),
+        // MoE experts, NEWER stacked format: `*_exps` is all experts in one 3-D
+        // blob `[.., .., n_expert]` — `split_moe_gguf_experts` slices them per-expert.
+        "ffn_gate_exps" => format!("layers.{layer}.block_sparse_moe.experts_stacked.w1"),
+        "ffn_up_exps" => format!("layers.{layer}.block_sparse_moe.experts_stacked.w3"),
+        "ffn_down_exps" => format!("layers.{layer}.block_sparse_moe.experts_stacked.w2"),
+        // MoE experts, OLDER per-expert format (TheBloke Mixtral): each expert is
+        // its own 2-D tensor `ffn_{gate,up,down}.{e}` — maps straight to the
+        // canonical per-expert key (no split needed).
+        s if expert_proj_2d(s).is_some() => {
+            let (w, e) = expert_proj_2d(s).unwrap();
+            format!("layers.{layer}.block_sparse_moe.experts.{e}.{w}")
+        }
         _ => return None,
     };
 
@@ -368,5 +480,108 @@ mod tests {
             map_gguf_tensor_name("output.weight").as_deref(),
             Some("lm_head.weight")
         );
+    }
+
+    #[test]
+    fn maps_mixtral_moe_gguf_names() {
+        // Router.
+        assert_eq!(
+            map_gguf_tensor_name("blk.0.ffn_gate_inp.weight").as_deref(),
+            Some("model.layers.0.block_sparse_moe.gate.weight")
+        );
+        // NEWER stacked format (Qwen3-A3B / modern Mixtral requants): `*_exps`.
+        assert_eq!(
+            map_gguf_tensor_name("blk.3.ffn_gate_exps.weight").as_deref(),
+            Some("model.layers.3.block_sparse_moe.experts_stacked.w1.weight")
+        );
+        assert_eq!(
+            map_gguf_tensor_name("blk.3.ffn_up_exps.weight").as_deref(),
+            Some("model.layers.3.block_sparse_moe.experts_stacked.w3.weight")
+        );
+        assert_eq!(
+            map_gguf_tensor_name("blk.3.ffn_down_exps.weight").as_deref(),
+            Some("model.layers.3.block_sparse_moe.experts_stacked.w2.weight")
+        );
+        // OLDER per-expert format (TheBloke Mixtral): `ffn_{gate,up,down}.{e}`.
+        assert_eq!(
+            map_gguf_tensor_name("blk.0.ffn_gate.5.weight").as_deref(),
+            Some("model.layers.0.block_sparse_moe.experts.5.w1.weight")
+        );
+        assert_eq!(
+            map_gguf_tensor_name("blk.0.ffn_up.5.weight").as_deref(),
+            Some("model.layers.0.block_sparse_moe.experts.5.w3.weight")
+        );
+        assert_eq!(
+            map_gguf_tensor_name("blk.7.ffn_down.0.weight").as_deref(),
+            Some("model.layers.7.block_sparse_moe.experts.0.w2.weight")
+        );
+        // Dense projections (no expert index) must NOT be mistaken for experts.
+        assert_eq!(
+            map_gguf_tensor_name("blk.0.ffn_gate.weight").as_deref(),
+            Some("model.layers.0.mlp.gate_proj.weight")
+        );
+    }
+
+    // A tiny MoE ModelInfo with `n_expert` experts and one layer.
+    fn tiny_moe_info(n_expert: usize) -> ModelInfo {
+        let cfg = format!(
+            r#"{{"architectures":["MixtralForCausalLM"],"model_type":"mixtral",
+                 "vocab_size":32,"hidden_size":4,"num_hidden_layers":1,
+                 "num_attention_heads":2,"num_key_value_heads":2,"intermediate_size":6,
+                 "max_position_embeddings":64,"rms_norm_eps":1e-5,"rope_theta":1e6,
+                 "num_local_experts":{n_expert},"num_experts_per_tok":2}}"#
+        );
+        ModelInfo::from_json_str(&cfg).unwrap()
+    }
+
+    #[test]
+    fn split_moe_experts_slices_stacked_blob_correctly() {
+        // Stacked ggml layout is `[d0, d1, n_expert]` with the expert axis outermost,
+        // so the raw f32 buffer is expert-0's [d1,d0] matrix (row-major) followed by
+        // expert-1's. Each per-expert output must be `[d1, d0]` = HF `[out, in]`.
+        let (d0, d1, ne) = (4usize, 6usize, 2usize); // e.g. gate_exps: d0=hidden, d1=ff
+        let per = d0 * d1;
+        // Distinct, position-encoding values so any mis-slice is detectable.
+        let expert0: Vec<f32> = (0..per).map(|i| i as f32).collect();
+        let expert1: Vec<f32> = (0..per).map(|i| 1000.0 + i as f32).collect();
+        let mut buf = expert0.clone();
+        buf.extend_from_slice(&expert1);
+        let stacked = Tensor::from_f32_vec(buf, vec![d0, d1, ne]).unwrap();
+
+        let mut weights = HashMap::new();
+        weights.insert(
+            "model.layers.0.block_sparse_moe.experts_stacked.w1.weight".to_string(),
+            stacked,
+        );
+        split_moe_gguf_experts(&mut weights, &tiny_moe_info(ne)).unwrap();
+
+        // The stacked key is consumed; per-expert 2-D [d1,d0] tensors appear.
+        assert!(!weights.contains_key("model.layers.0.block_sparse_moe.experts_stacked.w1.weight"));
+        let e0 = weights
+            .get("model.layers.0.block_sparse_moe.experts.0.w1.weight")
+            .unwrap();
+        let e1 = weights
+            .get("model.layers.0.block_sparse_moe.experts.1.w1.weight")
+            .unwrap();
+        assert_eq!(
+            e0.shape().dims(),
+            &[d1, d0],
+            "per-expert shape is [out, in]"
+        );
+        assert_eq!(e0.to_f32_vec(), expert0);
+        assert_eq!(e1.to_f32_vec(), expert1);
+    }
+
+    #[test]
+    fn split_moe_experts_rejects_expert_count_mismatch() {
+        let (d0, d1, ne) = (4usize, 6usize, 3usize);
+        let stacked = Tensor::from_f32_vec(vec![0.0; d0 * d1 * ne], vec![d0, d1, ne]).unwrap();
+        let mut weights = HashMap::new();
+        weights.insert(
+            "model.layers.0.block_sparse_moe.experts_stacked.w1.weight".to_string(),
+            stacked,
+        );
+        // Config declares 2 experts but the blob has 3 → must error, not silently mis-split.
+        assert!(split_moe_gguf_experts(&mut weights, &tiny_moe_info(2)).is_err());
     }
 }

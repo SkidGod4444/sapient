@@ -185,6 +185,17 @@ pub const CATALOG: &[SupportedModel] = &[
         gated: false,
         extra_aliases: &["phi-2-q4", "phi2-q4", "phi-2-gguf"],
     },
+    // ── Mixtral (sparse MoE — runs on the CPU LlamaForward engine) ─────────────
+    // 8 experts, top-2 per token → ~13B active of 47B total. Q4_K_M ≈ 26 GB;
+    // needs a 32 GB+ device (big Mac / Jetson Thor / workstation). CPU-only for now.
+    SupportedModel {
+        alias: "openhorizon/mixtral-8x7b-q4",
+        repo_id: "TheBloke/Mixtral-8x7B-Instruct-v0.1-GGUF",
+        family: "Mixtral",
+        params: "47B-A13B Q4_K_M",
+        gated: false,
+        extra_aliases: &["mixtral-8x7b-q4", "mixtral-8x7b", "mixtral", "mixtral-q4"],
+    },
     // ── Quantized GGUF models (Phase 1: huge models on small devices) ─────────
     // These download a single .gguf file; RAM ≈ file size (no F32 expansion).
     SupportedModel {

@@ -9,6 +9,32 @@
 > (auto-pick quantization for available RAM, auto CPU/GPU offload, single static binary).
 
 ## Where we are (v0.4.4)
+- 🚧 **Sparse MoE (Mixtral-class first cut)** — the credible "big models on edge"
+  path: a 47B-A13B (Mixtral-8x7B) decodes at ~13B bandwidth cost on 32 GB+ devices
+  (big Mac / Jetson Thor). Implemented as a per-layer `Ffn::{Dense, Moe}` branch
+  **inside `LlamaForward`** (shared attention/KV/RoPE), detected by config not
+  `ArchType` (a Mixtral GGUF is arch `llama`). Router = softmax→top-k→renorm
+  (Mixtral order, numerically gated); expert-grouped batched SwiGLU experts.
+  Handles **both** GGUF expert formats (stacked `*_exps` 3-D blob + older
+  per-expert 2-D, both verified against real files) and safetensors. CPU-only for
+  now (MLX/wgpu bail clearly). Registry `openhorizon/mixtral-8x7b-q4`. Extension
+  points parsed but bailed-on: sigmoid/shared-expert routing (DeepSeek/GLM). Gated
+  by routing unit tests + 3 coherence tests + an ignored Mixtral greedy e2e.
+  **Verified end-to-end on a Jetson AGX Thor** (47B, pure Rust, zero CUDA): decode
+  5.5 tok/s, RSS 25.6 GB (MoE now mmaps by default → ≈ file size), **0 quality
+  loss** vs llama.cpp (greedy token-identical ~28 tokens). SAPIENT loads the
+  classic per-expert Mixtral GGUFs current llama.cpp rejects. See
+  [BENCHMARKS.md](BENCHMARKS.md).
+- ⏳ **Server-ARM decode kernels (parity project, NOT MoE-specific)** — the Thor
+  benchmark surfaced that SAPIENT is ~3.16× behind llama.cpp on *dense* Neoverse
+  CPU decode (bigger than the 1.8× MoE gap → MoE is fine), decomposing to ~1.94×
+  single-core kernel quality (llama.cpp = Arm **KleidiAI** microkernels) × ~1.6×
+  multicore scaling (per-GEMV rayon fork/join). The roadmap's "1.1–1.35× behind
+  llama.cpp" holds on M4/Pi (NEON) but **not on SVE-class server ARM** (Graviton/
+  Grace/Ampere/Thor) — never measured before. **SVE is a dead end** on Thor
+  (128-bit = NEON width). Closing it = KleidiAI-class NEON microkernels + a
+  lower-overhead decode threadpool (fewer parallel regions per token). Deep,
+  bounded work; benefits all server ARM, not just MoE.
 - 🚧 **Gemma3 engine** — gemma-3-1b/4b + **MedGemma-4B** (medical chat + medical
   image analysis via the Gemma3 multimodal path). New `Gemma3Forward` (QK-norm,
   sandwich norms, sliding/global attention) + a flash-attention NaN fix any

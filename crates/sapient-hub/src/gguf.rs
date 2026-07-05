@@ -155,6 +155,14 @@ pub fn tokenizer_fallback_model(model_id: &str) -> Option<&'static str> {
     if id == "llama" {
         return Some("unsloth/Meta-Llama-3.1-8B-Instruct");
     }
+    // Mixtral-8x7B-v0.1 / Instruct-v0.1 use the Mistral **v0.1** tokenizer (vocab
+    // 32000, `[INST]` template) — NOT v0.3 (32768), which would fail the
+    // vocab-compat check. "mixtral" does not contain "mistral", so it needs its own
+    // arm (placed before the mistral arm for clarity). v0.2 is also 32000-vocab and
+    // ungated, and carries the instruct chat template Mixtral-Instruct expects.
+    if id.contains("mixtral") {
+        return Some("mistralai/Mistral-7B-Instruct-v0.2");
+    }
     // Mistral v0.3 (vocab 32768) REORDERED the vocabulary vs v0.1/v0.2 (vocab
     // 32000) — the tokenizers are NOT interchangeable. Loading a v0.1 tokenizer for
     // a v0.3 GGUF mis-encodes the prompt and mis-decodes output into mixed-script
@@ -288,6 +296,20 @@ mod tests {
         assert_eq!(
             tokenizer_fallback_model("mistralai/Mistral-7B-v0.1"),
             Some("mistralai/Mistral-7B-v0.1")
+        );
+    }
+
+    #[test]
+    fn mixtral_tokenizer_fallback_is_32k_vocab_not_v03() {
+        // Mixtral-8x7B-v0.1 uses the 32000-vocab Mistral v0.1 tokenizer; it must NOT
+        // fall through to the v0.3 (32768) default and fail the vocab-compat check.
+        let tok = tokenizer_fallback_model("TheBloke/Mixtral-8x7B-Instruct-v0.1-GGUF");
+        assert_eq!(tok, Some("mistralai/Mistral-7B-Instruct-v0.2"));
+        assert_ne!(tok, Some("unsloth/mistral-7b-instruct-v0.3"));
+        // "mixtral" must not be caught by the "mistral" arm (different substring).
+        assert_eq!(
+            tokenizer_fallback_model("mixtral"),
+            Some("mistralai/Mistral-7B-Instruct-v0.2")
         );
     }
 

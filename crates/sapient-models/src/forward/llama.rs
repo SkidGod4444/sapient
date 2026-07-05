@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use sapient_core::Tensor;
-use sapient_hub::model_info::ModelInfo;
+use sapient_hub::model_info::{ModelInfo, MoeConfig, MoeScoring};
 
 use super::backend::{LlmBackend, LlmBackendDispatch, LlmBackendKind};
 use super::common::{
@@ -144,6 +144,14 @@ impl LlamaForward {
         backend: LlmBackendKind,
     ) -> Result<Self> {
         let prefix = detect_weight_prefix(&weights);
+
+        // MoE support gate: this first cut implements Mixtral-class routing
+        // (softmax gate, top-k renorm, no shared experts). DeepSeek/GLM sigmoid
+        // routing (group-limited, scaled) and shared experts are parsed but not
+        // yet executed — fail loudly rather than route silently-wrong.
+        if let Some(moe) = &info.moe {
+            validate_moe_support(moe)?;
+        }
 
         // Online quantization: convert F16/BF16 projection matrices to Q8_0 at
         // load time.  This is strictly better than expanding to F32:
@@ -493,23 +501,116 @@ impl LlamaForward {
         )?;
         let h = bk.rms_norm(&x, ffn_norm_w, eps)?;
 
-        // Gate and up projections — parallel on CPU, sequential on Metal.
-        let gate_w = resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.mlp.gate_proj"))?;
-        let up_w = resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.mlp.up_proj"))?;
-        let (gate, up) = if bk.is_cpu() {
-            let (gr, ur) = rayon::join(|| bk.linear_3d(&h, gate_w), || bk.linear_3d(&h, up_w));
-            (gr?, ur?)
+        // FFN sub-layer: sparse MoE (router + top-k experts) or dense SwiGLU.
+        let ffn_out = if self.is_moe_layer(layer_idx) {
+            self.moe_ffn(&h, layer_idx, bk)?
         } else {
-            (bk.linear_3d(&h, gate_w)?, bk.linear_3d(&h, up_w)?)
+            // Dense SwiGLU — gate and up projections parallel on CPU, sequential on Metal.
+            let gate_w =
+                resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.mlp.gate_proj"))?;
+            let up_w = resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.mlp.up_proj"))?;
+            let (gate, up) = if bk.is_cpu() {
+                let (gr, ur) = rayon::join(|| bk.linear_3d(&h, gate_w), || bk.linear_3d(&h, up_w));
+                (gr?, ur?)
+            } else {
+                (bk.linear_3d(&h, gate_w)?, bk.linear_3d(&h, up_w)?)
+            };
+            let gate = bk.silu(&gate)?;
+            let mid = bk.mul(&gate, &up)?;
+            bk.linear_3d(
+                &mid,
+                resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.mlp.down_proj"))?,
+            )?
         };
+        bk.add(&x, &ffn_out)
+    }
 
-        let gate = bk.silu(&gate)?;
-        let mid = bk.mul(&gate, &up)?;
-        let down = bk.linear_3d(
-            &mid,
-            resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.mlp.down_proj"))?,
-        )?;
-        bk.add(&x, &down)
+    /// True when layer `idx` is a sparse MoE layer (router + experts) rather than
+    /// a dense FFN. MoE models replace all layers except the first `first_k_dense`
+    /// (0 for Mixtral → every layer is MoE; 3 for DeepSeek/GLM).
+    fn is_moe_layer(&self, idx: usize) -> bool {
+        self.info
+            .moe
+            .as_ref()
+            .is_some_and(|m| idx >= m.first_k_dense)
+    }
+
+    /// Sparse Mixture-of-Experts FFN for one layer.
+    ///
+    /// `h` is the post-attention-normed hidden state `[1, seq, hidden]`. Returns
+    /// the FFN branch output `[1, seq, hidden]` (the residual add happens in the
+    /// caller). The router scores every token over all experts, selects the top-k,
+    /// (optionally) renormalises their weights, then runs each **active** expert
+    /// once over the tokens routed to it (expert-grouped batching), scattering the
+    /// weighted results back. For decode (`seq == 1`) this touches exactly `top_k`
+    /// experts — the whole point of MoE: `top_k`-expert bandwidth, not all-expert.
+    fn moe_ffn(&self, h: &Tensor, layer_idx: usize, bk: &LlmBackendDispatch) -> Result<Tensor> {
+        let moe = self
+            .info
+            .moe
+            .as_ref()
+            .expect("moe_ffn called on a non-MoE model");
+        let hidden = self.info.hidden_size;
+        let seq = h.shape().dims()[1];
+        let num_experts = moe.num_experts;
+        let pfx = format!("layers.{layer_idx}.block_sparse_moe");
+
+        // Router logits: [1, seq, num_experts].
+        let gate_w = resolve_weight(&self.weights, &self.prefix, &format!("{pfx}.gate"))?;
+        let router_logits = bk.linear_3d(h, gate_w)?;
+        let logits = router_logits.as_f32_slice();
+
+        // Per-token routing → build each active expert's token list with weights.
+        let mut expert_tokens: Vec<Vec<(usize, f32)>> = vec![Vec::new(); num_experts];
+        for t in 0..seq {
+            let row = &logits[t * num_experts..(t + 1) * num_experts];
+            let (idx, wts) = route_topk(row, moe.top_k, moe.scoring_func, moe.norm_topk_prob)?;
+            for (ei, w) in idx.into_iter().zip(wts) {
+                expert_tokens[ei].push((t, w));
+            }
+        }
+
+        let h_data = h.as_f32_slice();
+        let mut out = vec![0f32; seq * hidden];
+        for (ei, toks) in expert_tokens.iter().enumerate() {
+            if toks.is_empty() {
+                continue;
+            }
+            // Gather this expert's tokens into a contiguous [1, rows, hidden] batch.
+            let rows = toks.len();
+            let mut hb = vec![0f32; rows * hidden];
+            for (i, &(t, _)) in toks.iter().enumerate() {
+                hb[i * hidden..(i + 1) * hidden]
+                    .copy_from_slice(&h_data[t * hidden..(t + 1) * hidden]);
+            }
+            let hb = Tensor::from_f32_vec(hb, vec![1, rows, hidden])?;
+
+            // SwiGLU expert: down(silu(w1·h) * w3·h). w1=gate_proj, w3=up_proj, w2=down_proj.
+            let ep = format!("{pfx}.experts.{ei}");
+            let w1 = resolve_weight(&self.weights, &self.prefix, &format!("{ep}.w1"))?;
+            let w3 = resolve_weight(&self.weights, &self.prefix, &format!("{ep}.w3"))?;
+            let w2 = resolve_weight(&self.weights, &self.prefix, &format!("{ep}.w2"))?;
+            let (g, u) = if bk.is_cpu() {
+                let (gr, ur) = rayon::join(|| bk.linear_3d(&hb, w1), || bk.linear_3d(&hb, w3));
+                (gr?, ur?)
+            } else {
+                (bk.linear_3d(&hb, w1)?, bk.linear_3d(&hb, w3)?)
+            };
+            let mid = bk.mul(&bk.silu(&g)?, &u)?;
+            let down = bk.linear_3d(&mid, w2)?;
+
+            // Scatter weighted expert output back to the token rows.
+            let d = down.as_f32_slice();
+            for (i, &(t, w)) in toks.iter().enumerate() {
+                let src = &d[i * hidden..(i + 1) * hidden];
+                let dst = &mut out[t * hidden..(t + 1) * hidden];
+                for (o, &s) in dst.iter_mut().zip(src) {
+                    *o += w * s;
+                }
+            }
+        }
+
+        Ok(Tensor::from_f32_vec(out, vec![1, seq, hidden])?)
     }
 
     /// Linear projection with explicit backend (used in forward_layer for hybrid routing).
@@ -524,6 +625,76 @@ impl LlamaForward {
     fn linear(&self, x: &Tensor, name: &str) -> Result<Tensor> {
         self.linear_with(x, name, &self.backend)
     }
+}
+
+/// Reject MoE features this first cut does not execute yet, so unsupported
+/// models fail at load rather than routing silently-wrong. Only Mixtral-class
+/// routing (softmax gate, top-k renorm, no shared experts) is implemented.
+fn validate_moe_support(moe: &MoeConfig) -> Result<()> {
+    if !matches!(moe.scoring_func, MoeScoring::Softmax) {
+        bail!(
+            "this MoE model uses sigmoid router gating (DeepSeek/GLM-style, \
+             group-limited) which is not yet supported — only softmax top-k \
+             routing (Mixtral/Qwen-MoE) is implemented"
+        );
+    }
+    if moe.num_shared_experts > 0 {
+        bail!(
+            "this MoE model has {} shared expert(s) (DeepSeek/Qwen-MoE), which are \
+             not yet supported — only Mixtral-class routed experts are implemented",
+            moe.num_shared_experts
+        );
+    }
+    Ok(())
+}
+
+/// Route one token through the MoE gate: score all experts, select the top-k,
+/// and (optionally) renormalise their weights.
+///
+/// The order is Mixtral's and must match exactly — softmax over **all** experts,
+/// then top-k by softmax value, then renormalise the k weights to sum to 1.
+/// Reordering these degrades quality without producing garbage, so it can't be
+/// caught by a "does it emit coherent tokens" check — only by a numeric gate.
+fn route_topk(
+    logits: &[f32],
+    k: usize,
+    scoring: MoeScoring,
+    norm_topk_prob: bool,
+) -> Result<(Vec<usize>, Vec<f32>)> {
+    let scores = match scoring {
+        MoeScoring::Softmax => softmax(logits),
+        MoeScoring::Sigmoid => {
+            bail!("sigmoid MoE routing (DeepSeek/GLM group-limited gate) is not yet implemented")
+        }
+    };
+    let k = k.min(scores.len());
+    // Select the top-k experts by score (descending); ties break by lower index.
+    let mut idx: Vec<usize> = (0..scores.len()).collect();
+    idx.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
+    idx.truncate(k);
+    let mut wts: Vec<f32> = idx.iter().map(|&i| scores[i]).collect();
+    if norm_topk_prob {
+        let sum: f32 = wts.iter().sum();
+        if sum > 0.0 {
+            for w in &mut wts {
+                *w /= sum;
+            }
+        }
+    }
+    Ok((idx, wts))
+}
+
+/// Numerically-stable softmax over a slice.
+fn softmax(logits: &[f32]) -> Vec<f32> {
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut exps: Vec<f32> = logits.iter().map(|&x| (x - max).exp()).collect();
+    let sum: f32 = exps.iter().sum();
+    if sum > 0.0 {
+        for e in &mut exps {
+            *e /= sum;
+        }
+    }
+    exps
 }
 
 fn validate_core_shapes(
@@ -561,4 +732,61 @@ fn validate_core_shapes(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod moe_tests {
+    use super::*;
+
+    #[test]
+    fn softmax_sums_to_one() {
+        let s = softmax(&[1.0, 2.0, 3.0, 0.0]);
+        let sum: f32 = s.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-6);
+        // Monotonic in the logits.
+        assert!(s[2] > s[1] && s[1] > s[0] && s[0] > s[3]);
+    }
+
+    #[test]
+    fn route_topk_mixtral_order_matches_hand_computed() {
+        // softmax([1,2,3,0]) = [0.087145, 0.236882, 0.643915, 0.032059].
+        // top-2 → experts {2, 1}; renorm over their softmax values:
+        //   0.643915/(0.643915+0.236882) = 0.731049
+        //   0.236882/(0.643915+0.236882) = 0.268951
+        let (idx, wts) = route_topk(&[1.0, 2.0, 3.0, 0.0], 2, MoeScoring::Softmax, true).unwrap();
+        assert_eq!(
+            idx,
+            vec![2, 1],
+            "top-k must pick the two highest-scoring experts"
+        );
+        assert!((wts[0] - 0.731049).abs() < 1e-4, "wts[0]={}", wts[0]);
+        assert!((wts[1] - 0.268951).abs() < 1e-4, "wts[1]={}", wts[1]);
+        assert!(
+            (wts.iter().sum::<f32>() - 1.0).abs() < 1e-6,
+            "renormalised weights must sum to 1"
+        );
+    }
+
+    #[test]
+    fn route_topk_without_renorm_keeps_raw_softmax() {
+        let (idx, wts) = route_topk(&[1.0, 2.0, 3.0, 0.0], 2, MoeScoring::Softmax, false).unwrap();
+        assert_eq!(idx, vec![2, 1]);
+        // Raw softmax values (NOT renormalised) → sum < 1.
+        assert!((wts[0] - 0.643915).abs() < 1e-4, "wts[0]={}", wts[0]);
+        assert!((wts[1] - 0.236882).abs() < 1e-4, "wts[1]={}", wts[1]);
+        assert!(wts.iter().sum::<f32>() < 0.99);
+    }
+
+    #[test]
+    fn route_topk_ties_break_by_lower_index() {
+        // Equal logits → equal softmax; the first `k` experts by index must win.
+        let (idx, _) = route_topk(&[1.0, 1.0, 1.0, 1.0], 2, MoeScoring::Softmax, true).unwrap();
+        assert_eq!(idx, vec![0, 1]);
+    }
+
+    #[test]
+    fn route_topk_sigmoid_is_rejected() {
+        // DeepSeek/GLM sigmoid gating isn't implemented — must error, not mis-route.
+        assert!(route_topk(&[1.0, 2.0], 1, MoeScoring::Sigmoid, true).is_err());
+    }
 }
