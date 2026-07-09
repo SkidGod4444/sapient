@@ -5,9 +5,23 @@ section below as the GitHub release body.
 
 ## [0.5.3] - 2026-07-09
 
-Three merged PRs: the server grows a vision API, Whisper picks the GPU by
-itself, the CLI gets micro-interactions plus a 15-bug fix batch, and GGUF
-loading stops F32-exploding exotic quants.
+Sparse MoE lands (Mixtral 47B and GLM-4.5-Air 106B on a Jetson, pure Rust,
+zero CUDA), the server grows a vision API, Whisper picks the GPU by itself,
+the CLI gets micro-interactions plus a 15-bug fix batch, and GGUF loading
+stops F32-exploding exotic quants.
+
+### 🧠 Sparse MoE — Mixtral-class + GLM-4.5-Air (#28)
+
+- Big-MoE on edge: a per-layer `Ffn::{Dense, Moe}` branch inside the Llama
+  engine (softmax → top-k → renorm routing), both GGUF expert layouts plus
+  safetensors, CPU-first. **Mixtral-8x7B (47B) verified end-to-end on a
+  Jetson AGX Thor — pure Rust, zero CUDA, greedy token-identical to
+  llama.cpp** (decode 5.5 tok/s, RSS ≈ file size via mmap). SAPIENT loads the
+  classic per-expert Mixtral GGUFs that current llama.cpp rejects.
+- **GLM-4.5-Air (106B-A12B)**: sigmoid gate + aux-loss-free correction bias +
+  always-on shared expert, partial RoPE, split-GGUF loading (2-shard ~63 GB)
+  with zero-copy stacked-expert mmap views — decode-verified on Thor. With
+  the Q8_0 re-quantization below it now fits a 96 GB device.
 
 ### 👁 Vision over HTTP — image parts in `/v1/chat/completions` (roadmap 12.3, #30)
 
