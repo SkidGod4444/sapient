@@ -152,8 +152,11 @@ impl HubClient {
         ModelInfo::from_config_file(&config_path)
     }
 
-    /// Returns the total download size (in bytes) for all files in the model repo,
-    /// by querying the HuggingFace REST API for file metadata.
+    /// Returns the expected download size (in bytes) for a model — the files
+    /// `fetch_weights` will actually pull, not the whole repo. GGUF repos host
+    /// 10+ quants but we download exactly one; summing every sibling used to
+    /// make the progress bar report "8% · eta 3h" for a nearly-done pull (and
+    /// its verify-phase heuristic, gated on ≥50%, could never fire).
     pub async fn repo_total_bytes(&self, model_alias: &str) -> Result<u64> {
         let actual_repo = crate::registry::resolve_model_alias(model_alias)?;
         // Use the HF REST API which returns sibling sizes
@@ -176,12 +179,45 @@ impl HubClient {
             .json()
             .await
             .context("Failed to parse HF API response")?;
-        let total = resp["siblings"]
+        let files: Vec<(String, u64)> = resp["siblings"]
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|s| s["size"].as_u64())
-            .sum();
+            .filter_map(|s| {
+                Some((
+                    s["rfilename"].as_str()?.to_string(),
+                    s["size"].as_u64().unwrap_or(0),
+                ))
+            })
+            .collect();
+        let gguf_names: Vec<String> = files
+            .iter()
+            .map(|(n, _)| n.clone())
+            .filter(|n| n.ends_with(".gguf"))
+            .collect();
+        let total = if let Some(best) = crate::gguf::select_best_gguf(&gguf_names) {
+            // One selected GGUF + the small top-level metadata JSONs.
+            files
+                .iter()
+                .filter(|(n, _)| n == best || (n.ends_with(".json") && !n.contains('/')))
+                .map(|(_, sz)| sz)
+                .sum()
+        } else {
+            // Safetensors path: HF repos often dual-ship legacy .bin/.pth
+            // alongside .safetensors — count only the format we download.
+            let has_st = files.iter().any(|(n, _)| n.ends_with(".safetensors"));
+            files
+                .iter()
+                .filter(|(n, _)| {
+                    !has_st
+                        || !(n.ends_with(".bin")
+                            || n.ends_with(".pth")
+                            || n.ends_with(".h5")
+                            || n.ends_with(".msgpack"))
+                })
+                .map(|(_, sz)| sz)
+                .sum()
+        };
         Ok(total)
     }
 

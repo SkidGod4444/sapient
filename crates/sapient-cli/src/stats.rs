@@ -60,8 +60,15 @@ pub async fn run() -> Result<()> {
     let mut cache_size = hub_cache_size();
     let mut tick = 0u64;
 
-    print!("\x1b[?25l"); // hide cursor
-    let _ = std::io::stdout().flush();
+    // Only drive the live TUI on a real terminal: piped output would receive
+    // raw clear/hide-cursor escapes at ~1 Hz forever.
+    let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    if tty {
+        // Hide cursor + one full clear up front; each frame then repaints with
+        // home + clear-below (no per-frame `2J` flicker).
+        print!("\x1b[?25l\x1b[2J");
+        let _ = std::io::stdout().flush();
+    }
 
     loop {
         // CPU/process usage needs two samples spaced by the minimum interval.
@@ -77,16 +84,21 @@ pub async fn run() -> Result<()> {
         }
         tick += 1;
 
-        render(&sys, cache_size, exe_size, accel, &gpu_rows);
+        render(&sys, cache_size, exe_size, accel, &gpu_rows, tty);
 
+        if !tty {
+            break; // one snapshot when piped — not an endless escape stream
+        }
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
             _ = tokio::time::sleep(Duration::from_millis(900)) => {}
         }
     }
 
-    println!("\x1b[?25h"); // restore cursor
-    let _ = std::io::stdout().flush();
+    if tty {
+        println!("\x1b[?25h"); // restore cursor
+        let _ = std::io::stdout().flush();
+    }
     Ok(())
 }
 
@@ -96,9 +108,14 @@ fn render(
     exe_size: u64,
     accel: Option<&str>,
     gpu_rows: &[(String, String)],
+    tty: bool,
 ) {
     let mut o = String::new();
-    o.push_str("\x1b[2J\x1b[H"); // clear + cursor home
+    if tty {
+        // Home + clear-below repaints in place without the full-screen `2J`
+        // wipe, which flickers visibly at 1 Hz on most terminals.
+        o.push_str("\x1b[H\x1b[0J");
+    }
 
     o.push_str(&format!(
         "{}  {}\n\n",

@@ -15,6 +15,22 @@ pub mod telemetry;
 pub use profiler::{ChromeTracer, Span};
 pub use telemetry::{ConsoleTelemetry, NoOpTelemetry, Telemetry, TelemetryConfig};
 
+/// Like [`init_tracing`], but with a caller-chosen default filter and a plain
+/// human format. Long-running commands (`sapient serve`) route here so their
+/// operational logs ("loading model…", "evicted…") reach the console even
+/// without `--verbose` — a server that loads multi-GB models in silence looks
+/// hung from the client side. `RUST_LOG` still overrides.
+pub fn init_tracing_with_default(default: &str) {
+    use tracing_subscriber::{fmt, EnvFilter};
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
+    fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_file(false)
+        .with_line_number(false)
+        .init();
+}
+
 /// Initialise a global `tracing` subscriber (JSON or pretty).
 ///
 /// When `verbose` is false, tracing output is disabled so chat/pull stay clean.
