@@ -162,9 +162,7 @@ enum Commands {
         input: Option<PathBuf>,
     },
 
-    /// Synthesise speech from text with a TTS model (text-to-speech).
-    #[command(visible_aliases = ["tts", "say"])]
-    /// Ask a vision-language model about an image (SmolVLM — Phase 12)
+    /// Ask a vision-language model about an image (SmolVLM / Gemma3 / MedGemma).
     See {
         /// Image file (png/jpeg/webp).
         image: PathBuf,
@@ -182,6 +180,8 @@ enum Commands {
         max_tokens: usize,
     },
 
+    /// Synthesise speech from text with a TTS model (text-to-speech).
+    #[command(visible_aliases = ["tts", "say"])]
     Speak {
         /// Orpheus model alias or repo id (e.g. `orpheus-3b`).
         model: String,
@@ -432,12 +432,18 @@ enum Commands {
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-    init_tracing(cli.json_logs, cli.verbose);
+    // serve is long-running and loads models on demand — its info-level logs
+    // are the only signal that a first request is downloading, not hung.
+    if matches!(cli.command, Commands::Serve { .. }) && !cli.verbose && !cli.json_logs {
+        sapient_telemetry::init_tracing_with_default("sapient_cli=info");
+    } else {
+        init_tracing(cli.json_logs, cli.verbose);
+    }
 
     match dispatch(cli).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
-            ui::failure(format!("{e:#}"));
+            ui::failure_with_chain(&e);
             std::process::ExitCode::FAILURE
         }
     }
@@ -636,15 +642,20 @@ async fn dispatch(cli: Cli) -> Result<()> {
 /// Returns `Ok(None)` on EOF / Ctrl-C / Ctrl-D — the caller should break.
 fn read_chat_line(editor: &mut rustyline::DefaultEditor) -> Result<Option<String>> {
     use rustyline::error::ReadlineError;
-    match editor.readline(&ui::user_prompt_str()) {
-        Ok(line) => {
-            if !line.trim().is_empty() {
-                let _ = editor.add_history_entry(line.as_str());
+    loop {
+        match editor.readline(&ui::user_prompt_str()) {
+            Ok(line) => {
+                if !line.trim().is_empty() {
+                    let _ = editor.add_history_entry(line.as_str());
+                }
+                return Ok(Some(line));
             }
-            Ok(Some(line))
+            // Shell convention: Ctrl-C abandons the current line and re-prompts;
+            // only Ctrl-D (or /exit) leaves the session.
+            Err(ReadlineError::Interrupted) => continue,
+            Err(ReadlineError::Eof) => return Ok(None),
+            Err(e) => return Err(e.into()),
         }
-        Err(ReadlineError::Interrupted | ReadlineError::Eof) => Ok(None),
-        Err(e) => Err(e.into()),
     }
 }
 
@@ -678,12 +689,18 @@ async fn chat_command(
     // A model is "already cached" only if it is fully downloaded — no .sync.part
     // files in the blobs directory. A partial download is treated as not cached so
     // we show the download progress bar and hf-hub resumes from where it left off.
+    // Compare by the registry's canonical alias: `list_cached_models` returns
+    // aliases, but the user may address the model by repo id or extra alias —
+    // a raw string compare re-showed the pull bar for fully-cached models.
+    let canonical = sapient_hub::registry::lookup(model)
+        .map(|m| m.alias)
+        .unwrap_or(model);
     let already_cached = is_local_gguf
         || (hub::list_cached_models()
             .unwrap_or_default()
             .iter()
-            .any(|m| m == model)
-            && !hub::has_stale_downloads(model));
+            .any(|m| m == canonical)
+            && !hub::has_stale_downloads(canonical));
 
     let dl_handle = if !already_cached && !verbose {
         let hub_check = HubClient::with_options(sapient_hub::LoadOptions {
@@ -747,17 +764,18 @@ async fn chat_command(
         h.finish_success(model);
     }
     if let Some(pb) = load_spinner {
-        pb.finish_and_clear();
+        ui::spinner_success(pb, format!("{model} ready"));
     }
 
     // One-shot mode: run a single chat turn (chat template + end-of-turn EOS, so
     // the reply is bounded and well-formed) and print ONLY the reply to stdout so
-    // it's clean to capture in a script. Status/spinners already go to stderr.
+    // it's clean to capture in a script. Status/spinners already go to stderr —
+    // including this generation spinner, so slow CPU replies don't look hung.
     if let Some(p) = prompt {
-        let reply = pipeline
-            .chat(&[ChatMessage::user(p)])
-            .await
-            .context("one-shot chat generation failed")?;
+        let think = ui::spinner("thinking…");
+        let reply = pipeline.chat(&[ChatMessage::user(p)]).await;
+        think.finish_and_clear();
+        let reply = reply.context("one-shot chat generation failed")?;
         println!("{}", reply.trim());
         return Ok(());
     }
@@ -824,9 +842,10 @@ async fn chat_command(
 
         history.push(ChatMessage::user(line));
 
-        // Spinner shows "thinking" until the first token arrives, then is cleared
-        // and replaced by the assistant prompt + the live Markdown-rendered reply.
-        let think = ui::spinner("generating…");
+        // Spinner shows "thinking" (with live elapsed) until the first token
+        // arrives, then is cleared and replaced by the assistant prompt + the
+        // live Markdown-rendered reply.
+        let think = ui::spinner("thinking…");
         let start = std::time::Instant::now();
         let mut stream = pipeline.chat_stream(&history).await;
         let mut renderer = markdown::StreamRenderer::new(raw);
@@ -848,7 +867,12 @@ async fn chat_command(
             renderer.finish()?;
         }
         let reply = renderer.into_text();
-        if !reply.trim().is_empty() {
+        if reply.trim().is_empty() {
+            // Dead air after a spinner reads as a hang — name what happened.
+            ui::hint(
+                "the model returned an empty reply — try rephrasing, or /clear to reset context",
+            );
+        } else {
             let tokens = pipeline
                 .tokenizer()
                 .encode(&reply)
@@ -926,7 +950,7 @@ async fn chat_speculative_command(
 
         history.push(ChatMessage::user(line));
 
-        let think = ui::spinner("generating…");
+        let think = ui::spinner("thinking…");
         let start = std::time::Instant::now();
         let mut stream = pipeline.chat_stream(&history).await;
         let mut renderer = markdown::StreamRenderer::new(raw);
@@ -951,7 +975,11 @@ async fn chat_speculative_command(
         }
 
         let reply = renderer.into_text();
-        if !reply.trim().is_empty() {
+        if reply.trim().is_empty() {
+            ui::hint(
+                "the model returned an empty reply — try rephrasing, or /clear to reset context",
+            );
+        } else {
             // We don't have direct tokenizer access from SpeculativePipeline, so
             // approximate token count by whitespace splitting.
             let tokens = reply.split_whitespace().count();
@@ -1135,12 +1163,14 @@ fn models_command() -> Result<()> {
     let cached = hub::list_cached_models().unwrap_or_default();
 
     let row_for = |m: &sapient_hub::registry::SupportedModel| -> Vec<String> {
+        // Colored status glyphs (print_table aligns by display width, so the
+        // ANSI styling doesn't skew the columns).
         let status = if cached.iter().any(|c| c == m.alias) {
-            "downloaded".to_string()
+            format!("{}", console::style("✓ downloaded").green())
         } else if m.gated {
-            "gated".to_string()
+            format!("{}", console::style("⚿ gated — `sapient login`").yellow())
         } else {
-            "—".to_string()
+            format!("{}", console::style("—").dim())
         };
         // Show the real on-disk size if downloaded, else an estimate.
         let cached_bytes = hub::cached_model_size(m.alias);
@@ -1540,7 +1570,7 @@ async fn transcribe_command(
     let pipeline = std::sync::Arc::new(
         TranscribePipeline::from_pretrained_with_backend(model, backend_kind).await?,
     );
-    drop(loading);
+    ui::spinner_success(loading, format!("{model} ready"));
 
     let opts = TranscribeOptions {
         language,
@@ -1585,7 +1615,7 @@ async fn see_command(
     }
     let loading = ui::spinner(format!("loading {model}…"));
     let mut vlm = sapient_generate::VlmPipeline::from_pretrained(model).await?;
-    drop(loading);
+    ui::spinner_success(loading, format!("{model} ready"));
 
     let thinking = ui::spinner("looking at the image…");
     let image = image.to_path_buf();
@@ -1594,16 +1624,20 @@ async fn see_command(
         vlm.answer_with_stats(&image, &prompt_owned, max_tokens)
     })
     .await??;
-    drop(thinking);
+    thinking.finish_and_clear();
     println!("{answer}");
     eprintln!(
-        "⏱ vision {} ms · prefill {} ms ({} tok) · decode {} tok in {} ms ({:.1} tok/s)",
-        stats.vision_ms,
-        stats.prefill_ms,
-        stats.prompt_tokens,
-        stats.gen_tokens,
-        stats.decode_ms,
-        stats.decode_tps()
+        "{}",
+        console::style(format!(
+            "  ⚡ vision {} ms · prefill {} ms ({} tok) · decode {} tok in {} ms ({:.1} tok/s)",
+            stats.vision_ms,
+            stats.prefill_ms,
+            stats.prompt_tokens,
+            stats.gen_tokens,
+            stats.decode_ms,
+            stats.decode_tps()
+        ))
+        .dim()
     );
     Ok(())
 }
@@ -1655,9 +1689,10 @@ async fn speak_command(
 
     let loading = ui::spinner(format!("loading {model}…"));
     let pipeline = SpeakPipeline::from_pretrained_with_backend(model, backend_kind).await?;
-    drop(loading);
+    ui::spinner_success(loading, format!("{model} ready"));
 
     let synth = ui::spinner(format!("synthesising ({voice})…"));
+    let done_msg = format!("synthesised ({voice})");
     let text = text.to_owned();
     let voice = voice.to_owned();
     let (samples, sample_rate) = tokio::task::spawn_blocking(move || {
@@ -1667,7 +1702,7 @@ async fn speak_command(
     })
     .await
     .context("speak task panicked")??;
-    drop(synth);
+    ui::spinner_success(synth, done_msg);
 
     write_and_play_speech(&samples, sample_rate, output, no_play).await
 }
@@ -1734,7 +1769,7 @@ fn play_samples_blocking(samples: &[f32], sample_rate: u32) -> Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     std::thread::sleep(std::time::Duration::from_millis(250));
-    drop(spin);
+    spin.finish_and_clear();
     Ok(())
 }
 
@@ -1758,7 +1793,7 @@ async fn speak_kokoro_command(
 
     let loading = ui::spinner("loading kokoro-82m…".to_string());
     let tts = KokoroTts::from_default().await?.with_voice(voice);
-    drop(loading);
+    ui::spinner_success(loading, "kokoro-82m ready");
 
     let synth = ui::spinner(format!("synthesising ({voice})…"));
     let text = text.to_owned();
@@ -1769,7 +1804,7 @@ async fn speak_kokoro_command(
     })
     .await
     .context("kokoro speak task panicked")??;
-    drop(synth);
+    ui::spinner_success(synth, format!("synthesised ({voice})"));
 
     write_and_play_speech(&samples, sr, output, no_play).await
 }
@@ -1894,7 +1929,7 @@ async fn converse_command(
     let stt_pipe = stt_res?;
     let llm = llm_res?;
     let tts: std::sync::Arc<dyn Tts> = tts_res?.unwrap_or_else(|| std::sync::Arc::new(NoopTts));
-    drop(loading);
+    ui::spinner_success(loading, "voice stack ready");
 
     let mut converse = ConversePipeline::new(stt_pipe, llm, tts);
     match system {
@@ -2027,7 +2062,7 @@ async fn converse_command(
     {
         let warm = ui::spinner("warming up…");
         let _ = converse.transcribe_utterance(&vec![0.0f32; 8_000]);
-        drop(warm);
+        ui::spinner_success(warm, "warmed up");
     }
 
     // Live mic meter + a one-time hint if the mic looks dead (the terminal lacks
@@ -2038,6 +2073,7 @@ async fn converse_command(
     let mut total_frames = 0u64;
     let mut warned_silent = false;
     let mut meter_shown = false;
+    let mut mic_meter = ui::MicMeter::default();
     let clear_meter = |shown: &mut bool| {
         if *shown {
             print!("\r\x1b[2K");
@@ -2046,9 +2082,15 @@ async fn converse_command(
         }
     };
 
+    // One pinned Ctrl-C future for the whole loop: a fresh `ctrl_c()` per
+    // iteration loses any SIGINT that arrives while the body is busy in a long
+    // STT/LLM/TTS turn (the first poll disables default kill-on-SIGINT, and a
+    // new listener never sees earlier signals) — making Ctrl-C feel ignored.
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => { clear_meter(&mut meter_shown); ui::converse_bye(); break; }
+            _ = &mut ctrl_c => { clear_meter(&mut meter_shown); ui::converse_bye(); break; }
             chunk = frames.recv_async() => {
                 let Ok(chunk) = chunk else { break };
                 buf.extend_from_slice(&chunk);
@@ -2060,7 +2102,7 @@ async fn converse_command(
                     total_frames += 1;
                     meter_tick += 1;
                     if tty && meter_tick % 5 == 0 {
-                        print!("{}", ui::mic_meter_line(rms));
+                        print!("{}", mic_meter.line(rms));
                         let _ = std::io::stdout().flush();
                         meter_shown = true;
                     }
@@ -2250,6 +2292,8 @@ async fn bench_command(
     warmup: usize,
     iters: usize,
 ) -> Result<()> {
+    // `--iters 0` would index an empty latency vec below — a panic on user input.
+    let iters = iters.max(1);
     let model_path = hub::resolve_model_path(model).await?;
     let sizes: Vec<usize> = batch_sizes
         .split(',')
@@ -2318,7 +2362,8 @@ async fn inspect_command(model: &str, output_path: Option<PathBuf>) -> Result<()
         print!("{dot}");
     }
 
-    println!(
+    // Summary goes to stderr: `sapient inspect m > graph.dot` must stay valid DOT.
+    eprintln!(
         "\nGraph: {} nodes, {} edges",
         model.graph.node_count(),
         model.graph.edges.len()

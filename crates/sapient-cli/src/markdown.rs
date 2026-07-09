@@ -149,6 +149,11 @@ impl StreamRenderer {
             } else if let Some(p) = self.pending.find("<think>") {
                 let ans: String = self.pending[..p].into();
                 self.push_answer(&ans)?;
+                // Reasoning prints as free-scrolling dim text below the cursor,
+                // outside the block-managed region — commit the live preview
+                // first, or the next repaint's move-up-N erases the reasoning
+                // lines and leaves stale preview rows above them.
+                self.repaint(true)?;
                 self.pending.drain(..p + "<think>".len());
                 self.reasoning_active = true;
                 self.reasoning_header_shown = false;
@@ -187,11 +192,11 @@ impl StreamRenderer {
             self.reasoning_header_shown = true;
             self.reasoning_any = true;
             // Dim "thinking" header on its own line.
-            write!(out, "\x1b[2m\x1b[3m💭 thinking…\x1b[0m\n\x1b[2m")?;
+            writeln!(out, "\x1b[2m\x1b[3m💭 thinking…\x1b[0m")?;
         }
-        // Dim body; the dim (\x1b[2m) attribute stays active across chunks until
-        // end_reasoning resets it.
-        write!(out, "{text}")?;
+        // Dim per chunk, reset per chunk: an interrupt (Ctrl-C, io error) must
+        // never leave the user's terminal stuck rendering dim.
+        write!(out, "\x1b[2m{text}\x1b[0m")?;
         out.flush()
     }
 
@@ -229,8 +234,15 @@ impl StreamRenderer {
 
     /// The accumulated answer text (reasoning is excluded — kept out of history,
     /// matching the convention for reasoning models). Used for history + tokens.
+    /// In rich mode `full` never receives reasoning; in raw mode the stream is
+    /// passed through verbatim (including tags), so strip the spans here — a
+    /// `--raw` or piped session must not feed `<think>` text back as context.
     pub fn into_text(self) -> String {
-        self.full
+        if self.rich {
+            self.full
+        } else {
+            strip_think_spans(&self.full)
+        }
     }
 
     fn repaint(&mut self, final_: bool) -> io::Result<()> {
@@ -251,21 +263,31 @@ impl StreamRenderer {
             self.committed += rel;
         }
 
-        // 3. Repaint the trailing incomplete block as a live preview.
+        // 3. Repaint the trailing incomplete block as a live preview, with a
+        //    dim block cursor riding the stream head — the "still typing"
+        //    signal every modern LLM surface uses.
         self.preview_rows = 0;
         if !final_ {
             let preview_src = &self.full[self.committed..];
             if !preview_src.is_empty() {
-                let preview = self.render(preview_src);
-                let rows = cursor_down_moves(&preview, self.width);
-                out.write_all(preview.as_bytes())?;
-                if rows >= self.term_rows.saturating_sub(2) {
+                let plain = self.render(preview_src);
+                if cursor_down_moves(&plain, self.width) >= self.term_rows.saturating_sub(2) {
                     // Viewport guard: this block alone would overflow the screen,
                     // so commit it (let it scroll) rather than try to repaint it.
-                    ensure_newline(&mut out, &preview)?;
+                    // Committed content must not carry the stream cursor.
+                    out.write_all(plain.as_bytes())?;
+                    ensure_newline(&mut out, &plain)?;
                     self.committed = self.full.len();
                 } else {
-                    self.preview_rows = rows;
+                    // Attach the cursor to the last visual line (before its
+                    // '\n' if present) so it rides the text, not a blank row.
+                    let cursor = "\x1b[2m\x1b[36m▍\x1b[0m";
+                    let preview = match plain.strip_suffix('\n') {
+                        Some(stripped) => format!("{stripped}{cursor}\n"),
+                        None => format!("{plain}{cursor}"),
+                    };
+                    out.write_all(preview.as_bytes())?;
+                    self.preview_rows = cursor_down_moves(&preview, self.width);
                 }
             }
         }
@@ -414,6 +436,23 @@ fn ensure_newline(out: &mut impl Write, s: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Remove `<think>…</think>` spans (and an unterminated trailing `<think>…`)
+/// from a completed reply. Used by the raw/non-TTY path, where the stream is
+/// printed verbatim but reasoning must still stay out of the chat history.
+fn strip_think_spans(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(open) = rest.find("<think>") {
+        out.push_str(&rest[..open]);
+        match rest[open..].find("</think>") {
+            Some(close) => rest = &rest[open + close + "</think>".len()..],
+            None => return out, // unterminated span: drop to end
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn default_skin() -> MadSkin {
     let mut skin = MadSkin::default();
     skin.set_headers_fg(termimad::crossterm::style::Color::Cyan);
@@ -485,6 +524,21 @@ mod tests {
         let out = r.render("Hello **world**\n");
         assert!(out.contains("world"), "text content is preserved");
         assert!(out.contains("\x1b["), "termimad emits styling escapes");
+    }
+
+    #[test]
+    fn strip_think_spans_removes_reasoning() {
+        assert_eq!(
+            strip_think_spans("<think>let me see</think>Paris."),
+            "Paris."
+        );
+        assert_eq!(
+            strip_think_spans("a<think>x</think>b<think>y</think>c"),
+            "abc"
+        );
+        // Unterminated span drops to the end; plain text passes through.
+        assert_eq!(strip_think_spans("hi<think>never closed"), "hi");
+        assert_eq!(strip_think_spans("no tags at all"), "no tags at all");
     }
 
     #[test]
