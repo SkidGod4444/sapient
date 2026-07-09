@@ -8,8 +8,8 @@
 > portability, curated registry, modern CLI, and edge-specific automation
 > (auto-pick quantization for available RAM, auto CPU/GPU offload, single static binary).
 
-## Where we are (v0.4.4)
-- 🚧 **Sparse MoE (Mixtral-class first cut)** — the credible "big models on edge"
+## Where we are (v0.5.3)
+- ✅ **Sparse MoE (Mixtral-class first cut)** — the credible "big models on edge"
   path: a 47B-A13B (Mixtral-8x7B) decodes at ~13B bandwidth cost on 32 GB+ devices
   (big Mac / Jetson Thor). Implemented as a per-layer `Ffn::{Dense, Moe}` branch
   **inside `LlamaForward`** (shared attention/KV/RoPE), detected by config not
@@ -33,8 +33,12 @@
   ~63 GB set) with a **zero-copy stacked-expert split** (per-expert mmap views, no
   heap copy — 7× decode over the byte-copy). `ArchType::Glm4Moe` (NEOX → no q/k
   unpermute). Registry `openhorizon/glm-4.5-air-q4` (96 GB+ device). Four
-  real-model bugs the Thor run caught that synthetic tests couldn't. GLM-5.2 stays
-  out of scope (MLA + DeepSeek Sparse Attention + group-limited routing).
+  real-model bugs the Thor run caught that synthetic tests couldn't. v0.5.3 added a
+  fifth fix: quant types SAPIENT can't keep as packed blocks (GLM's Q5_0
+  `ffn_down_exps`) now re-quantize to Q8_0 at load instead of F32-expanding —
+  peak RSS 118 → 72 GB, decode 2.45 → 3.23 tok/s, prefill 5×; GLM-4.5-Air fits a
+  96 GB device. GLM-5.2 stays out of scope (MLA + DeepSeek Sparse Attention +
+  group-limited routing).
 - ⏳ **Server-ARM decode kernels (parity project, NOT MoE-specific)** — the Thor
   benchmark surfaced that SAPIENT is ~3.16× behind llama.cpp on *dense* Neoverse
   CPU decode (bigger than the 1.8× MoE gap → MoE is fine), decomposing to ~1.94×

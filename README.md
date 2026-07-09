@@ -1,6 +1,6 @@
 <div align="center">
   <h1>⚡ SAPIENT</h1>
-  <p><strong>A fast, pure-Rust edge inference engine for small language models — one command to install, one line to run</strong></p>
+  <p><strong>A fast, pure-Rust edge inference engine for language, vision, and speech models — one command to install, one line to run</strong></p>
   <p>
     <a href="https://github.com/SkidGod4444/sapient/releases"><img src="https://img.shields.io/github/v/release/SkidGod4444/sapient" alt="Release"/></a>
     <a href="https://github.com/SkidGod4444/sapient/actions"><img src="https://github.com/SkidGod4444/sapient/workflows/CI/badge.svg" alt="CI"/></a>
@@ -9,7 +9,7 @@
     <img src="https://img.shields.io/github/downloads/SkidGod4444/sapient/total" alt="Downloads"/>
   </p>
   <p>
-    <b>macOS · Linux · Windows</b> &nbsp;|&nbsp; No Python · No Docker · No CUDA required
+    <b>macOS · Linux · Windows</b> &nbsp;|&nbsp; No Python · No Docker · No CUDA required &nbsp;|&nbsp; <a href="https://sapient.openhorizon.so">sapient.openhorizon.so</a>
   </p>
 </div>
 
@@ -143,6 +143,9 @@ sapient login
 
 # Show config/architecture info for a model
 sapient info openhorizon/phi-2
+
+# Detect CPU/GPU, estimate tok/s, get a backend recommendation
+sapient devices
 sapient backend-info
 
 # Verbose mode — show internal logs, file paths, and generation stats
@@ -239,53 +242,84 @@ let text = p.generate_with_config("Write a haiku about Rust", &cfg).await?;
 
 SAPIENT ships a **curated registry** — every model below is one whose architecture is
 implemented and verified in the native generation engine. Each `openhorizon/*` alias
-resolves to the upstream Hugging Face repository it downloads from. Run `sapient models`
-to see this list (and which models you've already downloaded) at any time — it's grouped
-into **Text generation (chat)**, **Speech-to-text (transcribe)**, and **Text-to-speech
-(speak)** sections so it's clear which command each model is for. Pointing a command at the
-wrong category fails fast with a clear hint (e.g. `sapient speak whisper-small …` → "that's
-a speech-to-text model, use `sapient transcribe`").
+resolves to the upstream Hugging Face repository it downloads from (the short alias
+works too, e.g. `sapient chat qwen2.5-0.5b-q4`). Run `sapient models` to see this list
+(and which models you've already downloaded) at any time — it's grouped into
+**Text generation (chat)**, **Speech-to-text (transcribe)**, **Text-to-speech (speak)**,
+and **Vision-language (see)** sections so it's clear which command each model is for.
+Pointing a command at the wrong category fails fast with a clear hint (e.g.
+`sapient speak whisper-small …` → "that's a speech-to-text model, use `sapient transcribe`").
+
+### Text generation — `sapient chat`
 
 | Alias | Family | Size | Notes |
 |---|---|---|---|
 | `openhorizon/phi-2` | Phi | 2.7B | Default; LayerNorm + partial RoPE |
-| `openhorizon/phi-1.5` | Phi | 1.3B | |
-| `openhorizon/phi-1` | Phi | 1.3B | |
-| `openhorizon/qwen2.5-0.5b` | Qwen2.5 | 0.5B | Smallest; great for quick tests |
-| `openhorizon/qwen2.5-1.5b` | Qwen2.5 | 1.5B | |
-| `openhorizon/qwen2.5-3b` | Qwen2.5 | 3B | |
-| `openhorizon/smollm2-360m` | Llama | 360M | |
-| `openhorizon/smollm2-1.7b` | Llama | 1.7B | |
+| `openhorizon/phi-1.5` / `phi-1` | Phi | 1.3B | |
+| `openhorizon/phi-2-q4` | Phi | 2.7B GGUF | |
+| `openhorizon/phi-4-mini` | Phi | 3.8B Q4_K_M | |
+| `openhorizon/qwen2.5-0.5b` | Qwen2.5 | 0.5B | Smallest chat model; great for quick tests |
+| `openhorizon/qwen2.5-1.5b` / `-3b` | Qwen2.5 | 1.5B / 3B | |
+| `openhorizon/qwen2.5-0.5b-q4` / `-1.5b-q4` | Qwen2.5 | 0.5B / 1.5B Q4_K_M | |
+| `openhorizon/qwen2.5-coder-0.5b` / `-1.5b` | Qwen2.5 | 0.5B / 1.5B Q4_K_M | Code-tuned |
+| `openhorizon/smollm2-135m-q4` | Llama | 135M Q4_K_M | Tiniest model in the catalog |
+| `openhorizon/smollm2-360m` (+ `-q4`) | Llama | 360M | |
+| `openhorizon/smollm2-1.7b` (+ `-q4`) | Llama | 1.7B | |
 | `openhorizon/tinyllama-1.1b` | Llama | 1.1B | |
-| `openhorizon/llama-3.2-1b` | Llama | 1B | |
-| `openhorizon/llama-3.2-3b` | Llama | 3B | Gated — run `sapient login` |
-| `openhorizon/mistral-7b` | Mistral | 7B | Gated — run `sapient login` |
+| `openhorizon/llama-3.2-1b` (+ `-q4`) | Llama | 1B | |
+| `openhorizon/llama-3.2-3b` (+ `-q4`) | Llama | 3B | |
+| `openhorizon/llama-3.1-8b-q4` | Llama | 8B Q4_K_M | |
+| `openhorizon/deepseek-r1-8b` | Llama | 8B Q4_K_M | DeepSeek-R1-Distill |
+| `openhorizon/mistral-7b` | Mistral | 7B | 13.5 GB safetensors — prefer `mistral-7b-q4` |
+| `openhorizon/mistral-7b-q4` | Mistral | 7B Q4_K_M | |
+| `openhorizon/gemma-3-1b` | Gemma3 | 1B | Gemma3 engine (QK-norm, sliding/global attention) |
+| `openhorizon/gemma-3-4b` | Gemma3 (multimodal) | 4B | Also serves `sapient see` |
+| `openhorizon/medgemma-4b` | Gemma3 (medical) | 4B | Medical Q&A + image analysis (gated — `sapient login`) |
 | `openhorizon/mixtral-8x7b-q4` | Mixtral (sparse MoE) | 47B-A13B | 8 experts top-2; Q4_K_M ≈ 26 GB — needs a 32 GB+ device; CPU-only |
 | `openhorizon/glm-4.5-air-q4` | GLM-4.5 (sigmoid-gate MoE) | 106B-A12B | 128 experts top-8 + shared expert; Q4_K_M ≈ 63 GB (2-shard split) — needs a 96 GB+ device; CPU-only |
-| `whisper-tiny` | Whisper | 39M | Speech-to-text — `sapient transcribe` |
-| `whisper-base` | Whisper | 74M | Speech-to-text — `sapient transcribe` |
-| `whisper-small` | Whisper | 244M | Speech-to-text — `sapient transcribe` |
-| `kokoro-82m` | StyleTTS2 + ISTFTNet | 82M | Text-to-speech — `sapient speak` (~2× real-time on CPU) |
-| `smolvlm-256m` | SmolVLM (SigLIP + SmolLM2) | 256M | Vision-language — `sapient see` |
-| `gemma-3-1b` | Gemma3 | 1B | Chat — new Gemma3 engine (QK-norm, sliding/global attention) |
-| `gemma-3-4b` | Gemma3 (multimodal) | 4B | Chat + `sapient see` |
-| `medgemma-4b` | Gemma3 (medical) | 4B | Medical Q&A chat + medical image analysis (gated) |
-| `orpheus-3b` | Llama/Orpheus | 3B | Text-to-speech — `sapient speak` (richer voice, slow) |
 
-**Speech-to-text:** Whisper models power `sapient transcribe <model> <audio>` on all platforms.
-Audio is decoded + resampled to 16 kHz in pure Rust (`symphonia`/`rubato`), turned into a log-mel
-spectrogram, and run through a native Whisper encoder/decoder. Auto-detects the spoken language;
-`--language <code>` forces it and `--translate` outputs English. Runs on CPU by default, or on the
-cross-platform GPU with `--backend wgpu` (build `--features wgpu`).
+The `-q4` aliases download a single quantized GGUF file — RAM ≈ file size, no F32
+expansion — and are the right pick for edge devices.
 
-All text models run on the **CPU** backend everywhere; on Apple Silicon, building with
-`--features mlx` enables the **Metal** GPU backend. Weights are loaded from Safetensors
-(F16/BF16/F32). To request another model, open an issue — adding one means implementing
-and validating its architecture in `sapient-models`.
+### Speech-to-text — `sapient transcribe`
+
+| Alias | Family | Size |
+|---|---|---|
+| `openhorizon/whisper-tiny` | Whisper | 39M |
+| `openhorizon/whisper-base` | Whisper | 74M |
+| `openhorizon/whisper-small` | Whisper | 244M |
+
+Audio is decoded + resampled to 16 kHz in pure Rust (`symphonia`/`rubato`), turned into a
+log-mel spectrogram, and run through a native Whisper encoder/decoder. Auto-detects the
+spoken language; `--language <code>` forces it and `--translate` outputs English. On a
+`-gpu` (wgpu) build, `--backend auto` picks the GPU automatically when an adapter exists
+(CPU fallback; on Apple Silicon the CPU/Metal path keeps precedence).
+
+### Text-to-speech — `sapient speak`
+
+| Alias | Family | Size | Notes |
+|---|---|---|---|
+| `openhorizon/kokoro-82m` | StyleTTS2 + ISTFTNet | 82M | ~2× real-time on CPU; 54 voices; default for `converse --speak` |
+| `openhorizon/orpheus-3b` | Llama/Orpheus → SNAC | 3B | Richer voice, slow on CPU; 8 voices |
+
+### Vision-language — `sapient see`
+
+| Alias | Family | Size | Notes |
+|---|---|---|---|
+| `openhorizon/smolvlm-256m` | SmolVLM (SigLIP + SmolLM2) | 256M | Default; ~3 s to first token on M4 |
+| `openhorizon/gemma-3-4b` | Gemma3 multimodal | 4B | |
+| `openhorizon/medgemma-4b` | Gemma3 medical | 4B | X-ray / dermatology / pathology (gated) |
+
+Every model runs on the **CPU** backend on all platforms, loading safetensors
+(F16/BF16/F32, auto-quantized to Q8_0 at load) or GGUF (Q4/Q5/Q6/Q8, mmap-able).
+The `-metal` binary (Apple Silicon, MLX) and `-gpu` binaries (wgpu — Intel/AMD/Nvidia)
+run chat models — and, on wgpu, Whisper — on the GPU; `--backend auto` picks the
+compiled accelerator. To request another model, open an issue — adding one means
+implementing and validating its architecture in `sapient-models`.
 
 ---
 
-## Performance (v0.5.1, Apple M4 16 GB / Raspberry Pi 5)
+## Performance (Apple M4 16 GB · Raspberry Pi 5 · Jetson AGX Thor)
 
 **Head-to-head vs llama.cpp and Ollama** (same GGUF file, same machine, decode tok/s —
 full tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md)):
@@ -311,7 +345,26 @@ W6A8 SDOT Q6_K, and i8mm SMMLA prefill kernels, every rung bit-identity-gated:
 
 A Pi 5 went **1.3 → 11.6 tok/s (8.9×)** on this model across v0.5.0 + v0.5.1 — 1B-class
 chat on a Pi is genuinely interactive. CPU prefill is 1.5× (M4) to 2× (Jetson Thor)
-faster than v0.5.0 on long prompts.
+faster than v0.5.0 on long prompts. (These ratios hold on NEON-class CPUs — M-series,
+Pi. SVE-class server ARM (Grace/Thor Neoverse) still trails llama.cpp's KleidiAI
+microkernels ~3× on dense decode; closing that is its own roadmap project.)
+
+### Sparse MoE — big models on small devices (v0.5.3)
+
+A **47B Mixtral-8x7B** and a **106B GLM-4.5-Air** run fully on-device in pure Rust,
+**zero CUDA**, on a Jetson AGX Thor (14× Neoverse, CPU path):
+
+| Model (Q4_K_M GGUF) | Decode | Prefill | Peak RSS |
+|---|---|---|---|
+| Mixtral-8x7B (47B-A13B, ≈ 26 GB) | 5.5 tok/s | ~6–9 tok/s | 25.6 GB (mmap ≈ file size) |
+| GLM-4.5-Air (106B-A12B, ≈ 63 GB split GGUF) | 3.2 tok/s | 3.9 tok/s | 72 GB — fits a 96 GB device |
+
+**Zero quality loss:** greedy output is token-identical to llama.cpp on the same file
+(~28 tokens, then benign f32-order drift) — and SAPIENT loads the classic per-expert
+Mixtral GGUFs that current llama.cpp rejects. MoE models mmap by default (RSS ≈ file
+size), and quant types SAPIENT can't keep as packed blocks (e.g. Q5_0 in "dynamic"
+quants) re-quantize to Q8_0 at load instead of exploding to F32 (GLM peak RSS
+118 → 72 GB). Full decomposition in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 **Serving head-to-head** (`sapient serve` vs Ollama vs vLLM, Apple M4 / Metal): SAPIENT
 beats Ollama on TTFT (**4.2×**, 14 ms vs 59 ms), decode (**1.25×**), concurrent
@@ -409,10 +462,17 @@ sapient serve --port 8080 --speculative
 | Endpoint | Purpose |
 |---|---|
 | `GET /v1/models` | List loaded model(s) |
-| `POST /v1/chat/completions` | OpenAI-compatible chat completion |
+| `POST /v1/chat/completions` | OpenAI-compatible chat — plain text or **image parts** (base64 data URIs) |
 | `POST /v1/completions` | Raw text completion |
 | `POST /v1/audio/transcriptions` | OpenAI-compatible speech-to-text (multipart audio upload) |
 | `GET /v1/health` | Liveness check |
+
+`/v1/chat/completions` accepts OpenAI-style image content parts as **base64 data URIs**,
+routed through the same vision engine as `sapient see` (smolvlm-256m, gemma-3-4b,
+medgemma-4b). Remote image URLs are refused by design — your inference box never makes
+surprise egress. The server keeps the N most-recently-used models resident (multi-model
+LRU cache, `--max-models` / `--cache-gb`), so switching back to a recent model is
+instant instead of a cold reload.
 
 Example with `curl`:
 
@@ -432,7 +492,8 @@ by pointing the base URL at `http://localhost:8080/v1`.
 
 ## HuggingFace Token (Gated Models)
 
-For models that require access approval (Llama 3.2, Mistral):
+For models that require access approval (currently only `medgemma-4b` — accept
+Google's Health AI Developer Foundations terms on Hugging Face first):
 
 ```bash
 # Set via environment variable
@@ -449,26 +510,31 @@ sapient login
 Built in Rust for maximum performance, with zero dependencies on Python, ONNX Runtime, or CUDA.
 
 ```
-sapient-generate          ← Pipeline API — from_pretrained, generate, chat, embed, stream
-                             SpeculativePipeline — draft+target speculative decoding
-├── sapient-hub           ← HuggingFace Hub client — parallel downloads, auth, cache, registry
-├── sapient-tokenizers    ← All HF tokenizer types + Jinja2 chat templates
-├── sapient-models        ← Forward engines: Phi (Phi-1/1.5/2) and Llama (Llama/Qwen2.5/SmolLM2/TinyLlama/Mistral)
-│
-├── sapient-runtime       ← InferenceSession — graph execution + telemetry
-│   ├── sapient-ir        ← Computation graph IR + optimization passes
-│   └── sapient-io        ← Safetensors, GGUF (Q4/Q8/Q5 dequant), ONNX loaders
+sapient-cli               ← the `sapient` binary (chat, see, transcribe, speak, converse, serve, stats, …)
+sapient-generate          ← Pipeline API — from_pretrained, generate, chat, stream
+                             + SpeculativePipeline (draft+target speculative decoding),
+                             TranscribePipeline (STT), SpeakPipeline (TTS),
+                             VlmPipeline (vision), ConversePipeline (voice loop)
+├── sapient-hub           ← HuggingFace Hub client — parallel downloads, auth, cache, curated registry
+├── sapient-tokenizers    ← All HF tokenizer types + Jinja2 chat templates + Whisper tokenizer
+├── sapient-models        ← Forward engines: Phi, Llama (Llama/Qwen2.5/SmolLM2/TinyLlama/Mistral
+│                            + Mixtral/GLM sparse MoE), Gemma3, Whisper, SigLIP (vision),
+│                            Kokoro + SNAC (TTS); MLX and wgpu GPU engines
+├── sapient-audio         ← Audio decode/resample (symphonia+rubato), log-mel front-end, mic/speaker I/O
+├── sapient-io            ← Safetensors (mmap), GGUF (Q4/Q5/Q6/Q8 quant), ONNX loaders
 │
 ├── sapient-backends-cpu    ← CPU kernels: Flash-Edge attention, RoPE, RMSNorm/LayerNorm,
-│                             MatMul, NEON Q4_0/Q8_0/Q4_K/F16 GEMV, AVX2 Q8_0
-└── sapient-backends-metal  ← Apple Silicon Metal/MLX backend (built with `--features mlx`)
+│                             NEON/AVX2 quantized GEMV (SDOT/SMMLA int8 ladder), thermal governor
+├── sapient-backends-metal  ← Apple Silicon Metal/MLX backend (`--features mlx`)
+└── sapient-backends-wgpu   ← Portable GPU backend — WGSL over Vulkan/DX12/Metal (`--features wgpu`)
 ```
 
-> Generation runs through two validated forward engines — **Phi** and **Llama** (the
-> latter also serves Qwen2.5, SmolLM2, TinyLlama and Mistral). `sapient serve` drives
-> these engines directly via the `Pipeline` API (OpenAI-compatible). Additional architecture
-> builders (Gemma, GPT-2, BERT, Mixtral) exist in the IR layer but are not yet wired into
-> the chat/generation path.
+> Generation runs through three validated text engines — **Phi**, **Llama** (which also
+> serves Qwen2.5, SmolLM2, TinyLlama, Mistral, and the Mixtral/GLM sparse-MoE models),
+> and **Gemma3** — plus dedicated engines for Whisper STT, Kokoro/SNAC TTS, and the
+> SigLIP vision tower. `sapient serve` drives them directly via the `Pipeline` API
+> (OpenAI-compatible). The IR-layer architecture builders (GPT-2, BERT, …) are graph
+> scaffolding, not part of the live inference path.
 
 ---
 
@@ -502,6 +568,7 @@ You are free to use, study, share, and improve this software. Any modified versi
 Issues and PRs are very welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 Areas where contributions are especially appreciated:
-- New model architecture builders (`crates/sapient-models/src/architectures/`)
-- Apple Metal kernels (`crates/sapient-backends/metal/`)
-- Quantization kernels (INT4, INT8 fused)
+- New forward engines (`crates/sapient-models/src/forward/`)
+- WGSL GPU kernels (`crates/sapient-backends/wgpu/`)
+- Quantization kernels (`crates/sapient-backends/cpu/src/kernels/`)
+- Intel Arc / AMD GPU benchmark datapoints (`scripts/bench_gpu_7_6.sh`)
