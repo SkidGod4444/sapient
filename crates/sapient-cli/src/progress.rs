@@ -45,13 +45,26 @@ pub struct DownloadProgressHandle {
 impl DownloadProgressHandle {
     pub fn finish_success(self, model: &str) {
         self.done.store(true, Ordering::Relaxed);
+        let (bytes, took) = (self.bar.position(), self.bar.elapsed());
         self.bar.finish_and_clear();
-        println!("✓ {model} pulled successfully");
+        // One-line receipt: what landed, how big, how long — the download's
+        // "settled" moment (a bar that just vanishes reads as uncertainty).
+        let size = if bytes > 0 {
+            format!(" · {:.1} GB", bytes as f64 / 1e9)
+        } else {
+            String::new()
+        };
+        crate::ui::success(format!(
+            "{model} pulled{size}{}",
+            console::style(format!(" in {}", crate::ui::fmt_duration(took))).dim()
+        ));
     }
 
     pub fn finish_error(self) {
         self.done.store(true, Ordering::Relaxed);
-        self.bar.abandon();
+        // Clear rather than abandon: abandoning freezes a stale
+        // "pulling… eta 44s" line above the actual error output.
+        self.bar.finish_and_clear();
     }
 }
 

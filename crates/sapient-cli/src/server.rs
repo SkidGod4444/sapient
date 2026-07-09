@@ -876,6 +876,9 @@ async fn handle_chat_completions(
         .iter()
         .map(|m| match m.role.as_str() {
             "assistant" => ChatMessage::assistant(m.content.text()),
+            // A system prompt rendered as a user turn degrades the persona and
+            // reads as if the user said it — map it to the template's system role.
+            "system" | "developer" => ChatMessage::system(m.content.text()),
             _ => ChatMessage::user(m.content.text()),
         })
         .collect();
@@ -1411,7 +1414,15 @@ pub async fn serve_llm(
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!("SAPIENT serve listening on {addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // Graceful Ctrl-C: without this the process dies without unwinding, the
+    // ServeLock pidfile survives, and the next `sapient serve` refuses to start
+    // (on Windows pid_alive can't verify liveness, so it would refuse forever).
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+            eprintln!("\n  shutting down…");
+        })
+        .await?;
     Ok(())
 }
 
@@ -1436,7 +1447,7 @@ fn print_banner(port: u16, backend: &str, loaded: Option<(&str, &str, &str)>) {
         );
     }
     println!(
-        "  {} http://0.0.0.0:{}",
+        "  {} http://localhost:{}",
         console::style("address").dim(),
         port
     );
