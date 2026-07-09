@@ -4045,6 +4045,7 @@ version = "0.5.2"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
+ "base64 0.22.1",
  "clap",
  "console 0.15.11",
  "dirs 5.0.1",

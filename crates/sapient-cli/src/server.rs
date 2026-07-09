@@ -33,7 +33,7 @@ use tracing::info;
 
 use sapient_generate::{
     GenerationConfig, LoadOptions, Pipeline, SamplingStrategy, SpeculativePipeline,
-    TranscribeOptions, TranscribePipeline,
+    TranscribeOptions, TranscribePipeline, VlmPipeline,
 };
 use sapient_tokenizers::ChatMessage;
 
@@ -210,6 +210,11 @@ struct ServeState {
     /// kept separate from the text `cache` so the text inference surface stays
     /// uncluttered. Shares `load_lock` and `inference_sem` with the text path.
     audio_cache: Arc<Mutex<ModelCache<Arc<TranscribePipeline>>>>,
+    /// Parallel LRU cache for vision-language models (image parts in
+    /// POST /v1/chat/completions — Phase 12.3), mirroring `audio_cache`.
+    /// `VlmPipeline` inference is `&mut` + blocking, so each entry sits behind
+    /// its own async Mutex whose owned guard moves into `spawn_blocking`.
+    vlm_cache: Arc<Mutex<ModelCache<Arc<Mutex<VlmPipeline>>>>>,
     /// Serializes model loads so two concurrent first-requests for the same model
     /// don't both download/load it, and loads don't thrash each other.
     load_lock: Arc<Mutex<()>>,
@@ -329,6 +334,37 @@ impl ServeState {
         }
         Ok(entry)
     }
+
+    /// Like [`get_or_load`], but for vision-language models (`VlmPipeline`)
+    /// serving image parts in POST /v1/chat/completions. Same fast-path /
+    /// load-lock / LRU-insert structure as the audio cache.
+    async fn get_or_load_vlm(
+        &self,
+        model_id: &str,
+    ) -> Result<Arc<CachedModel<Arc<Mutex<VlmPipeline>>>>> {
+        if let Some(m) = self.vlm_cache.lock().await.touch(model_id) {
+            return Ok(m);
+        }
+        let _load = self.load_lock.lock().await;
+        if let Some(m) = self.vlm_cache.lock().await.touch(model_id) {
+            return Ok(m);
+        }
+
+        info!("loading VLM '{model_id}'…");
+        let pipeline = VlmPipeline::from_pretrained(model_id)
+            .await
+            .with_context(|| format!("failed to load VLM '{model_id}'"))?;
+        let entry = Arc::new(CachedModel {
+            model_id: model_id.to_string(),
+            payload: Arc::new(Mutex::new(pipeline)),
+            bytes: estimate_model_bytes(model_id),
+        });
+        let evicted = self.vlm_cache.lock().await.insert(entry.clone());
+        for id in &evicted {
+            info!("evicted VLM '{id}' from vlm cache (LRU)");
+        }
+        Ok(entry)
+    }
 }
 
 /// Estimate a model's resident memory (bytes) for budgeting. Uses the on-disk
@@ -402,7 +438,83 @@ struct CompletionRequest {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct OAIMessage {
     pub role: String,
-    pub content: String,
+    pub content: OAIContent,
+}
+
+/// OpenAI message `content`: a plain string, or an array of typed parts —
+/// text and base64 data-URI images (Phase 12.3). Untagged, so plain-string
+/// clients keep working unchanged, and `Text` serializes back to a plain
+/// string in responses.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(untagged)]
+pub enum OAIContent {
+    Text(String),
+    Parts(Vec<OAIContentPart>),
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OAIContentPart {
+    Text { text: String },
+    ImageUrl { image_url: OAIImageUrl },
+}
+
+/// OpenAI `image_url` payload. `detail` is accepted for compatibility and
+/// ignored (the tower has one fixed input resolution).
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct OAIImageUrl {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl OAIContent {
+    /// The message's text: the whole string, or all text parts joined.
+    fn text(&self) -> String {
+        match self {
+            Self::Text(s) => s.clone(),
+            Self::Parts(parts) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    OAIContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+
+    /// URLs of every `image_url` part (empty for plain-string content).
+    fn image_urls(&self) -> Vec<&str> {
+        match self {
+            Self::Text(_) => Vec::new(),
+            Self::Parts(parts) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    OAIContentPart::ImageUrl { image_url } => Some(image_url.url.as_str()),
+                    _ => None,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Decode an OpenAI image part URL. Only `data:<mime>;base64,<payload>` is
+/// accepted — the server never fetches remote image URLs (no surprise egress).
+fn decode_image_data_uri(url: &str) -> Result<Vec<u8>> {
+    let rest = url.strip_prefix("data:").ok_or_else(|| {
+        anyhow::anyhow!(
+            "only base64 data URIs are supported (data:image/...;base64,...); \
+             the server does not fetch remote image URLs"
+        )
+    })?;
+    let (_mime, payload) = rest.split_once(";base64,").ok_or_else(|| {
+        anyhow::anyhow!("image data URI must be base64-encoded (data:image/...;base64,...)")
+    })?;
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(payload.trim())
+        .context("invalid base64 in image data URI")
 }
 
 #[derive(Serialize)]
@@ -739,6 +851,15 @@ async fn handle_chat_completions(
         Err(r) => return r,
     };
 
+    // Image parts route to the vision pipeline (Phase 12.3).
+    if req
+        .messages
+        .iter()
+        .any(|m| !m.content.image_urls().is_empty())
+    {
+        return handle_vision_chat(state, req, model_id).await;
+    }
+
     let model = match state.get_or_load(&model_id).await {
         Ok(m) => m,
         Err(e) => return server_err(e),
@@ -754,8 +875,8 @@ async fn handle_chat_completions(
         .messages
         .iter()
         .map(|m| match m.role.as_str() {
-            "assistant" => ChatMessage::assistant(m.content.clone()),
-            _ => ChatMessage::user(m.content.clone()),
+            "assistant" => ChatMessage::assistant(m.content.text()),
+            _ => ChatMessage::user(m.content.text()),
         })
         .collect();
     let cfg = build_config(req.max_tokens, req.temperature, parse_stop(req.stop));
@@ -862,7 +983,7 @@ async fn handle_chat_completions(
                         index: 0,
                         message: OAIMessage {
                             role: "assistant".into(),
-                            content: reply,
+                            content: OAIContent::Text(reply),
                         },
                         finish_reason: "stop",
                     }],
@@ -876,6 +997,136 @@ async fn handle_chat_completions(
             }
             Err(e) => server_err(e),
         }
+    }
+}
+
+/// One vision-language turn (Phase 12.3): the final message must be the user
+/// turn carrying exactly one `image_url` part — a base64 data URI — and its
+/// text parts are the question (single-image, single-turn, matching the
+/// `sapient see` v1 scope). `stream: true` is honored as a single content
+/// chunk plus the usage chunk — the VLM pipeline decodes greedily without a
+/// token stream yet.
+async fn handle_vision_chat(
+    state: ServeState,
+    req: ChatCompletionRequest,
+    model_id: String,
+) -> Response {
+    let Some(last) = req.messages.last() else {
+        return model_err("messages must not be empty");
+    };
+    let earlier_images = req.messages[..req.messages.len() - 1]
+        .iter()
+        .any(|m| !m.content.image_urls().is_empty());
+    if earlier_images || last.role != "user" {
+        return model_err(
+            "image parts are only supported in the final user message (single-turn vision v1)",
+        );
+    }
+    let urls = last.content.image_urls();
+    if urls.len() != 1 {
+        return model_err("exactly one image part per request is supported (vision v1)");
+    }
+    let image_bytes = match decode_image_data_uri(urls[0]) {
+        Ok(b) => b,
+        Err(e) => return model_err(format!("{e:#}")),
+    };
+    let question = last.content.text();
+
+    let model = match state.get_or_load_vlm(&model_id).await {
+        Ok(m) => m,
+        Err(e) => return server_err(format!("{e:#}")),
+    };
+
+    // Admission control, as in the text path.
+    let _permit = match state.inference_sem.clone().acquire_owned().await {
+        Ok(p) => p,
+        Err(_) => return server_err("server is shutting down"),
+    };
+
+    let max_new = req.max_tokens.unwrap_or(512);
+    // The owned guard moves into the blocking task; concurrent requests for the
+    // same VLM queue on the async mutex without blocking an executor thread.
+    let mut vlm = model.payload.clone().lock_owned().await;
+    let result = tokio::task::spawn_blocking(move || {
+        vlm.answer_bytes_with_stats(&image_bytes, &question, max_new)
+    })
+    .await;
+    let (reply, stats) = match result {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => return server_err(format!("{e:#}")),
+        Err(e) => return server_err(format!("vision inference task failed: {e}")),
+    };
+    let usage = Usage {
+        prompt_tokens: stats.prompt_tokens,
+        completion_tokens: stats.gen_tokens,
+        total_tokens: stats.prompt_tokens + stats.gen_tokens,
+    };
+    info!(
+        "vision turn: {} prompt tokens, {} generated (vision {} ms · prefill {} ms · decode {} ms)",
+        stats.prompt_tokens, stats.gen_tokens, stats.vision_ms, stats.prefill_ms, stats.decode_ms
+    );
+
+    let id = gen_id();
+    let created = now_secs();
+    if req.stream {
+        let chunk = |delta: Delta, finish: Option<&'static str>, usage: Option<Usage>| {
+            serde_json::to_string(&ChatCompletionChunk {
+                id: id.clone(),
+                object: "chat.completion.chunk",
+                created,
+                model: model_id.clone(),
+                choices: vec![DeltaChoice {
+                    index: 0,
+                    delta,
+                    finish_reason: finish,
+                }],
+                usage,
+            })
+            .unwrap()
+        };
+        let events = vec![
+            chunk(
+                Delta {
+                    role: Some("assistant"),
+                    content: None,
+                },
+                None,
+                None,
+            ),
+            chunk(
+                Delta {
+                    role: None,
+                    content: Some(reply),
+                },
+                None,
+                None,
+            ),
+            chunk(Delta::default(), Some("stop"), Some(usage)),
+            "[DONE]".to_string(),
+        ];
+        let stream = futures::stream::iter(
+            events
+                .into_iter()
+                .map(|e| Ok::<_, Infallible>(sse::Event::default().data(e))),
+        );
+        Sse::new(stream).into_response()
+    } else {
+        Json(ChatCompletionResponse {
+            id,
+            object: "chat.completion",
+            created,
+            model: model_id,
+            choices: vec![ChatChoice {
+                index: 0,
+                message: OAIMessage {
+                    role: "assistant".into(),
+                    content: OAIContent::Text(reply),
+                },
+                finish_reason: "stop",
+            }],
+            usage,
+        })
+        .into_response()
     }
 }
 
@@ -1112,6 +1363,10 @@ pub async fn serve_llm(
             max_models,
             budget_bytes,
         ))),
+        vlm_cache: Arc::new(Mutex::new(ModelCache::<Arc<Mutex<VlmPipeline>>>::new(
+            max_models,
+            budget_bytes,
+        ))),
         load_lock: Arc::new(Mutex::new(())),
         inference_sem: Arc::new(tokio::sync::Semaphore::new(concurrency)),
         backend: backend.to_string(),
@@ -1218,6 +1473,51 @@ fn print_banner(port: u16, backend: &str, loaded: Option<(&str, &str, &str)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── OpenAI content parsing (Phase 12.3) ─────────────────────────────────
+
+    /// Plain-string content must keep deserializing (existing clients) and
+    /// `Text` must serialize back to a plain string (response shape unchanged).
+    #[test]
+    fn content_plain_string_roundtrip() {
+        let m: OAIMessage = serde_json::from_str(r#"{"role":"user","content":"hi"}"#).unwrap();
+        assert_eq!(m.content.text(), "hi");
+        assert!(m.content.image_urls().is_empty());
+        let back = serde_json::to_string(&m).unwrap();
+        assert_eq!(back, r#"{"role":"user","content":"hi"}"#);
+    }
+
+    /// OpenAI parts array: text + image_url (with an ignored `detail`).
+    #[test]
+    fn content_parts_with_image() {
+        let m: OAIMessage = serde_json::from_str(
+            r#"{"role":"user","content":[
+                {"type":"text","text":"what is"},
+                {"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA","detail":"low"}},
+                {"type":"text","text":"here?"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(m.content.text(), "what is\nhere?");
+        assert_eq!(m.content.image_urls(), vec!["data:image/png;base64,AAAA"]);
+    }
+
+    #[test]
+    fn data_uri_decodes_base64() {
+        // "SAPIENT" base64-encoded.
+        let bytes = decode_image_data_uri("data:image/png;base64,U0FQSUVOVA==").unwrap();
+        assert_eq!(bytes, b"SAPIENT");
+    }
+
+    #[test]
+    fn data_uri_rejects_remote_urls_and_non_base64() {
+        assert!(decode_image_data_uri("https://example.com/cat.png")
+            .unwrap_err()
+            .to_string()
+            .contains("does not fetch remote"));
+        assert!(decode_image_data_uri("data:image/png,rawpayload").is_err());
+        assert!(decode_image_data_uri("data:image/png;base64,!!!not-base64!!!").is_err());
+    }
 
     fn entry(id: &str, bytes: u64) -> Arc<CachedModel<()>> {
         Arc::new(CachedModel {
