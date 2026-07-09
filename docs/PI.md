@@ -6,8 +6,10 @@ voice stack (`converse` works out of the box — the ARM release is built native
 with ALSA). This page is the Pi 4/5 playbook: setup, model choices for each RAM
 size, thermal behaviour, and the measured numbers.
 
-> Status: setup + tuning guidance are current; the measured-throughput table is
-> being filled in on a reference Pi 5 (8 GB, active cooler) — entries marked TBD.
+> Status: setup, tuning guidance, the throughput table, and the voice-loop
+> numbers are current (measured on the reference Pi 5 16 GB). No Pi 4 numbers
+> yet — we don't have the hardware; measured rows are welcome (the Pi 4's
+> Cortex-A72 lacks `dotprod`, so expect the slower NEON path).
 
 ## Setup (Pi 4/5, 64-bit Raspberry Pi OS)
 
@@ -41,8 +43,9 @@ halves the KV-cache allocation if you don't need long prompts.
 
 Reproduce with: `python3 scripts/bench_wgpu.py --backends cpu --model <alias> --tokens 64`
 
-Reference device: **Pi 5 16 GB**, Raspberry Pi OS 64-bit, sapient v0.4.4
-(measured 2026-07-03; sustained decode plateaus at ~75 °C on this board).
+Reference device: **Pi 5 16 GB**, Raspberry Pi OS 64-bit, measured 2026-07-03
+on the v0.5.0 engine, compared against the v0.4.4 release (sustained decode
+plateaus at ~75 °C on this board).
 
 | Model | Pi 5 16 GB | vs v0.4.4 release | TTFT |
 |---|---|---|---|
@@ -105,12 +108,27 @@ Notes:
 - `whisper-tiny` keeps STT latency reasonable on the Pi; `whisper-base` is
   noticeably more accurate but slower.
 - Replies stream sentence-by-sentence into TTS, so speech starts before the
-  LLM finishes. Measured on the Pi 5 (v0.4.4 release binary, WAV-injected turn via
-  `converse --input`): STT 3.5 s (whisper-tiny, 0.6× realtime) + LLM 2.1 s
-  (0.5B) + TTS 5.3 s (Kokoro, RTF 2.34) ≈ **10.9 s per turn** — functional and
-  correct end-to-end, not yet conversational-speed on Pi hardware (streaming
-  overlap is roadmap Phase 10; the embedding fix above will also cut the LLM
-  stage on the next release).
+  LLM finishes. Measured on the Pi 5 16 GB (v0.5.2 release binary, the same
+  WAV-injected turn via `converse --input`, whisper-tiny + Kokoro, ~50 °C at
+  start, warm and cold runs identical):
+
+  | Stage | qwen2.5-0.5b-q4 | qwen2.5-1.5b-q4 |
+  |---|---|---|
+  | STT (2.0 s utterance) | 2.96 s (0.7× realtime) | 2.88 s |
+  | LLM (7-token reply) | 3.5 s (TTFT 2.4 s) | 4.3 s (TTFT 3.1 s) |
+  | TTS (2.3 s of audio) | 5.4 s (RTF 2.38) | 5.4 s (RTF 2.39) |
+  | **Total (sequential turn)** | **11.9 s** | **12.6 s** |
+
+  vs the v0.4.4 measurement (10.9 s/turn with the 0.5B): STT improved
+  3.5 → 2.96 s; Kokoro is unchanged (RTF ~2.4 — the dominant stage on the Pi);
+  the LLM stage measured slower in this mode (2.1 → 3.5 s — the 2.4 s in-loop
+  TTFT is an open observation, since the same model's bare-chat TTFT above is
+  116 ms). Live-mic use hides most of what this table shows sequentially:
+  the v0.5.2 streaming loop transcribes incrementally *while you speak*
+  (Phase 10.1) and starts speaking at the first clause (10.2), so perceived
+  latency is closer to LLM TTFT + first-clause synthesis than to the
+  sequential total. Conversational-speed voice on Pi-class CPUs still hinges
+  on the Kokoro decoder speedups tracked in Phase 10.
 
 ## Bigger models than RAM
 

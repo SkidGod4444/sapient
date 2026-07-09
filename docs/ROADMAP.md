@@ -54,6 +54,9 @@
   embedding-splice into the existing Llama engine). Golden test (red fixture → "Red")
   + numeric grid-orientation probe. v1: single global 512² image (no sub-image
   splitting yet). MedGemma requires a Gemma3 text engine — next engine project.
+  **Server (12.3) done:** `/v1/chat/completions` accepts OpenAI image parts as
+  base64 data URIs, routed through `VlmPipeline` in a third LRU cache (see
+  [SERVING.md](SERVING.md)); remote image URLs are refused by design.
 - 🚧 **Streaming voice loop (Phase 10 first cut)** — incremental STT during speech
   (`LiveStt`, transcript ready at end-of-utterance), early-first-clause TTS handoff,
   barge-in (`SpeakerPlayback::clear` + mic monitor), per-turn latency breakdown.
@@ -255,8 +258,10 @@ Notion roadmap's Phase 8 — "Own the Raspberry Pi".)
   Pi validation pending.
 - ✅ `docs/PI.md`: setup, per-RAM guidance, thermal + voice-loop docs, and the
   measured Pi 5 table (0.5B 8.7 / 1B 8.3 / 1.5B 6.7 / 3B 3.4 tok/s post-fix);
-  voice loop measured end-to-end via `converse --input` (10.9 s/turn on v0.4.4:
-  STT 3.5 s + LLM 2.1 s + TTS 5.3 s — correct at every stage). Pi 4 column:
+  voice loop measured end-to-end via `converse --input` — re-measured on the
+  v0.5.2 release binary (0.5B: STT 2.96 s + LLM 3.5 s + TTS 5.4 s ≈ 11.9 s
+  sequential; 1.5B ≈ 12.6 s; Kokoro RTF ~2.4 is the dominant stage; the 2.4 s
+  in-loop TTFT is an open observation — bare-chat TTFT is 116 ms). Pi 4 column:
   no hardware on hand; numbers welcome.
 - ✅ **Minimal activation buffers (8.3) — closed with two findings.** (1) Ordinary
   per-step activation allocations are measured-zero: forcing all large allocs onto
@@ -322,9 +327,17 @@ ONNX-wrapper crates (C++ dep) don't offer together.
   - **Perf note:** on small models / short clips the GPU path currently *trails* CPU
     (tiny 3.1 s vs 1.3 s, base 5.7 s vs 1.8 s end-to-end on M-series/Metal) — per-process
     GPU init + the one-token-at-a-time decoder with a logits read-back each step dominate
-    the tiny GPU compute. CPU is the `transcribe` default. **Batched prefill** (encode the
+    the tiny GPU compute. **Batched prefill** (encode the
     whole forced prompt in one pass) and keeping logits/argmax on-GPU are the optimizations
     that make the GPU win on larger models / longer audio (tracked under 6c).
+  - **Default (roadmap 10.4):** on a `wgpu`-feature build, `--backend auto` now
+    routes Whisper to the wgpu engine when a GPU adapter actually exists
+    (runtime probe, CPU fallback; MLX/Metal keeps precedence on Apple Silicon —
+    `whisper_wants_wgpu` in `forward/mod.rs`). Explicit `--backend wgpu` is
+    honored as before (and still errors clearly with no adapter). The M-series
+    small-model caveat above stands — on Metal-capable Macs the mlx build keeps
+    the faster CPU/Metal `WhisperForward`; the auto-wgpu default is for
+    GPU-with-weak-CPU boxes (Jetson-class), where the GPU path wins.
 - **6c — STT polish** ✅ DONE (branch `feat/audio-tts-sts`): ✅ `suppress_tokens`
   (from `generation_config.json`), ✅ streaming (`transcribe_stream` + live CLI),
   ✅ timestamp tokens + long-audio re-seek (`--timestamps`, ApplyTimestampRules),

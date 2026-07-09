@@ -28,6 +28,7 @@ anyhow      = { workspace = true }
 # Only needed for `sapient converse` (audio-io); used for utterance resampling.
 sapient-audio = { workspace = true, optional = true }
 axum        = { workspace = true, features = ["multipart"] }
+base64      = { workspace = true }
 clap        = { workspace = true }
 console     = { workspace = true }
 dirs        = { workspace = true }

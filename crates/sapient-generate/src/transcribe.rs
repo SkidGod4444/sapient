@@ -84,9 +84,11 @@ fn apply_timestamp_rules(logits: &mut [f32], timestamp_begin: u32, generated: &[
     }
 }
 
-/// Build the audio engine for the chosen backend. `--backend wgpu` (when the
+/// Build the audio engine for the chosen backend. The wgpu GPU engine (when the
 /// `wgpu` feature is compiled in) runs the transformer body on the GPU from raw
-/// f32 weights; every other backend uses the CPU/Metal `WhisperForward` (which
+/// f32 weights — selected by an explicit `--backend wgpu`, or by `auto` when a
+/// GPU adapter exists and MLX/Metal doesn't take precedence on Apple Silicon
+/// (Phase 10.4). Every other backend uses the CPU/Metal `WhisperForward` (which
 /// online-quantizes its linears to Q8_0).
 fn build_audio_engine(
     cfg: WhisperConfig,
@@ -94,7 +96,7 @@ fn build_audio_engine(
     backend: LlmBackendKind,
 ) -> Result<AudioEngine> {
     #[cfg(feature = "wgpu")]
-    if matches!(backend, LlmBackendKind::Wgpu) {
+    if sapient_models::forward::whisper_wants_wgpu(backend) {
         use sapient_models::forward::WhisperWgpuEngine;
         return Ok(AudioEngine::WhisperWgpu(Box::new(
             WhisperWgpuEngine::from_weights(cfg, weights)?,

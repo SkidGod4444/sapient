@@ -89,6 +89,36 @@ Notes/limits: best for single-user decode-bound serving (2–3×). Requires Llam
 CPU engines (the cache-rollback path); MLX has no incremental cache rollback so it
 isn't used for speculative. Future: NGram/prompt-lookup drafting (no draft model).
 
+### Vision — image parts in `/v1/chat/completions` (roadmap 12.3)
+
+Message `content` accepts the OpenAI parts form alongside plain strings: an array
+of `{"type":"text",...}` and `{"type":"image_url","image_url":{"url":...}}` parts.
+Image URLs must be **base64 data URIs** (`data:image/png;base64,...`) — the server
+never fetches remote image URLs (no surprise egress from your inference box).
+
+```bash
+curl http://localhost:11435/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "smolvlm-256m",
+  "messages": [{ "role": "user", "content": [
+    { "type": "text", "text": "What is in this image?" },
+    { "type": "image_url", "image_url": { "url": "data:image/png;base64,'"$(base64 -i photo.png)"'" } }
+  ]}]
+}'
+```
+
+- Requests with image parts route to a `VlmPipeline` (the `sapient see` engine:
+  SigLIP tower + embedding splice) held in a **third LRU cache** beside the text
+  and audio caches, sharing the same load lock, admission control, and byte budget.
+  `usage` counts real prompt tokens (text + image tokens; a SmolVLM turn is ~86).
+- v1 scope matches `sapient see`: **one image**, in the **final user message**
+  (single-turn). Multi-image / multi-turn requests get a clear 400.
+- `stream: true` is honored as a single content chunk + the usage chunk — the VLM
+  pipeline decodes greedily without a token stream yet.
+- The chat-completions body limit is 32 MiB — comfortably above any sensible
+  base64-encoded image (~1.33× the raw file size).
+- Text-only requests are byte-identical to before (`content` strings round-trip
+  as strings; parts-form text is joined for text models).
+
 ## Deferred (designed, not yet implemented)
 
 ### Phase 5 — Continuous batching + PagedAttention

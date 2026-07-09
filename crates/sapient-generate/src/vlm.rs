@@ -314,19 +314,16 @@ impl VlmPipeline {
     /// Load + preprocess an image file: squash-resize to the tower's square
     /// input, RGB, `(x/255 − 0.5)/0.5`, channel-major `[3, S, S]`.
     pub fn preprocess_image(&self, path: &Path) -> Result<Vec<f32>> {
-        let s = self.vision.config().image_size as u32;
         let img = image::open(path).with_context(|| format!("opening image {path:?}"))?;
-        let img = img.resize_exact(s, s, image::imageops::FilterType::Lanczos3);
-        let rgb = img.to_rgb8();
-        let s = s as usize;
-        let mut out = vec![0.0f32; 3 * s * s];
-        for (x, y, p) in rgb.enumerate_pixels() {
-            let (x, y) = (x as usize, y as usize);
-            for c in 0..3 {
-                out[c * s * s + y * s + x] = (p.0[c] as f32 / 255.0 - 0.5) / 0.5;
-            }
-        }
-        Ok(out)
+        Ok(normalize_image(img, self.vision.config().image_size as u32))
+    }
+
+    /// [`preprocess_image`](Self::preprocess_image) from encoded bytes
+    /// (PNG/JPEG/…) instead of a file — the server's data-URI path (Phase 12.3)
+    /// decodes images in memory and never touches disk.
+    pub fn preprocess_image_bytes(&self, bytes: &[u8]) -> Result<Vec<f32>> {
+        let img = image::load_from_memory(bytes).context("decoding image bytes")?;
+        Ok(normalize_image(img, self.vision.config().image_size as u32))
     }
 
     /// Encode preprocessed pixels to visual-token embeddings (probes/tools).
@@ -348,9 +345,34 @@ impl VlmPipeline {
         question: &str,
         max_new: usize,
     ) -> Result<(String, VlmStats)> {
-        // 1. Vision: pixels → visual token embeddings in text space.
         let t_vision = std::time::Instant::now();
         let pixels = self.preprocess_image(image)?;
+        self.answer_pixels_with_stats(pixels, t_vision, question, max_new)
+    }
+
+    /// [`answer_with_stats`](Self::answer_with_stats) from encoded image bytes
+    /// (the server's data-URI path).
+    pub fn answer_bytes_with_stats(
+        &mut self,
+        image_bytes: &[u8],
+        question: &str,
+        max_new: usize,
+    ) -> Result<(String, VlmStats)> {
+        let t_vision = std::time::Instant::now();
+        let pixels = self.preprocess_image_bytes(image_bytes)?;
+        self.answer_pixels_with_stats(pixels, t_vision, question, max_new)
+    }
+
+    /// Shared turn body. `t_vision` was started before preprocessing so
+    /// `vision_ms` keeps meaning preprocess + tower + connector.
+    fn answer_pixels_with_stats(
+        &mut self,
+        pixels: Vec<f32>,
+        t_vision: std::time::Instant,
+        question: &str,
+        max_new: usize,
+    ) -> Result<(String, VlmStats)> {
+        // 1. Vision: pixels → visual token embeddings in text space.
         let text_hidden = self.vision.config().text_hidden;
         let (vis, n_vis, prompt) = match &self.flavor {
             VlmFlavor::Idefics3 => {
@@ -443,6 +465,23 @@ impl VlmPipeline {
             },
         ))
     }
+}
+
+/// Squash-resize to the tower's square input, RGB, `(x/255 − 0.5)/0.5`,
+/// channel-major `[3, S, S]` (SigLIP convention). Shared by the file and
+/// in-memory-bytes preprocessing entry points so both are bit-identical.
+fn normalize_image(img: image::DynamicImage, s: u32) -> Vec<f32> {
+    let img = img.resize_exact(s, s, image::imageops::FilterType::Lanczos3);
+    let rgb = img.to_rgb8();
+    let s = s as usize;
+    let mut out = vec![0.0f32; 3 * s * s];
+    for (x, y, p) in rgb.enumerate_pixels() {
+        let (x, y) = (x as usize, y as usize);
+        for c in 0..3 {
+            out[c * s * s + y * s + x] = (p.0[c] as f32 / 255.0 - 0.5) / 0.5;
+        }
+    }
+    out
 }
 
 /// Online-quantize an eligible vision-tower linear to Q8_0 (the exact rule the
@@ -570,4 +609,35 @@ fn argmax(logits: &[f32]) -> u32 {
         }
     }
     best as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The in-memory (data-URI) path must produce bit-identical pixels to the
+    /// file path — both funnel through `normalize_image`.
+    #[test]
+    fn preprocess_bytes_matches_file_path() {
+        // 3×2 PNG with distinct corner colors, encoded to bytes in memory.
+        let mut img = image::RgbImage::new(3, 2);
+        img.put_pixel(0, 0, image::Rgb([255, 0, 0]));
+        img.put_pixel(2, 1, image::Rgb([0, 0, 255]));
+        let dyn_img = image::DynamicImage::ImageRgb8(img);
+        let mut png = Vec::new();
+        dyn_img
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+
+        let from_bytes = normalize_image(image::load_from_memory(&png).unwrap(), 8);
+        let dir = std::env::temp_dir().join("sapient-vlm-preprocess-test.png");
+        std::fs::write(&dir, &png).unwrap();
+        let from_file = normalize_image(image::open(&dir).unwrap(), 8);
+        let _ = std::fs::remove_file(&dir);
+
+        assert_eq!(from_bytes.len(), 3 * 8 * 8);
+        assert_eq!(from_bytes, from_file);
+        // Normalization maps [0,255] → [-1,1].
+        assert!(from_bytes.iter().all(|v| (-1.0..=1.0).contains(v)));
+    }
 }
