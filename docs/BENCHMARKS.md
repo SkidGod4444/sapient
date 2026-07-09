@@ -111,17 +111,27 @@ the title Augustus…"). A **106-billion-parameter model, pure Rust, zero CUDA.*
 | | decode | prefill | peak RSS | note |
 |---|---:|---:|---:|---|
 | byte-copy split | 0.34 tok/s | — | 119 GB | experts pinned in heap → thrash |
-| **zero-copy split** | **2.45 tok/s** | 0.80 | 118.6 GB | per-expert **mmap views** → 7× decode |
+| zero-copy split | 2.45 tok/s | 0.80 | 118.6 GB | per-expert **mmap views** → 7× decode |
+| **+ Q5_0→Q8_0 at load** | **3.23 tok/s** | **3.94** | **72 GB** | Q5_0 no longer F32-expanded |
 
-The **zero-copy stacked-expert split** was the lever: the naïve version copied every
-expert out of the mmap into non-evictable heap (~57 GB pinned), so at 119/122 GB the
-box thrashed. Sharing the stacked buffer via byte-offset `Tensor::from_buffer` views
-keeps the experts as evictable page-cache → **7× decode** at the same peak RSS (a
-high-watermark from prefill faulting the whole model) — and it fits smaller boxes the
-copy would OOM. Also new for GLM: **split-GGUF loading** (shard-set download + merge),
-head_dim from `key_length` (128 ≠ hidden/heads), and the MTP-layer cap. The real Thor
-run caught four bugs no synthetic test could (split-routing gate, GGUF head_dim, MTP
-cap, the heap-copy RSS). RSS ~118 GB is a documented follow-up.
+Two levers, both about keeping weights out of pinned/expanded heap:
+
+1. **Zero-copy stacked-expert split** — the naïve version copied every expert out of
+   the mmap into non-evictable heap (~57 GB pinned) → thrash at 119/122 GB. Sharing
+   the stacked buffer via byte-offset `Tensor::from_buffer` views keeps experts as
+   evictable page-cache (7× decode over the copy).
+2. **Q5_0→Q8_0 at load** — unsloth's dynamic quant stores 24 `ffn_down_exps` as
+   **Q5_0**, which SAPIENT couldn't keep as blocks, so the loader F32-expanded them
+   (738M params → 2.95 GB each = **70 GB heap**). Re-quantizing to Q8_0 at load
+   (near-lossless, 8⊇5 bits, ~1.06 B/weight) cut that to ~19 GB → **peak RSS 118 → 72
+   GB, heap 66 → 18 GB**, and the memory relief lifted **decode +32% / prefill 5×**.
+   Now fits a 96 GB box; output byte-identical.
+
+Also new for GLM: **split-GGUF loading** (shard-set download + merge), head_dim from
+`key_length` (128 ≠ hidden/heads), and the MTP-layer cap. The real Thor run caught
+**five** bugs no synthetic test could (split-routing gate, GGUF head_dim, MTP cap,
+heap-copy RSS, Q5_0 F32-expansion). Remaining ~18 GB heap = the Q8_0-converted experts;
+a first-class Q5_0 mmap kernel would zero it (future).
 
 ## Head-to-head vs llama.cpp & Ollama (v0.5.0, 2026-07-03)
 

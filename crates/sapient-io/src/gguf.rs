@@ -279,6 +279,24 @@ fn dequantize_q4_0(data: &[u8], numel: usize) -> Vec<f32> {
     out
 }
 
+/// Quantize F32 → ggml Q8_0 blocks (34 bytes: LE f16 scale + 32 int8). Used to
+/// hold a quantized GGUF type SAPIENT can't keep as blocks (e.g. Q5_0 from
+/// unsloth "dynamic" quants) at ~1.06 B/weight instead of 4 (F32) — near-lossless
+/// since Q8_0's 8 bits ⊇ the source's ≤6. `data.len()` must be a multiple of 32.
+fn quantize_to_q8_0(data: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len() / 32 * 34);
+    for block in data.chunks_exact(32) {
+        let amax = block.iter().fold(0.0f32, |a, &v| a.max(v.abs()));
+        let d = amax / 127.0;
+        let id = if d > 0.0 { 1.0 / d } else { 0.0 };
+        out.extend_from_slice(&half::f16::from_f32(d).to_le_bytes());
+        for &v in block {
+            out.push((v * id).round().clamp(-127.0, 127.0) as i8 as u8);
+        }
+    }
+    out
+}
+
 fn dequantize_q8_0(data: &[u8], numel: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; numel];
     let block_size = 32usize;
@@ -591,11 +609,22 @@ fn make_tensor_mmap(info: &GgufTensorInfo, mmap: &Arc<Mmap>, data_start: usize) 
         Tensor::from_buffer(shape, dtype, handle, 0)
             .map_err(|e| SapientError::GgufParseError(e.to_string()))
     } else {
-        // K-quants / F16 / BF16: dequantize to F32.
-        // Raw bytes are read from the mmap region — no heap copy of the raw file.
+        // A GGUF type SAPIENT doesn't keep as packed blocks. Two cases:
+        //   - quantized (e.g. Q5_0 from unsloth "dynamic" quants) → dequant then
+        //     RE-QUANTIZE to Q8_0: near-lossless, ~1.06 B/weight (vs 4 for F32),
+        //     matmul-ready. A 63 GB GLM-4.5-Air has 24 Q5_0 ffn_down tensors that
+        //     were 70 GB as F32 → ~19 GB as Q8_0.
+        //   - F16/BF16/F32 (small norms/biases, or non-32-aligned) → F32.
         let raw = &mmap[start..start + byte_len];
         let f32_data = dequantize_to_f32(info.kind, raw, numel)?;
-        Tensor::from_f32(&f32_data, shape).map_err(|e| SapientError::GgufParseError(e.to_string()))
+        if info.kind.block_size() > 1 && numel % 32 == 0 {
+            let q8 = quantize_to_q8_0(&f32_data);
+            Tensor::from_quant_bytes(&q8, shape, DType::Q8_0)
+                .map_err(|e| SapientError::GgufParseError(e.to_string()))
+        } else {
+            Tensor::from_f32(&f32_data, shape)
+                .map_err(|e| SapientError::GgufParseError(e.to_string()))
+        }
     }
 }
 
@@ -628,9 +657,18 @@ fn make_tensor(info: &GgufTensorInfo, bytes: &[u8], data_start: usize) -> Result
         Tensor::from_quant_bytes(raw, shape, dtype)
             .map_err(|e| SapientError::GgufParseError(e.to_string()))
     } else {
-        // Dequantize to F32 (K-quants, F16, BF16, etc.).
+        // A quantized type SAPIENT doesn't keep as blocks (e.g. Q5_0) → re-quantize
+        // to Q8_0 (near-lossless, ~1.06 B/weight); F16/BF16/F32 → F32. Mirrors the
+        // mmap path so both loaders keep peak RAM ≈ Q8_0, not F32-expanded.
         let f32_data = dequantize_to_f32(info.kind, raw, numel)?;
-        Tensor::from_f32(&f32_data, shape).map_err(|e| SapientError::GgufParseError(e.to_string()))
+        if info.kind.block_size() > 1 && numel % 32 == 0 {
+            let q8 = quantize_to_q8_0(&f32_data);
+            Tensor::from_quant_bytes(&q8, shape, DType::Q8_0)
+                .map_err(|e| SapientError::GgufParseError(e.to_string()))
+        } else {
+            Tensor::from_f32(&f32_data, shape)
+                .map_err(|e| SapientError::GgufParseError(e.to_string()))
+        }
     }
 }
 
@@ -865,4 +903,30 @@ fn read_gguf_string(c: &mut std::io::Cursor<&[u8]>) -> Result<String> {
     c.read_exact(&mut buf)
         .map_err(|e| SapientError::GgufParseError(e.to_string()))?;
     String::from_utf8(buf).map_err(|e| SapientError::GgufParseError(e.to_string()))
+}
+
+#[cfg(test)]
+mod q8_quant_tests {
+    use super::*;
+
+    #[test]
+    fn q8_0_quantize_roundtrips_and_sizes() {
+        // Two 32-element blocks; distinct magnitudes per block.
+        let data: Vec<f32> = (0..64).map(|i| (i as f32 - 32.0) * 0.1).collect();
+        let q = quantize_to_q8_0(&data);
+        assert_eq!(q.len(), 64 / 32 * 34, "Q8_0 = 34 bytes / 32 weights");
+        let back = dequantize_q8_0(&q, 64);
+        assert_eq!(back.len(), 64);
+        // Q8_0 error is bounded by ~amax/254 per block (amax ≈ 3.2 → ~0.013).
+        for (a, b) in data.iter().zip(&back) {
+            assert!((a - b).abs() < 0.03, "roundtrip a={a} b={b}");
+        }
+    }
+
+    #[test]
+    fn q8_0_quantize_handles_all_zeros() {
+        let q = quantize_to_q8_0(&[0.0f32; 32]);
+        assert_eq!(q.len(), 34);
+        assert!(dequantize_q8_0(&q, 32).iter().all(|&v| v == 0.0));
+    }
 }
