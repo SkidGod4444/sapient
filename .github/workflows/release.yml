@@ -267,11 +267,18 @@ jobs:
       - name: Generate release notes
         id: notes
         run: |
-          # Extract changelog section for this version if CHANGELOG.md exists
+          # Extract this version's CHANGELOG section. NOTE: a plain awk range
+          # (/^## \[VER\]/,/^## \[/) collapses to a single line because the
+          # start line also matches the end pattern — this explicit state
+          # machine prints strictly between our header and the next one.
           if [ -f CHANGELOG.md ]; then
-            awk "/^## \[${{ steps.version.outputs.VERSION }}\]/,/^## \[/" CHANGELOG.md \
-              | head -n -1 > release_notes.md
-          else
+            awk -v ver="${{ steps.version.outputs.VERSION }}" '
+              $0 ~ "^## \\[" ver "\\]" { found=1; next }
+              found && $0 ~ "^## \\[" { exit }
+              found { print }
+            ' CHANGELOG.md > release_notes.md
+          fi
+          if [ ! -s release_notes.md ]; then
             echo "See the [README](https://github.com/${{ github.repository }}#readme) for usage and documentation." > release_notes.md
           fi
           cat release_notes.md
