@@ -107,6 +107,30 @@ fn use_wgpu_engine(backend: LlmBackendKind) -> bool {
     }
 }
 
+/// Should the Whisper audio engine run on the wgpu GPU path?
+///
+/// Explicit `--backend wgpu` is always honored (the engine build then errors
+/// clearly if no adapter exists — an explicit request must not silently
+/// degrade). `Auto` selects wgpu only when the feature is compiled in, MLX
+/// (Metal) does not take precedence on Apple Silicon, and a GPU adapter is
+/// actually present — probed up front because `WhisperWgpuEngine::from_weights`
+/// consumes the weight map, so there is no falling back to CPU after the fact.
+pub fn whisper_wants_wgpu(backend: LlmBackendKind) -> bool {
+    if matches!(backend, LlmBackendKind::Wgpu) {
+        return true;
+    }
+    #[cfg(feature = "wgpu")]
+    {
+        matches!(backend, LlmBackendKind::Auto)
+            && !use_mlx_engine(backend)
+            && sapient_backends_wgpu::WgpuContext::adapter_available()
+    }
+    #[cfg(not(feature = "wgpu"))]
+    {
+        false
+    }
+}
+
 impl ForwardEngine {
     pub fn from_pretrained(info: ModelInfo, weight_paths: &[PathBuf]) -> Result<Self> {
         Self::from_weight_paths(info, weight_paths)
@@ -463,5 +487,21 @@ impl ForwardEngine {
             #[cfg(feature = "wgpu")]
             Self::Wgpu(f) => f.backend_label(),
         }
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    /// Phase 10.4: explicit wgpu is always honored; CPU/Metal never route
+    /// Whisper to wgpu. `Auto`'s answer is machine-dependent (feature flags,
+    /// MLX precedence, adapter probe) — assert only that the probe path is safe.
+    #[test]
+    fn whisper_wgpu_selection() {
+        assert!(whisper_wants_wgpu(LlmBackendKind::Wgpu));
+        assert!(!whisper_wants_wgpu(LlmBackendKind::Cpu));
+        assert!(!whisper_wants_wgpu(LlmBackendKind::Metal));
+        let _ = whisper_wants_wgpu(LlmBackendKind::Auto);
     }
 }

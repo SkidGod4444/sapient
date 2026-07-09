@@ -55,6 +55,27 @@ impl WgpuContext {
         pollster::block_on(Self::new_async())
     }
 
+    /// Adapter-only probe: does this machine have a usable GPU? Creates no
+    /// logical device, so it is cheap enough for backend auto-selection to call
+    /// before committing weights to a GPU engine build (which cannot fall back
+    /// once the weight map is consumed).
+    pub fn adapter_available() -> bool {
+        pollster::block_on(async {
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::PRIMARY,
+                ..Default::default()
+            });
+            instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    force_fallback_adapter: false,
+                    compatible_surface: None,
+                })
+                .await
+                .is_some()
+        })
+    }
+
     async fn new_async() -> Result<Self, WgpuError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY, // Vulkan + Metal + DX12 (skips GL fallback)

@@ -1516,7 +1516,7 @@ async fn run_command(
 fn parse_generation_backend(value: &str) -> Result<GenerationBackend> {
     value
         .parse()
-        .with_context(|| format!("invalid backend '{value}'; expected auto, cpu, or metal"))
+        .with_context(|| format!("invalid backend '{value}'; expected auto, cpu, metal, or wgpu"))
 }
 
 // ── transcribe (speech-to-text) ─────────────────────────────────────────────────
