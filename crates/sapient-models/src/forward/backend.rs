@@ -185,21 +185,80 @@ impl MetalLlmBackend {
     }
 }
 
+/// Debug aid: `SAPIENT_MLX_DISABLE=linear_3d,rms_norm` forces the listed ops
+/// onto the CPU reference kernel (`all` disables every MLX op). Lets a
+/// wrong-numbers MLX kernel be bisected per-op without rebuilding.
+fn mlx_disabled(op: &str) -> bool {
+    use std::sync::OnceLock;
+    static LIST: OnceLock<Vec<String>> = OnceLock::new();
+    let list = LIST.get_or_init(|| {
+        std::env::var("SAPIENT_MLX_DISABLE")
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    list.iter().any(|s| s == op || s == "all")
+}
+
+/// Debug aid: `SAPIENT_MLX_VERIFY=1` cross-checks MLX linear results against
+/// the CPU reference kernel (see `MetalLlmBackend::linear_3d`).
+fn mlx_verify() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SAPIENT_MLX_VERIFY").is_ok_and(|v| v == "1"))
+}
+
 impl LlmBackend for MetalLlmBackend {
     fn name(&self) -> &'static str {
         "metal"
     }
 
     fn linear_3d(&self, x: &Tensor, weight: &Tensor) -> Result<Tensor> {
-        self.mlx
+        if mlx_disabled("linear_3d") {
+            return self.cpu.linear_3d(x, weight);
+        }
+        let result = self.mlx
             .linear_3d(x, weight)
             .or_else(|e| {
                 tracing::warn!(op = "linear_3d", error = %e, "MLX op failed; using CPU reference kernel");
                 self.cpu.linear_3d(x, weight)
-            })
+            });
+        // Debug aid: `SAPIENT_MLX_VERIFY=1` cross-checks the first calls against
+        // the CPU reference kernel and prints the divergence per weight tensor.
+        if mlx_verify() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static CALLS: AtomicUsize = AtomicUsize::new(0);
+            let n = CALLS.fetch_add(1, Ordering::Relaxed);
+            if n < 64 {
+                if let (Ok(mlx_t), Ok(cpu_t)) = (&result, self.cpu.linear_3d(x, weight)) {
+                    let a = mlx_t.to_f32_cow();
+                    let b = cpu_t.to_f32_cow();
+                    let mut max_abs = 0f32;
+                    let mut norm = 0f64;
+                    for (va, vb) in a.iter().zip(b.iter()) {
+                        max_abs = max_abs.max((va - vb).abs());
+                        norm += (*vb as f64) * (*vb as f64);
+                    }
+                    let rms = (norm / b.len() as f64).sqrt();
+                    eprintln!(
+                        "[mlx-verify] linear_3d #{n} w={:?} dtype={:?} max_abs_diff={max_abs:.4} cpu_rms={rms:.4}",
+                        weight.shape().dims(),
+                        weight.dtype(),
+                    );
+                }
+            }
+        }
+        result
     }
 
     fn rms_norm(&self, x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+        if mlx_disabled("rms_norm") {
+            return self.cpu.rms_norm(x, weight, eps);
+        }
         self.mlx.rms_norm(x, weight, eps).or_else(|e| {
             tracing::warn!(op = "rms_norm", error = %e, "MLX op failed; using CPU reference kernel");
             self.cpu.rms_norm(x, weight, eps)
@@ -213,6 +272,9 @@ impl LlmBackend for MetalLlmBackend {
         bias: Option<&Tensor>,
         eps: f32,
     ) -> Result<Tensor> {
+        if mlx_disabled("layer_norm") {
+            return self.cpu.layer_norm(x, weight, bias, eps);
+        }
         self.mlx.layer_norm(x, weight, bias, eps).or_else(|e| {
             tracing::warn!(op = "layer_norm", error = %e, "MLX op failed; using CPU reference kernel");
             self.cpu.layer_norm(x, weight, bias, eps)
@@ -220,6 +282,9 @@ impl LlmBackend for MetalLlmBackend {
     }
 
     fn silu(&self, x: &Tensor) -> Result<Tensor> {
+        if mlx_disabled("silu") {
+            return self.cpu.silu(x);
+        }
         self.mlx.silu(x).or_else(|e| {
             tracing::warn!(op = "silu", error = %e, "MLX op failed; using CPU reference kernel");
             self.cpu.silu(x)
@@ -227,6 +292,9 @@ impl LlmBackend for MetalLlmBackend {
     }
 
     fn gelu(&self, x: &Tensor) -> Result<Tensor> {
+        if mlx_disabled("gelu") {
+            return self.cpu.gelu(x);
+        }
         self.mlx.gelu(x).or_else(|e| {
             tracing::warn!(op = "gelu", error = %e, "MLX op failed; using CPU reference kernel");
             self.cpu.gelu(x)
@@ -234,6 +302,9 @@ impl LlmBackend for MetalLlmBackend {
     }
 
     fn add(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
+        if mlx_disabled("add") {
+            return self.cpu.add(a, b);
+        }
         self.mlx.add(a, b).or_else(|e| {
             tracing::warn!(op = "add", error = %e, "MLX op failed; using CPU reference kernel");
             self.cpu.add(a, b)
@@ -241,6 +312,9 @@ impl LlmBackend for MetalLlmBackend {
     }
 
     fn mul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
+        if mlx_disabled("mul") {
+            return self.cpu.mul(a, b);
+        }
         self.mlx.mul(a, b).or_else(|e| {
             tracing::warn!(op = "mul", error = %e, "MLX op failed; using CPU reference kernel");
             self.cpu.mul(a, b)
@@ -248,6 +322,9 @@ impl LlmBackend for MetalLlmBackend {
     }
 
     fn apply_rope_positions(&self, x: &Tensor, positions: &[usize], base: f32) -> Result<Tensor> {
+        if mlx_disabled("rope") {
+            return self.cpu.apply_rope_positions(x, positions, base);
+        }
         self.mlx
             .apply_rope_positions(x, positions, base)
             .or_else(|e| {
@@ -264,6 +341,9 @@ impl LlmBackend for MetalLlmBackend {
         n_kv_heads: usize,
         causal: bool,
     ) -> Result<Tensor> {
+        if mlx_disabled("gqa_attention") {
+            return self.cpu.gqa_attention(q, k, v, n_kv_heads, causal);
+        }
         // Run on the Metal GPU. MlxLlmOps::gqa_attention builds an explicit
         // causal mask for prefill (seq_q > 1) so the KV-cache offset case
         // (seq_q < seq_k at decode) is handled correctly.
@@ -277,6 +357,9 @@ impl LlmBackend for MetalLlmBackend {
     }
 
     fn logits_from_hidden(&self, hidden: &Tensor, lm_head: &Tensor) -> Result<Vec<f32>> {
+        if mlx_disabled("logits") {
+            return self.cpu.logits_from_hidden(hidden, lm_head);
+        }
         self.mlx.logits_from_hidden(hidden, lm_head).or_else(|e| {
             tracing::warn!(op = "logits", error = %e, "MLX op failed; using CPU reference kernel");
             self.cpu.logits_from_hidden(hidden, lm_head)
@@ -454,6 +537,17 @@ impl MlxLlmOps {
         &self,
         tensor: &Tensor,
     ) -> Result<Option<(mlx_rs::Array, mlx_rs::Array, mlx_rs::Array)>> {
+        // Debug aid: `SAPIENT_MLX_NO_QUANT=1` forces the F32 matmul path so the
+        // MLX requantization (quantize + quantized_matmul) can be ruled in/out.
+        {
+            use std::sync::OnceLock;
+            static NO_QUANT: OnceLock<bool> = OnceLock::new();
+            if *NO_QUANT
+                .get_or_init(|| std::env::var("SAPIENT_MLX_NO_QUANT").is_ok_and(|v| v == "1"))
+            {
+                return Ok(None);
+            }
+        }
         let dims = tensor.shape().dims();
         if dims.len() != 2 {
             return Ok(None);
