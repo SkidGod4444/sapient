@@ -10,6 +10,7 @@
 pub mod backend;
 pub mod kernels;
 pub mod pool;
+pub mod spinpool;
 pub mod thermal;
 
 pub use backend::CpuBackend;

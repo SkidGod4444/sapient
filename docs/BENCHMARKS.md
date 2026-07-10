@@ -263,8 +263,45 @@ M4 numbers here are cool-machine readings; Pi/Thor runs are short and
 consistent. Cool-machine decode reference (128-tok greedy): **llama-1B 69.5
 tok/s (1.13× behind llama.cpp), qwen-1.5B ~51 (1.22×)**.
 
+**Q8_K-style precomputed activation block-sums landed** (2026-07-10,
+`feat/cpu-parity-2`): the per-32-block Σx that the Q4_K W4A8 kernels need for
+the `dmin·mn` term is now computed once per activation row at quantization
+time (`i8_block_sums`) instead of re-reduced with `vaddlvq_s8` inside every
+weight row/group. Bit-identical output (same integer sums; all four kernel
+bit-identity gates + the engine repack gate unchanged). Measured, interleaved
+A/B/B/A on M4 CPU decode: llama-1B 61.2 → 61.8 tok/s (+0.9%), qwen-1.5B
+43.5 → 44.1 (+1.2%) — small because the R4 4-row kernels already amortized
+the reduction 4×; the single-row/remainder paths gain the most.
+
+**Decode threadpool landed — guided spin/park pool, four design iterations,
+each measured** (2026-07-10, `feat/cpu-parity-2`): a persistent worker pool
+(`spinpool.rs`) replaces the per-GEMV rayon fork/join (~230 barriers per
+decoded token). The design arc, all A/B-measured on real decode:
+**v1** per-chunk dynamic claiming — M4 +5% (qwen), but 2× REGRESSION on
+14-core Thor (claim/completion RMW traffic on hot lines + scattered
+per-thread chunk order) and a seqlock ordering bug that segfaulted (odd bump
+must precede the active drain — stress-test pinned). **v2** static contiguous
+shares — fixed Thor (2× → −8%) but equal shares wait for the slowest E-core
+on M4 (45 → 31 tok/s). **v3** guided blocks (~3/participant off one counter)
+— Thor +8%, M4 still down (the lm_head's block≈8 gave E-cores 8× longer
+straggler tails). **v4** topology-aware block size (1 on P/E-heterogeneous
+macOS, guided on homogeneous server ARM): **M4 llama-1B +7.7% (62.9 vs
+58.4), M4 qwen +0.9%, Thor 14-core qwen +5.3% (24.7 vs 23.4), Pi 5 −4%
+(9.9 vs 10.3 — at ~100 ms/token there is no fork/join tax to reclaim on 4
+cores).** Also measured en route: hot spinning is anti-productive on Apple
+Silicon (serial-phase power/scheduler interference; optimum ≈ 4k-iteration
+spin then park), and both worker AND publisher threads need QoS pinning on
+macOS. Default (measurement-driven): ON for macOS and Linux/aarch64 ≥ 8
+threads; opt-in elsewhere (`SAPIENT_SPINPOOL=1/0` overrides; thermally
+governed decode always uses rayon).
+
 Remaining parity items: deeper output tiling for prefill (llama.cpp pp512
-remains well ahead), and Q8_K-style precomputed activation block-sums.
+remains well ahead), and a graph-level single-region decode pass (publish a
+token's whole op list once) if the remaining per-op publish cost ever shows
+up as the next bottleneck.
+
+Remaining parity items: deeper output tiling for prefill (llama.cpp pp512
+remains well ahead), and the Linux-side threadpool validation above.
 
 **The honest read:**
 - On **Apple Metal** SAPIENT is competitive with llama.cpp (−7% on qwen-1.5B,

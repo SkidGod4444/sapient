@@ -30,6 +30,7 @@ blas-src  = { version = "0.10", features = ["accelerate"], optional = true }
 cblas-sys = { version = "0.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 # Link Accelerate automatically on macOS when the feature is on.
 blas-src  = { version = "0.10", features = ["accelerate"], optional = true }
 
