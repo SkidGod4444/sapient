@@ -118,3 +118,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update -q && sudo apt-get install -y libasound2-dev
       - run: cargo doc --workspace --no-deps
+
+  # ── TypeScript SDK (sdks/typescript) ─────────────────────────────────────────
+  sdk-ts:
+    name: TypeScript SDK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdks/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sdks/typescript/package-lock.json
+      - run: npm ci
+      - run: npm test

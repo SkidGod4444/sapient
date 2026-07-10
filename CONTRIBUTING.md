@@ -112,9 +112,13 @@ crates/
 ├── sapient-audio/          # Audio front-end: decode/resample + log-mel STFT (Whisper)
 ├── sapient-models/         # Forward engines (Llama, Phi, …) + AudioEngine (Whisper STT) + SnacDecoder (TTS)
 ├── sapient-generate/       # Pipeline API (from_pretrained, chat, stream) + TranscribePipeline + SpeakPipeline
+├── sapient-ffi/            # Embedding surface: UniFFI → Swift/Kotlin bindings
+│                           #   (staticlib/cdylib for iOS/Android; see docs/MOBILE.md)
 └── sapient-cli/            # `sapient` binary (chat REPL uses a rustyline line
                             #   editor + markdown.rs live Markdown/code rendering)
 
+sdks/typescript/            # @openhorizon/sapient — TS SDK for Node.js/React Native
+                            #   (talks to `sapient serve`; npm test = tsc + node --test)
 install.sh / install.ps1    # Install scripts (attached to releases)
 Formula/sapient.rb          # Homebrew formula template
 .github/workflows/          # CI and release automation
@@ -125,6 +129,7 @@ tests/                      # Workspace integration tests
 
 ```
 sapient-cli → sapient-generate → sapient-hub, sapient-models, sapient-tokenizers
+sapient-ffi → sapient-generate   (embedding surface — same layer as the CLI)
 sapient-generate → sapient-runtime → sapient-backends-cpu, sapient-io, sapient-ir
 ```
 
@@ -294,6 +299,22 @@ cargo test -p sapient-hub --test download_parallel -- --test-threads=1
 ```
 
 Run serially (`--test-threads=1`) when multiple tests touch the same cached model to avoid HF cache lock conflicts.
+
+### FFI and TypeScript SDK tests
+
+```bash
+# sapient-ffi: unit tests, plus an ignored real-model e2e (downloads SmolLM2-135M)
+cargo test -p sapient-ffi
+cargo test -p sapient-ffi --release -- --ignored
+
+# TypeScript SDK (Node ≥ 18): tsc build + SSE/mock-serve suites
+cd sdks/typescript && npm install && npm test
+```
+
+If you change `sapient-ffi`'s exported API, regenerate and eyeball the bindings
+(they are not committed): see `docs/MOBILE.md` §4. **Before testing on a phone,
+read `docs/MOBILE.md` §5** — the safe-testing ladder for personal hardware is a
+project rule, not a suggestion.
 
 ### Benchmarks
 

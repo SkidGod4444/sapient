@@ -1,0 +1,43 @@
+[package]
+name = "sapient-ffi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Stable FFI surface for embedding SAPIENT — UniFFI bindings for Swift (iOS/macOS) and Kotlin (Android/JVM)"
+readme = "README.md"
+rust-version.workspace = true
+# Not published to crates.io (repo-wide rule) — consumed as a static/dynamic
+# library artifact by mobile builds.
+publish = false
+
+[lib]
+# lib      → normal Rust dependency (tests, future napi crate)
+# staticlib→ iOS/Android link target (XCFramework / .a into the AAR)
+# cdylib   → desktop bindgen + JVM/JNA loading during development
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi_bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+default = []
+# Enables the `uniffi-bindgen` CLI used to generate Swift/Kotlin sources:
+#   cargo run -p sapient-ffi --features bindgen --bin uniffi-bindgen -- generate ...
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+sapient-generate.workspace = true
+sapient-hub.workspace = true
+sapient-tokenizers.workspace = true
+uniffi = { version = "0.29" }
+thiserror.workspace = true
+anyhow.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
