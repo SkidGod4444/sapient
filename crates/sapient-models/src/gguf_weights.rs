@@ -408,10 +408,8 @@ fn map_blk_tensor(key: &str) -> Option<String> {
     // Determine the tensor kind (.weight or .bias) and the component name.
     let (suffix, kind) = if let Some(s) = component.strip_suffix(".weight") {
         (s, "weight")
-    } else if let Some(s) = component.strip_suffix(".bias") {
-        (s, "bias")
     } else {
-        return None;
+        (component.strip_suffix(".bias")?, "bias")
     };
 
     let hf_suffix = match suffix {
