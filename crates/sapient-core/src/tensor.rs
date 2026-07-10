@@ -437,11 +437,15 @@ impl Tensor {
                         let (sc2, m2) = Self::get_scale_min_k4(is + 1, scales);
                         let d2 = d * sc2 as f32;
                         let m2v = dmin * m2 as f32;
-                        let qh_byte = qh[is / 8];
+                        // The 5th bit is PER-ELEMENT: ggml reads qh[l] and selects
+                        // the active bit-plane with u1/u2 (same fix as the CPU
+                        // kernel's dot_q5_k_row_f32_scalar — a single qh[is/8]
+                        // byte collapses 32 distinct high bits to one and
+                        // corrupts every Q5_K tensor this dequantizes).
                         for l in 0..32usize {
-                            let hi = if qh_byte & u1 != 0 { 16.0f32 } else { 0.0 };
+                            let hi = if qh[l] & u1 != 0 { 16.0f32 } else { 0.0 };
                             out[out_idx + l] = d1 * ((ql[ql_off + l] & 0x0F) as f32 + hi) - m1v;
-                            let hi2 = if qh_byte & u2 != 0 { 16.0f32 } else { 0.0 };
+                            let hi2 = if qh[l] & u2 != 0 { 16.0f32 } else { 0.0 };
                             out[out_idx + l + 32] = d2 * ((ql[ql_off + l] >> 4) as f32 + hi2) - m2v;
                         }
                         out_idx += 64;
@@ -780,5 +784,39 @@ mod tests {
     fn byte_size() {
         let t = Tensor::zeros(vec![4, 4], DType::F32).unwrap();
         assert_eq!(t.byte_size(), 64);
+    }
+
+    /// Q5_K's 5th bit is per-element: ggml stores it in qh[l] and selects the
+    /// bit-plane with u1/u2 (shifting by 2 per 64-element pair). A regression
+    /// for reading one qh byte per 32-element sub-block, which collapses 32
+    /// distinct high bits to one and corrupts every Q5_K tensor.
+    #[test]
+    fn q5_k_dequant_high_bits_per_element() {
+        let mut block = vec![0u8; crate::dtype::Q5_K_BLOCK_BYTES];
+        block[0..2].copy_from_slice(&half::f16::from_f32(1.0).to_le_bytes()); // d = 1
+        block[2..4].copy_from_slice(&half::f16::from_f32(0.0).to_le_bytes()); // dmin = 0
+                                                                              // scales: sc=1, m=0 for all 8 sub-blocks (6-bit K-quant packing).
+        for i in 0..4 {
+            block[4 + i] = 1; // sc for is=0..3
+            block[12 + i] = 1; // low nibble → sc for is=4..7
+        }
+        let qh = &mut block[16..48];
+        qh[5] = 0b0000_0001; // bit-plane u1 of group 0 → element 5
+        qh[0] = 0b0000_0100; // bit-plane u1 of group 1 → element 64
+        let ql = &mut block[48..176];
+        ql[3] = 0x02; // element 3 low nibble = 2
+
+        let t = Tensor::from_quant_bytes(&block, vec![256], DType::Q5_K).unwrap();
+        let out = t.to_f32_vec();
+        assert_eq!(out.len(), 256);
+        assert_eq!(out[3], 2.0, "low-nibble value");
+        assert_eq!(out[5], 16.0, "per-element high bit (group 0, u1 plane)");
+        assert_eq!(out[64], 16.0, "per-element high bit (group 1, u1 plane)");
+        let hot = [3usize, 5, 64];
+        for (i, v) in out.iter().enumerate() {
+            if !hot.contains(&i) {
+                assert_eq!(*v, 0.0, "element {i} should be zero");
+            }
+        }
     }
 }
