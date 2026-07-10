@@ -322,9 +322,33 @@ the identified next rung: an accuracy-class change (per-256 vs per-32
 activation quantization — llama.cpp-precedented industry-wide), new
 int-domain kernels, and greedy-output verification on real models.
 
-Remaining parity items: the Q8_K activation format above, and a graph-level
-single-region decode pass (publish a token's whole op list once) if the
-remaining per-op publish cost ever shows up as the next bottleneck.
+**Q8_K activation format landed for the Q4_K_R4 paths** (2026-07-10,
+`feat/q8k-activations`, `SAPIENT_Q8K_ACT` gate): activations carry ONE f32
+scale per 256-element super-block + per-32 sums (llama.cpp `block_q8_K`);
+the kernels accumulate the 6-bit weight sub-scales in the INTEGER domain and
+pay one f32 fma per super-block. Every kernel bit-identity-gated against a
+scalar oracle that itself sits within 3% of BOTH the f32 reference and the
+accepted per-32 W4A8 path; real-model greedy verification passed (llama-1B:
+coherent, ~15-token verbatim prefix, near-tie divergence — the accepted MoE-
+precedent class). Measured (same binary, env A/B, order-swapped):
+
+| Q8_K vs per-32 | decode | prefill TTFT (2.2k tok) |
+|---|---:|---:|
+| M4 qwen-1.5B | **+6.3%** (47.5→50.5) | +1–3% |
+| M4 llama-1B | **+4.9%** (64.5→67.7) | — |
+| **Thor 14-core qwen** | **+22.7%** (24.2→29.7) | **−12.7%** (30.9→26.9 s) |
+
+The narrow in-order-ish Neoverse pipe is where the f32 tail hurt most —
++23% decode is the largest single-rung Thor win of the parity project (gap
+vs llama.cpp there: 3.16× at v0.5.0 → ~2.8× now on this model). On M4 the
+SMMLA prefill barely moves because this port still does the sub-scale
+combine with scalar lane-extraction — vectorizing that combine (llama.cpp
+does) is the follow-up, as is the Q6_K Q8_K variant (Q6_K is ~⅓ of a
+Q4_K_M model and still pays the per-32 f32 tail).
+
+Remaining parity items: Q8_K for Q6_K + vectorized SMMLA sub-scale combine
+(prefill), Pi 5 measurement before any default flip, and a graph-level
+single-region decode pass if per-op publish cost ever surfaces.
 
 Remaining parity items: deeper output tiling for prefill (llama.cpp pp512
 remains well ahead), and the Linux-side threadpool validation above.
