@@ -445,19 +445,20 @@ fn gemv_chunk(n: usize) -> usize {
     }
 }
 
-/// `SAPIENT_Q8K_ACT=1`: quantize activations for the Q4_K_R4 matmuls in the
-/// Q8_K format (ONE f32 scale per 256-element super-block + per-32 sums) and
-/// use the integer-domain-combine kernels — the pp512 activation-format rung
-/// (see BENCHMARKS.md). Default OFF: this is an accuracy-class change
-/// (per-256 vs per-32 activation scales, llama.cpp-precedented) and stays
-/// opt-in until real-model greedy verification + the cross-platform A/B pass.
+/// Q8_K-format activations for the Q4_K_R4 matmuls (ONE f32 scale per
+/// 256-element super-block + per-32 sums; integer-domain sub-scale combine —
+/// the pp512 activation-format rung, BENCHMARKS.md). **Default ON — measured
+/// a win on every platform** (decode: M4 qwen +6.3%, M4 llama +4.9%, Thor
+/// 14-core +22.7%, Pi 5 +3.9%; Thor prefill −12.7% TTFT) with real-model
+/// greedy verification passed (llama.cpp-precedented per-256 accuracy
+/// class). `SAPIENT_Q8K_ACT=0` reverts to the per-32 W4A8 format.
 fn q8k_activations() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
         std::env::var("SAPIENT_Q8K_ACT")
-            .map(|v| v == "1")
-            .unwrap_or(false)
+            .map(|v| v != "0")
+            .unwrap_or(true)
     })
 }
 
@@ -872,10 +873,16 @@ fn matmul_nt_q4_k(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
     // keep activation outliers from collapsing the signal (cf. Q8_0 SDOT).
     #[cfg(target_arch = "aarch64")]
     if std::arch::is_aarch64_feature_detected!("dotprod") {
+        let q8k = q8k_activations();
         for i in 0..m {
             let x_row = &x_data[i * k..(i + 1) * k];
-            let (x_i8, x_scales) = quant::quantize_row_to_i8_blocks(x_row);
-            let x_sums = quant::i8_block_sums(&x_i8);
+            let (x_i8, x_scales, x_sums) = if q8k {
+                quant::quantize_row_to_q8k(x_row)
+            } else {
+                let (q, s) = quant::quantize_row_to_i8_blocks(x_row);
+                let sums = quant::i8_block_sums(&q);
+                (q, s, sums)
+            };
             let chunk = gemv_chunk(n);
             for_each_out_chunk(&mut out[i * n..(i + 1) * n], chunk, |ci, cs| {
                 // Multi-row GEMV: 4 weight rows share one pass over the
@@ -887,28 +894,28 @@ fn matmul_nt_q4_k(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
                 while local + 4 <= cs.len() {
                     let j = start + local;
                     let r = |o: usize| &w_blocks[(j + o) * row_bytes..(j + o + 1) * row_bytes];
+                    let rows = [r(0), r(1), r(2), r(3)];
                     // SAFETY: dotprod verified above; slices are whole Q4_K rows.
                     let v = unsafe {
-                        quant::dot_q4_k_4rows_q8_neon(
-                            [r(0), r(1), r(2), r(3)],
-                            &x_i8,
-                            &x_scales,
-                            &x_sums,
-                        )
+                        if q8k {
+                            quant::dot_q4_k_4rows_q8k_neon(rows, &x_i8, &x_scales, &x_sums)
+                        } else {
+                            quant::dot_q4_k_4rows_q8_neon(rows, &x_i8, &x_scales, &x_sums)
+                        }
                     };
                     cs[local..local + 4].copy_from_slice(&v);
                     local += 4;
                 }
                 for slot in &mut cs[local..] {
                     let j = start + local;
+                    let row = &w_blocks[j * row_bytes..(j + 1) * row_bytes];
                     // SAFETY: as above.
                     *slot = unsafe {
-                        quant::dot_q4_k_row_q8_neon(
-                            &w_blocks[j * row_bytes..(j + 1) * row_bytes],
-                            &x_i8,
-                            &x_scales,
-                            &x_sums,
-                        )
+                        if q8k {
+                            quant::dot_q4_k_row_q8k_neon(row, &x_i8, &x_scales, &x_sums)
+                        } else {
+                            quant::dot_q4_k_row_q8_neon(row, &x_i8, &x_scales, &x_sums)
+                        }
                     };
                     local += 1;
                 }

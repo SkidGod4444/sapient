@@ -346,9 +346,13 @@ combine with scalar lane-extraction — vectorizing that combine (llama.cpp
 does) is the follow-up, as is the Q6_K Q8_K variant (Q6_K is ~⅓ of a
 Q4_K_M model and still pays the per-32 f32 tail).
 
-Remaining parity items: Q8_K for Q6_K + vectorized SMMLA sub-scale combine
-(prefill), Pi 5 measurement before any default flip, and a graph-level
-single-region decode pass if per-op publish cost ever surfaces.
+**Pi 5 measured (+3.9%, 10.3 → 10.7 tok/s llama-1B decode) — a win on every
+platform, so Q8_K activations are DEFAULT ON for the Q4_K_R4 paths**
+(`SAPIENT_Q8K_ACT=0` reverts).
+
+Remaining parity items: Q8_K for Q6_K (~⅓ of a Q4_K_M model still pays the
+per-32 tail), vectorized SMMLA sub-scale combine (M4 prefill), and a
+graph-level single-region decode pass if per-op publish cost ever surfaces.
 
 Remaining parity items: deeper output tiling for prefill (llama.cpp pp512
 remains well ahead), and the Linux-side threadpool validation above.
