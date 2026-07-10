@@ -287,9 +287,14 @@ spin: 38.6 tok/s vs rayon 63) — the measured optimum is a short ~4k-iteration
 Result (interleaved A/B, order-swapped): llama-1B 62.1 vs rayon 62.9 (parity);
 qwen-1.5B **45.3 vs 43.0 (+5.3%)** — the barrier-heavy profile gains most.
 `SAPIENT_SPINPOOL=0` reverts to rayon; thermally-governed decode always uses
-rayon (spinning defeats core-shedding). **The Linux/ARM validation is the real
-gate** — the ~1.6× fork/join scaling penalty this targets was measured on
-Thor/Linux futexes, not macOS — pending a Pi 5 / Thor run.
+rayon (spinning defeats core-shedding). **Pi 5 measured (same day, A/B over
+ssh): a consistent −3%** (rayon 10.3 vs spin 10.0 tok/s, spin-budget
+insensitive — at ~100 ms/token the fork/join tax is tiny and the pool's
+interleaved chunk claiming costs prefetch locality vs rayon's contiguous
+stealing), so **the default is platform-gated: ON for macOS, OFF on Linux**
+(`SAPIENT_SPINPOOL=1` opts in). The Thor/server-ARM run — the 14-core futex
+fork/join case the pool was actually built for — remains the open
+measurement.
 
 Remaining parity items: deeper output tiling for prefill (llama.cpp pp512
 remains well ahead), and the Linux-side threadpool validation above.

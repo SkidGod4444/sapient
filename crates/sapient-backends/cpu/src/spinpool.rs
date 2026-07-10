@@ -321,7 +321,16 @@ pub fn enabled() -> bool {
     let on = *ON.get_or_init(|| {
         std::env::var("SAPIENT_SPINPOOL")
             .map(|v| v != "0")
-            .unwrap_or(true)
+            // Platform-gated default, per measurement (2026-07-10):
+            // macOS/M4 measured parity-to-+5.3% decode (qwen-1.5B wins most —
+            // more barriers per token), so it defaults ON there. Pi 5 (Linux/
+            // A76) measured a consistent −3% — at ~100 ms/token the fork/join
+            // tax is tiny and the pool's interleaved chunk claiming costs
+            // prefetch locality vs rayon's contiguous stealing — so Linux
+            // defaults OFF until server-ARM (Thor-class, the 1.6× fork/join
+            // scaling case this was built for) is measured. SAPIENT_SPINPOOL=1
+            // opts in anywhere.
+            .unwrap_or(cfg!(target_os = "macos"))
     });
     on && crate::thermal::effective_threads() >= rayon::current_num_threads()
 }
