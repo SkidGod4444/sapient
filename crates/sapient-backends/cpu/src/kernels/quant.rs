@@ -344,6 +344,87 @@ pub fn i8_block_sums(q: &[i8]) -> Vec<i32> {
         .collect()
 }
 
+/// Quantize an activation row to Q8_K-style blocks: int8 quants with ONE
+/// f32 scale per 256-element SUPER-block plus precomputed per-32 sums.
+///
+/// This is llama.cpp's `block_q8_K` activation format for K-quant matmuls.
+/// Versus [`quantize_row_to_i8_blocks`] (per-32 scales, the Q8_0 W8A8
+/// format), the per-256 scale lets the K-quant kernels accumulate the
+/// weight sub-scales in the INTEGER domain and pay one f32 multiply per
+/// super-block instead of one f32 combine per 32-element sub-block — the
+/// measured pp512 tail (see BENCHMARKS.md, prefill investigation). The
+/// accuracy class changes: an outlier channel now sets the scale for its
+/// whole 256-block rather than its 32-block. This is exactly what llama.cpp
+/// ships for every K-quant matmul, so quality is llama.cpp-precedented —
+/// but any switch of a live path to this format MUST re-verify real-model
+/// greedy outputs (repo rule).
+///
+/// `x.len()` must be a multiple of 256 (every K-quant row is).
+pub fn quantize_row_to_q8k(x: &[f32]) -> (Vec<i8>, Vec<f32>, Vec<i32>) {
+    debug_assert_eq!(x.len() % QK_K, 0);
+    let nsuper = x.len() / QK_K;
+    let mut q = vec![0i8; x.len()];
+    let mut scales = vec![0.0f32; nsuper];
+    let mut sums = vec![0i32; x.len() / QK];
+    for (b, blk) in x.chunks_exact(QK_K).enumerate() {
+        let max_abs = blk.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let scale = if max_abs > 0.0 { max_abs / 127.0 } else { 1.0 };
+        let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
+        for (i, &v) in blk.iter().enumerate() {
+            q[b * QK_K + i] = (v * inv).round().clamp(-127.0, 127.0) as i8;
+        }
+        scales[b] = scale;
+        for j in 0..QK_K / QK {
+            let base = b * QK_K + j * QK;
+            sums[b * (QK_K / QK) + j] = q[base..base + QK].iter().map(|&v| v as i32).sum();
+        }
+    }
+    (q, scales, sums)
+}
+
+/// Scalar reference: full Q4_K weight row × Q8_K activations. The weight
+/// sub-scales (6-bit sc/mn) are accumulated in the INTEGER domain per
+/// super-block — `isum = Σ_j sc_j·dot_j`, `imin = Σ_j mn_j·bsum_j` (both
+/// fit i32 with headroom: |sc·dot| ≤ 63·61k, ×8 ≈ 31M) — and the f32 tail
+/// is exactly two multiplies + one fma per 256 weights:
+/// `acc += D_b · (d·isum − dmin·imin)`. Oracle for the NEON/SMMLA variants.
+pub fn dot_q4_k_row_q8k_scalar(
+    row_data: &[u8],
+    x_i8: &[i8],
+    x_scales: &[f32],
+    x_sums: &[i32],
+) -> f32 {
+    let mut acc = 0.0f32;
+    let mut x_off = 0usize;
+    for (b, block) in row_data.chunks_exact(Q4_K_BLOCK_BYTES).enumerate() {
+        let d = f16::from_le_bytes([block[0], block[1]]).to_f32();
+        let dmin = f16::from_le_bytes([block[2], block[3]]).to_f32();
+        let scales = &block[4..16];
+        let qs = &block[16..Q4_K_BLOCK_BYTES];
+        let mut q_off = 0usize;
+        let mut is = 0usize;
+        let (mut isum, mut imin) = (0i32, 0i32);
+        for _ in 0..(QK_K / 64) {
+            let (sc1, m1) = get_scale_min_k4(is, scales);
+            let (sc2, m2) = get_scale_min_k4(is + 1, scales);
+            let xlo = &x_i8[x_off..x_off + 32];
+            let xhi = &x_i8[x_off + 32..x_off + 64];
+            let (mut dot_lo, mut dot_hi) = (0i32, 0i32);
+            for l in 0..32 {
+                dot_lo += (qs[q_off + l] & 0x0F) as i32 * xlo[l] as i32;
+                dot_hi += (qs[q_off + l] >> 4) as i32 * xhi[l] as i32;
+            }
+            isum += sc1 as i32 * dot_lo + sc2 as i32 * dot_hi;
+            imin += m1 as i32 * x_sums[x_off / QK] + m2 as i32 * x_sums[(x_off + 32) / QK];
+            x_off += 64;
+            q_off += 32;
+            is += 2;
+        }
+        acc += x_scales[b] * (d * isum as f32 - dmin * imin as f32);
+    }
+    acc
+}
+
 /// Q8_0 block dot product against a pre-quantized i8 activation slice.
 ///
 /// Uses the ARMv8.4-A `sdot` instruction via inline assembly — stable Rust,
@@ -923,6 +1004,68 @@ unsafe fn vtrn2q_s64_s8(
 ) -> std::arch::aarch64::int8x16_t {
     use std::arch::aarch64::*;
     vreinterpretq_s8_s64(vtrn2q_s64(vreinterpretq_s64_s8(a), vreinterpretq_s64_s8(b)))
+}
+
+/// NEON Q4_K × Q8_K row dot — the sdot core of [`dot_q4_k_row_q8_neon`]
+/// with the weight sub-scales accumulated in the INTEGER domain and one f32
+/// fma per super-block (llama.cpp `ggml_vec_dot_q4_K_q8_K` shape). Integer
+/// sums are exact, and the f32 combine order matches
+/// [`dot_q4_k_row_q8k_scalar`] — bit-identical to the oracle.
+///
+/// # Safety
+/// Caller must verify `is_aarch64_feature_detected!("dotprod")`. Activations
+/// are Q8_K: `x_scales` has ONE f32 per 256-element super-block; `x_sums`
+/// one i32 per 32-element sub-block.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon,dotprod")]
+pub unsafe fn dot_q4_k_row_q8k_neon(
+    row_data: &[u8],
+    x_i8: &[i8],
+    x_scales: &[f32],
+    x_sums: &[i32],
+) -> f32 {
+    use std::arch::aarch64::*;
+    let mask = vdupq_n_u8(0x0F);
+    let mut acc = 0.0f32;
+    let mut x_off = 0usize;
+    for (b, block) in row_data.chunks_exact(Q4_K_BLOCK_BYTES).enumerate() {
+        let d = f16::from_le_bytes([block[0], block[1]]).to_f32();
+        let dmin = f16::from_le_bytes([block[2], block[3]]).to_f32();
+        let scales = &block[4..16];
+        let qs = &block[16..Q4_K_BLOCK_BYTES];
+        let mut q_off = 0usize;
+        let mut is = 0usize;
+        let (mut isum, mut imin) = (0i32, 0i32);
+        for _ in 0..(QK_K / 64) {
+            let (sc1, m1) = get_scale_min_k4(is, scales);
+            let (sc2, m2) = get_scale_min_k4(is + 1, scales);
+
+            let q0 = vld1q_u8(qs.as_ptr().add(q_off));
+            let q1 = vld1q_u8(qs.as_ptr().add(q_off + 16));
+            let lo0 = vreinterpretq_s8_u8(vandq_u8(q0, mask));
+            let lo1 = vreinterpretq_s8_u8(vandq_u8(q1, mask));
+            let hi0 = vreinterpretq_s8_u8(vshrq_n_u8::<4>(q0));
+            let hi1 = vreinterpretq_s8_u8(vshrq_n_u8::<4>(q1));
+
+            let xlo0 = vld1q_s8(x_i8.as_ptr().add(x_off));
+            let xlo1 = vld1q_s8(x_i8.as_ptr().add(x_off + 16));
+            let xhi0 = vld1q_s8(x_i8.as_ptr().add(x_off + 32));
+            let xhi1 = vld1q_s8(x_i8.as_ptr().add(x_off + 48));
+
+            let zero = vdupq_n_s32(0);
+            let dot_lo = vaddvq_s32(sdot_s32(sdot_s32(zero, lo0, xlo0), lo1, xlo1));
+            let dot_hi = vaddvq_s32(sdot_s32(sdot_s32(zero, hi0, xhi0), hi1, xhi1));
+
+            isum += sc1 as i32 * dot_lo + sc2 as i32 * dot_hi;
+            imin += m1 as i32 * x_sums[x_off / QK] + m2 as i32 * x_sums[(x_off + 32) / QK];
+
+            x_off += 64;
+            q_off += 32;
+            is += 2;
+        }
+        acc += x_scales[b] * (d * isum as f32 - dmin * imin as f32);
+    }
+    acc
 }
 
 /// NEON W4A8 Q4_K row dot product — the fast decode kernel. Bit-for-bit equal in
@@ -2799,5 +2942,58 @@ mod tests {
             rel < 1e-4,
             "Q5_K NEON≠scalar: neon={got} scalar={scalar} rel={rel}"
         );
+    }
+    #[test]
+    fn q4_k_q8k_scalar_matches_f32_path() {
+        let nblocks = 3usize;
+        let mut row = vec![0u8; nblocks * Q4_K_BLOCK_BYTES];
+        for (i, b) in row.iter_mut().enumerate() {
+            *b = ((i * 197 + 13) % 251) as u8;
+        }
+        for blk in 0..nblocks {
+            let base = blk * Q4_K_BLOCK_BYTES;
+            row[base..base + 2].copy_from_slice(&f16::from_f32(0.05).to_le_bytes());
+            row[base + 2..base + 4].copy_from_slice(&f16::from_f32(0.03).to_le_bytes());
+        }
+        let mut state = 0x2545F4914F6CDD1Du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let x: Vec<f32> = (0..nblocks * QK_K)
+            .map(|_| (next() as f32 / u64::MAX as f32) * 4.0 - 2.0)
+            .collect();
+
+        let f32_dot = dot_q4_k_row_f32(&row, &x);
+        let (xi8, xsc, xsum) = quantize_row_to_q8k(&x);
+        let q8k_dot = dot_q4_k_row_q8k_scalar(&row, &xi8, &xsc, &xsum);
+        let rel = (f32_dot - q8k_dot).abs() / f32_dot.abs().max(1e-3);
+        assert!(
+            rel < 0.03,
+            "Q8_K mismatch: f32={f32_dot} q8k={q8k_dot} rel={rel}"
+        );
+
+        // The per-256 format must stay in the accuracy class of the accepted
+        // per-32 W4A8 path on the same inputs.
+        let (pi8, psc) = quantize_row_to_i8_blocks(&x);
+        let psum = i8_block_sums(&pi8);
+        let w4a8 = dot_q4_k_row_q8_scalar(&row, &pi8, &psc, &psum);
+        let rel_vs = (w4a8 - q8k_dot).abs() / w4a8.abs().max(1e-3);
+        assert!(
+            rel_vs < 0.03,
+            "Q8_K vs W4A8 divergence: w4a8={w4a8} q8k={q8k_dot} rel={rel_vs}"
+        );
+
+        #[cfg(target_arch = "aarch64")]
+        if std::arch::is_aarch64_feature_detected!("dotprod") {
+            let neon = unsafe { dot_q4_k_row_q8k_neon(&row, &xi8, &xsc, &xsum) };
+            assert_eq!(
+                neon.to_bits(),
+                q8k_dot.to_bits(),
+                "NEON≠scalar Q8_K: {neon} vs {q8k_dot}"
+            );
+        }
     }
 }
