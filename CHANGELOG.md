@@ -3,6 +3,44 @@
 Release notes for SAPIENT. The release workflow publishes each version's
 section below as the GitHub release body.
 
+## [Unreleased]
+
+Model beta-test sweep (every downloaded model, long-form prompts) — four user-facing bugs found and fixed, plus new MLX debug tooling.
+
+### 🐛 Correctness
+
+- **Q5_K dequantization fixed in `sapient-core` `Tensor::to_f32_vec`**: the 5th
+  bit was read from one `qh[is/8]` byte per 32-element sub-block instead of
+  ggml's per-element `qh[l]` — corrupting every Q5_K tensor dequantized through
+  `to_f32_cow` (the MLX requantize path). phi-4-mini (whose unsloth Q4_K_M GGUF
+  stores q/k/v as Q5_K) emitted degenerate "mememe" output on `--backend
+  metal`. Same bug class as the CPU scalar kernel fixed in v0.3.9; both copies
+  now match, regression test `q5_k_dequant_high_bits_per_element`.
+- **Phi-3/Phi-4 `<|end|>` added to `EOS_CANDIDATES`**: `<|end|>` is
+  `special: true`, so `decode` strips it and it can never match as a stop
+  *string* — with it missing from the EOS id list, phi-4-mini blew past its
+  end-of-turn and rambled/repeated on every backend.
+- **SmolLM2 GGUFs got the wrong builtin chat template**: Llama-arch + generic
+  "llama" model_type fell into the LLAMA2 `[INST]` arm, but SmolLM2 is
+  ChatML-trained — every chat reply came back empty. New `smollm` → ChatML arm
+  in `builtin_template_for`.
+
+### 💬 Chat UX
+
+- **`sapient chat -n/--max-tokens <N>`** (default raised 512 → 2048 for chat),
+  and a reply that stops at the cap now prints a truncation notice (stderr, so
+  `chat -p` stdout stays scriptable) via the new
+  `Pipeline::last_reply_truncated()` — long answers no longer silently cut off
+  mid-sentence.
+
+### 🔧 Debug tooling
+
+- `SAPIENT_MLX_DISABLE=<op,…|all>` (force listed MLX ops onto the CPU
+  reference kernel), `SAPIENT_MLX_VERIFY=1` (cross-check MLX `linear_3d`
+  against CPU, print per-weight divergence), `SAPIENT_MLX_NO_QUANT=1` (force
+  the F32 matmul path) — per-op bisection of wrong-numbers GPU kernels without
+  rebuilding.
+
 ## [0.5.3] - 2026-07-09
 
 Sparse MoE lands (Mixtral 47B and GLM-4.5-Air 106B on a Jetson, pure Rust,

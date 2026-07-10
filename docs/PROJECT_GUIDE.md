@@ -46,7 +46,9 @@ summary before we dive into the internals.
   loop with a TTY mic-level meter, streamed reply, and OS mic-permission request; `--speak` voices
   the reply (Kokoro by default, real-time). Ships in the default binary on macOS/Windows/Linux/Pi.
 - **One-shot chat** — `sapient chat <model> -p "<text>"` runs a single templated turn and prints
-  only the reply to stdout (scriptable, e.g. piping into `sapient speak`).
+  only the reply to stdout (scriptable, e.g. piping into `sapient speak`). Replies default to a
+  2048-token cap (`-n/--max-tokens` to change it); a reply that hits the cap prints a truncation
+  notice on stderr instead of silently stopping mid-sentence.
 
 **Cross-platform GPU.** Beyond Apple's MLX/Metal (`MlxForwardEngine`), the portable
 `WgpuForwardEngine` (Vulkan/DX12/Metal via wgpu, `--features wgpu --backend wgpu`) accelerates
