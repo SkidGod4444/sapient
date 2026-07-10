@@ -76,7 +76,7 @@ re-prefill — still correct, just not reused. On Metal the prefill is fast enou
 ## Speculative decoding — honest note
 
 `sapient serve --speculative [--draft-model <alias>]` is implemented and **correct**
-(cache-aware verification with rollback — see [SERVING.md](SERVING.md)). But
+(cache-aware verification with rollback). But
 speculative decoding only pays off when the draft is *much* cheaper than the target
 **and** acceptance is high. In our CPU test (Qwen2.5-0.5B draft → 1.5B target) the 3×
 size ratio plus per-round overhead made it a **net loss** (5.4 vs 8.5 tok/s) — so we
@@ -107,7 +107,7 @@ SAPIENT (and Ollama) is to serve well *where vLLM can't go*.
 | Multi-model resident cache | ✅ LRU (N models) | ✅ (recent versions) | one model / server |
 | Prefix / prompt KV cache | ✅ (CPU engine) | ✅ | ✅ |
 | Speculative decoding | ✅ | ✅ | ✅ |
-| Continuous batching + PagedAttention | ⏳ planned (`docs/SERVING.md`) | ❌ | ✅ (its strength) |
+| Continuous batching + PagedAttention | ⏳ planned | ❌ | ✅ (its strength) |
 
 ## Reproduce
 

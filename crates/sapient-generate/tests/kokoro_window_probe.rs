@@ -5,7 +5,7 @@
 //! InstanceNorm statistics are GLOBAL over the time axis, so mid-utterance
 //! windows diverge from the full decode by 0.45 / 0.34 / 0.20 max-diff at
 //! halo 16 / 32 / 64 (measured 2026-07-04 on the real model) — a slow decay
-//! that is statistics, not receptive field. See docs/DUPLEX_SPIKE.md.
+//! that is statistics, not receptive field.
 
 use sapient_generate::KokoroTts;
 

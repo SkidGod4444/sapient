@@ -59,8 +59,8 @@
   + numeric grid-orientation probe. v1: single global 512² image (no sub-image
   splitting yet). MedGemma requires a Gemma3 text engine — next engine project.
   **Server (12.3) done:** `/v1/chat/completions` accepts OpenAI image parts as
-  base64 data URIs, routed through `VlmPipeline` in a third LRU cache (see
-  [SERVING.md](SERVING.md)); remote image URLs are refused by design.
+  base64 data URIs, routed through `VlmPipeline` in a third LRU cache;
+  remote image URLs are refused by design.
 - 🚧 **Streaming voice loop (Phase 10 first cut)** — incremental STT during speech
   (`LiveStt`, transcript ready at end-of-utterance), early-first-clause TTS handoff,
   barge-in (`SpeakerPlayback::clear` + mic monitor), per-turn latency breakdown.
@@ -286,11 +286,9 @@ Notion roadmap's Phase 8 — "Own the Raspberry Pi".)
 - [x] **Streaming SSE** for `/v1/chat/completions` and `/v1/completions`; cache lock not held during inference, so different models serve concurrently.
 - [x] **Admission control** — bounded inference concurrency (`--max-concurrency`, tokio semaphore) so bursts queue instead of oversubscribing.
 - [x] **Prefix/prompt caching** — reuse the KV cache for the longest shared token prefix (multi-turn chat / shared system prompts skip re-prefilling history); byte-identical output, verified. `ForwardEngine::truncate_cache` + `Pipeline::enable_prefix_cache`.
-- [x] **Speculative decoding wired into `serve`** (`--speculative [--draft-model <alias>]`). `SpeculativePipeline` reuses loaded target+draft engines across requests (`Arc<Mutex<ForwardEngine>>`, no per-request rebuild), gained `*_with_config` + accessors, and is cached via `ServedModel`. Also fixed a pre-existing correctness bug: target verification now uses a cache-aware forward (`forward_all_logits_cached` + `truncate_cache` rollback) instead of resetting the KV cache — output was previously token-salad. Vocab-mismatch guard + family-aware auto-draft. See `docs/SERVING.md`.
-- [ ] Continuous (in-flight) batching + parallel slots + chunked prefill; paged KV (block pool) — large single-sequence-engine rewrite, designed in `docs/SERVING.md`.
+- [x] **Speculative decoding wired into `serve`** (`--speculative [--draft-model <alias>]`). `SpeculativePipeline` reuses loaded target+draft engines across requests (`Arc<Mutex<ForwardEngine>>`, no per-request rebuild), gained `*_with_config` + accessors, and is cached via `ServedModel`. Also fixed a pre-existing correctness bug: target verification now uses a cache-aware forward (`forward_all_logits_cached` + `truncate_cache` rollback) instead of resetting the KV cache — output was previously token-salad. Vocab-mismatch guard + family-aware auto-draft.
+- [ ] Continuous (in-flight) batching + parallel slots + chunked prefill; paged KV (block pool) — large single-sequence-engine rewrite.
 - [ ] OpenAI-compatible `logprobs`, `n` parameters.
-
-Architecture + design for the deferred phases: **`docs/SERVING.md`** (built on the deep-research report — vLLM sleep mode, PagedAttention, mistral.rs as the pure-Rust precedent).
 
 ## Phase 5 — Phones (iOS / Android)  → **`v0.4.0`**
 Most constrained, biggest "wow".
