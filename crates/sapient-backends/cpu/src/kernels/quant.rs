@@ -1340,7 +1340,7 @@ pub unsafe fn dot_q4_k_4rows_r4_q8k_neon(
     let mut acc = [0.0f32; 4];
     let nb = packed.len() / (4 * Q4_K_BLOCK_BYTES);
     let mut x_off = 0usize;
-    for b in 0..nb {
+    for (b, &db) in x_scales.iter().enumerate().take(nb) {
         let gbase = b * 4 * Q4_K_BLOCK_BYTES;
         let mut dv = [0.0f32; 4];
         let mut dminv = [0.0f32; 4];
@@ -1386,7 +1386,6 @@ pub unsafe fn dot_q4_k_4rows_r4_q8k_neon(
             q_off += 32;
             is += 2;
         }
-        let db = x_scales[b];
         for r in 0..4 {
             acc[r] += db * (dv[r] * isum[r] as f32 - dminv[r] * imin[r] as f32);
         }
@@ -1421,7 +1420,7 @@ pub unsafe fn dot_q4_k_4rows_r4_x2_q8k_smmla(
     let mut acc = [[0.0f32; 2]; 4];
     let nb = packed.len() / (4 * Q4_K_BLOCK_BYTES);
     let mut x_off = 0usize;
-    for b in 0..nb {
+    for (b, (&db0, &db1)) in x0_scales.iter().zip(x1_scales.iter()).enumerate().take(nb) {
         let gbase = b * 4 * Q4_K_BLOCK_BYTES;
         let mut dv = [0.0f32; 4];
         let mut dminv = [0.0f32; 4];
@@ -1521,7 +1520,7 @@ pub unsafe fn dot_q4_k_4rows_r4_x2_q8k_smmla(
             q_off += 32;
             is += 2;
         }
-        let db = [x0_scales[b], x1_scales[b]];
+        let db = [db0, db1];
         for r in 0..4 {
             for xr in 0..2usize {
                 acc[r][xr] += db[xr] * (dv[r] * isum[r][xr] as f32 - dminv[r] * imin[r][xr] as f32);
