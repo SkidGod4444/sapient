@@ -373,9 +373,18 @@ Q6_K's per-16→per-256 reduction is twice as deep as Q4_K's. **Thor's dense
 decode gap vs llama.cpp: 3.16× (v0.5.0) → ~2.6×**; cumulative today
 (block-sums + spin pool + Q8_K both quants): Thor 22.4 → 32.8 tok/s (+46%).
 
-Remaining parity items: vectorized SMMLA sub-scale combine (residual
-lane-extraction cost), and a graph-level single-region decode pass if
-per-op publish cost ever surfaces.
+**Vectorized SMMLA sub-scale combine: measured NEUTRAL, reverted**
+(2026-07-11, `feat/smmla-vec-combine`): keeping the smmla accumulators in
+int32x4 vectors (`vmlaq_s32` against per-row scale vectors, one lane
+extraction per super-block instead of per group) was built for both x2 Q8_K
+kernels, stayed bit-identical through every gate — and measured Thor prefill
+−0.7% (noise) with M4 inside thermal drift. Post-Q8_K, the residual
+extraction + scalar-multiply cost per group is already insignificant against
+the 8 smmlas + nibble-unpack. Reverted; this record is the result. **That
+closes the named rungs of the CPU-parity ladder** — the residual Thor gap
+(~2.6×) is llama.cpp's single-core kernel engineering (KleidiAI-class), an
+open-ended project rather than a rung; the graph-level single-region decode
+pass remains conditional on per-op publish cost ever surfacing.
 
 Remaining parity items: deeper output tiling for prefill (llama.cpp pp512
 remains well ahead), and the Linux-side threadpool validation above.
