@@ -670,6 +670,17 @@ fn matmul_nt_q8_0(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
 // Specialized K-quant paths — no function pointer so the NEON dot kernel
 // can be inlined into the hot Rayon closure by the compiler.
 
+// MEASURED NO-GO (2026-07-10): cache-blocking the m ≥ 2 SMMLA paths over
+// 128-row activation panels was tried and REVERTED. The activation matrix
+// (3–4 MB at 2k tokens) already sits in LLC on every tested machine, so the
+// per-group activation re-stream never hit DRAM — while panelling made the
+// WEIGHTS stream ceil(m/128)× instead of once (L1-resident group across all
+// m). A/B on a ~2.2k-token prompt: Thor +7% TTFT (regression), M4 qwen even,
+// M4 llama −6% (confounded by run order). The original loop order is optimal
+// for traffic at these shapes; llama.cpp's remaining pp512 edge is register-
+// level (deeper int8 tiles amortizing the nibble-unpack), not cache blocking.
+// The panelled-vs-per-row bit-identity test below is kept as a prefill gate.
+
 /// Q4_K_R4 (row-interleaved) GEMV: weight rows come in groups of 4 whose
 /// super-blocks are block-interleaved into one contiguous stream (see
 /// `repack_q4_k_rows4`). The aarch64 SDOT path walks each group front-to-back
@@ -712,6 +723,13 @@ fn matmul_nt_q4_k_r4(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Re
             .for_each(|(g, chunk)| {
                 let group = &w_blocks[g * group_bytes..(g + 1) * group_bytes];
                 let mut xi = 0usize;
+                // NOTE: an x4 register tile (weight nibbles unpacked once per
+                // TWO activation pairs) was built, bit-identity-gated, and
+                // MEASURED here (2026-07-10): M4 −5% (register pressure —
+                // 16 activation TRN vectors + 8 weight vectors + accumulators
+                // spill past the 32-register budget), Thor exactly neutral.
+                // The x2 tile below is the measured optimum; the unpack ALU
+                // is already hidden behind smmla latency on OoO cores.
                 while xi + 2 <= m {
                     let (x0, s0, b0) = &quantized[xi];
                     let (x1, s1, b1) = &quantized[xi + 1];
@@ -1375,5 +1393,54 @@ mod tests {
         // Identity × [[2,3],[4,5]] = [[2,3],[4,5]]; + bias [1,1] = [[3,4],[5,6]]
         assert!((d[0] - 3.0).abs() < 1e-5, "got {}", d[0]);
         assert!((d[1] - 4.0).abs() < 1e-5, "got {}", d[1]);
+    }
+    /// Panel-blocked SMMLA prefill must be bit-identical to per-row GEMV:
+    /// m = 259 spans two full 128-row panels plus an odd 3-row remainder,
+    /// exercising panel boundaries, the mid-panel pair loop, and the odd
+    /// final panel. (The R4/x2-SMMLA kernels are bit-identical to the
+    /// single-row Q4_K kernel by their own gates; this test pins the LOOP
+    /// RESTRUCTURE — chunk bookkeeping, panel offsets, remainders.)
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn q4_k_r4_prefill_matches_per_row() {
+        let n = 8usize;
+        let k = 256usize; // one Q4_K super-block per row
+        let m = 259usize; // 2 full panels + odd remainder
+
+        // Deterministic pseudo-random Q4_K blocks with sane f16 scales.
+        let mut blocks = vec![0u8; n * Q4_K_BLOCK_BYTES];
+        for (i, b) in blocks.iter_mut().enumerate() {
+            *b = ((i * 131 + 7) % 251) as u8;
+        }
+        for r in 0..n {
+            let base = r * Q4_K_BLOCK_BYTES;
+            // d ≈ 0.05, dmin ≈ 0.03 (little-endian f16) — keep values finite.
+            blocks[base..base + 2].copy_from_slice(&half::f16::from_f32(0.05).to_le_bytes());
+            blocks[base + 2..base + 4].copy_from_slice(&half::f16::from_f32(0.03).to_le_bytes());
+        }
+        let packed = super::quant::repack_q4_k_rows4(&blocks, n, k);
+        let w_r4 = Tensor::from_quant_bytes(&packed, vec![n, k], DType::Q4_K_R4).unwrap();
+
+        let x_f32: Vec<f32> = (0..m * k)
+            .map(|i| ((i * 37 % 97) as f32 - 48.0) * 0.02)
+            .collect();
+        let x_all = Tensor::from_f32(&x_f32, vec![m, k]).unwrap();
+        let panelled = matmul_nt(&x_all, &w_r4).unwrap();
+        let pd = panelled.as_f32_slice();
+
+        for i in 0..m {
+            let x_row = Tensor::from_f32(&x_f32[i * k..(i + 1) * k], vec![1, k]).unwrap();
+            let row_out = matmul_nt(&x_row, &w_r4).unwrap();
+            let rd = row_out.as_f32_slice();
+            for j in 0..n {
+                assert_eq!(
+                    pd[i * n + j].to_bits(),
+                    rd[j].to_bits(),
+                    "row {i} col {j}: {} vs {}",
+                    pd[i * n + j],
+                    rd[j]
+                );
+            }
+        }
     }
 }

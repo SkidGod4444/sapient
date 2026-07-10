@@ -295,10 +295,36 @@ macOS. Default (measurement-driven): ON for macOS and Linux/aarch64 ≥ 8
 threads; opt-in elsewhere (`SAPIENT_SPINPOOL=1/0` overrides; thermally
 governed decode always uses rayon).
 
-Remaining parity items: deeper output tiling for prefill (llama.cpp pp512
-remains well ahead), and a graph-level single-region decode pass (publish a
-token's whole op list once) if the remaining per-op publish cost ever shows
-up as the next bottleneck.
+**Prefill tiling investigated — two falsifications that narrowed the real
+gap** (2026-07-10, `feat/prefill-tiling`; baseline: SAPIENT qwen-1.5B prefill
+≈ 103 tok/s on 10 M4 threads vs llama.cpp pp512 113.7 tok/s on FOUR threads —
+a ≥2× per-thread gap). (1) **Cache-blocking the m ≥ 2 SMMLA paths over
+128-row activation panels: NO-GO.** The activation matrix (3–4 MB at ~2k
+tokens) already sits in LLC on every tested machine, so the per-group
+activation re-stream never hit DRAM — while panelling made the WEIGHTS
+stream ceil(m/128)× instead of once (the 4-row group is L1-resident across
+all m in the original order). Measured: Thor +7% TTFT, M4 even. Reverted;
+a panel-boundary bit-identity matmul gate stays. (2) **A deeper x4 SMMLA
+register tile (weight nibbles unpacked once per two activation pairs):
+NO-GO.** M4 −5% — 16 activation TRN vectors + 8 weight vectors + accumulators
+spill past the 32-register budget, and the unpack ALU was already hidden
+behind smmla latency; Thor exactly neutral. Reverted (bit-identity was
+verified before measuring).
+
+**What's actually left of the pp512 gap:** the per-32-block f32 scale-combine
+tail. Our K-quant activations carry per-32 scales (chosen for Q8_0 outlier
+safety), forcing ~6 f32 ops per 64-weight group per output — comparable to
+the 4-smmla integer core itself. llama.cpp's **Q8_K** activation format uses
+one scale per 256-element super-block + precomputed bsums, applies weight
+sub-scales in the INTEGER domain, and pays one f32 multiply per super-block —
+~8× less f32 tail. Adopting Q8_K-style activations for the K-quant matmuls is
+the identified next rung: an accuracy-class change (per-256 vs per-32
+activation quantization — llama.cpp-precedented industry-wide), new
+int-domain kernels, and greedy-output verification on real models.
+
+Remaining parity items: the Q8_K activation format above, and a graph-level
+single-region decode pass (publish a token's whole op list once) if the
+remaining per-op publish cost ever shows up as the next bottleneck.
 
 Remaining parity items: deeper output tiling for prefill (llama.cpp pp512
 remains well ahead), and the Linux-side threadpool validation above.
