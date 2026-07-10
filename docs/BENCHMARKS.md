@@ -287,14 +287,27 @@ spin: 38.6 tok/s vs rayon 63) — the measured optimum is a short ~4k-iteration
 Result (interleaved A/B, order-swapped): llama-1B 62.1 vs rayon 62.9 (parity);
 qwen-1.5B **45.3 vs 43.0 (+5.3%)** — the barrier-heavy profile gains most.
 `SAPIENT_SPINPOOL=0` reverts to rayon; thermally-governed decode always uses
-rayon (spinning defeats core-shedding). **Pi 5 measured (same day, A/B over
-ssh): a consistent −3%** (rayon 10.3 vs spin 10.0 tok/s, spin-budget
-insensitive — at ~100 ms/token the fork/join tax is tiny and the pool's
-interleaved chunk claiming costs prefetch locality vs rayon's contiguous
-stealing), so **the default is platform-gated: ON for macOS, OFF on Linux**
-(`SAPIENT_SPINPOOL=1` opts in). The Thor/server-ARM run — the 14-core futex
-fork/join case the pool was actually built for — remains the open
-measurement.
+rayon (spinning defeats core-shedding). **Cross-platform validation (same
+day, A/B over ssh):** Pi 5 a consistent **−3%** (rayon 10.3 vs spin 10.0
+tok/s, spin-budget insensitive); **Jetson AGX Thor (14 threads, qwen-1.5B) a
+2× REGRESSION** — rayon 22.9 vs spin 11.7, and hot-spin (never park) even
+worse at 8.9. So **the default is platform-gated: ON for macOS
+(parity-to-+5.3%), OFF on Linux** (`SAPIENT_SPINPOOL=1` opts in).
+
+**The Thor result falsifies the original hypothesis.** The pool makes each
+of the ~230 per-token barriers cheaper but keeps their COUNT — and it loses
+2× on exactly the machine where the 1.6× fork/join scaling gap was measured.
+Hot-spin being worse than park-spin rules out wake latency as the cost.
+llama.cpp's multicore edge therefore isn't cheap barriers: it's **one
+parallel region per graph pass** (threads flow through the whole token's op
+list with lightweight per-op sync, contiguous per-thread work, no central
+chunk counter per GEMV). Closing the server-ARM scaling gap means that
+redesign — publish a token's op-graph once, not 230 op dispatches — which is
+its own project. The spin pool stays as the measured macOS win + the
+experiment record.
+
+Remaining parity items: deeper output tiling for prefill (llama.cpp pp512
+remains well ahead), and the graph-level single-region decode pass above.
 
 Remaining parity items: deeper output tiling for prefill (llama.cpp pp512
 remains well ahead), and the Linux-side threadpool validation above.
