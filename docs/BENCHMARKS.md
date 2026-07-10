@@ -1,11 +1,59 @@
-# SAPIENT Benchmarks — Metal, CPU, vs mlx-lm & Ollama
+# SAPIENT Benchmarks — Metal, CPU, vs llama.cpp & Ollama
 
-> Generated: 2026-05-31 · Hardware: **Apple M4 · 16 GB RAM · macOS 26.5 aarch64**
-> SAPIENT **v0.3.5** · mlx-lm 0.31.2 · Ollama 0.12.x
+> First generated 2026-05-31 (v0.3.5); each section carries its own measurement
+> date — **latest refresh 2026-07-09 (v0.5.3)**, directly below.
 
 > This page covers single-request **engine** throughput. For the **HTTP serving**
 > comparison (`sapient serve` vs Ollama vs vLLM — TTFT, concurrency, model
 > switch-back, prefix caching) see [SERVING_BENCHMARKS.md](SERVING_BENCHMARKS.md).
+
+---
+
+## v0.5.3 head-to-head refresh (Apple M4, 2026-07-09)
+
+> Hardware: **Apple M4 (MacBook Pro) · 16 GB · macOS 26.5 aarch64.** SAPIENT
+> **v0.5.3** release-profile builds (`-metal` MLX + CPU) · **llama.cpp b9860**
+> (Homebrew) · **Ollama 0.12.6**. Same Q4_K_M GGUF files (unsloth Llama-3.2-1B,
+> Qwen Qwen2.5-1.5B), all engines measured in the **same session**, interleaved
+> with rests (cool-machine protocol; SAPIENT's CPU runs came *before*
+> llama.cpp's, so run order did not favor llama.cpp). Method: decode tok/s over
+> 128 generated tokens — llama.cpp = `llama-bench` tg128 (`-r 3`); SAPIENT =
+> `bench-llm` streamed generation (mean of 3 warm runs); Ollama =
+> `/api/generate` `eval_count/eval_duration` (mean of 3). Raw summary:
+> [`assets/bench_v053.json`](assets/bench_v053.json); charts regenerated with
+> `scripts/gen-benchmark-charts.py`.
+
+| Decode tok/s | SAPIENT `-metal` | llama.cpp (Metal) | Ollama (Metal) | SAPIENT (CPU) | llama.cpp (CPU, 4t) |
+|---|---:|---:|---:|---:|---:|
+| Llama-3.2-1B Q4_K_M | 90.6 | **111.3** | 60.4† | 56.7 | 83.1 |
+| Qwen2.5-1.5B Q4_K_M | 82.2 | **88.4** | 86.3 | 40.6 | 66.5 |
+
+† Ollama's default `llama3.2:1b` tag ships **Q8_0**, not Q4_K_M (its registry's
+choice — noted rather than hidden; the same-quant tag failed to download during
+this session).
+
+| Warm TTFT (ms) | SAPIENT `-metal` | SAPIENT (CPU) | Ollama |
+|---|---:|---:|---:|
+| Llama-3.2-1B Q4_K_M | **52** | 366 | 152 |
+| Qwen2.5-1.5B Q4_K_M | **63** | 531 | 133 |
+
+(TTFT measured with a ~24-token prompt, warm model; Ollama TTFT is the
+`total − eval` duration proxy; llama.cpp omitted — `llama-bench` reports no
+TTFT.)
+
+**The honest read, July 2026:**
+- **llama.cpp is a moving target and moved.** b9860 measures faster than the
+  build used in the v0.5.0/v0.5.1 sections below on the same files (Metal 1B
+  101.3 → 111.3; CPU-4t 1B 78.7 → 83.1, 1.5B 62.5 → 66.5).
+- **Metal:** SAPIENT sits within **0.81–0.93×** of llama.cpp-Metal, beats
+  Ollama **1.5×** on the 1B (vs its default tag), roughly ties it on the 1.5B —
+  and keeps the **lowest TTFT of the three** (52–63 ms vs Ollama's ~130–150 ms).
+- **CPU:** the gap vs llama.cpp is **1.47× (1B) / 1.64× (1.5B)** this session —
+  wider than the v0.5.1 cool-machine reference readings (1.13–1.35×) because
+  llama.cpp improved and because sustained same-session benching runs warmer
+  than the isolated cool-machine readings documented in the thermal note below.
+  Both realities are recorded; the same-session table is the apples-to-apples
+  one.
 
 ---
 
@@ -575,7 +623,6 @@ curl -s http://localhost:11434/api/generate \
 python3 scripts/gen-benchmark-charts.py
 ```
 
-The raw per-run JSON for this report lives in `results/v033/`.
 
 ---
 

@@ -1,0 +1,26 @@
+{
+  "meta": {
+    "hardware": "Apple M4 (MacBook Pro), 16 GB",
+    "os": "macOS 26.5 aarch64",
+    "date": "2026-07-09",
+    "sapient_version": "0.5.3",
+    "llamacpp": "llama.cpp b9860 (Homebrew)",
+    "ollama": "0.12.6",
+    "method_decode": "decode tok/s over 128 generated tokens, same session; llama.cpp = llama-bench tg128 (-r 3); SAPIENT = bench-llm streamed generation (mean of 3 warm runs); Ollama = /api/generate eval_count/eval_duration (mean of 3). Ollama llama-1B uses its default tag (Q8_0).",
+    "method_ttft": "warm-model time to first streamed token; SAPIENT = bench-llm warm-run mean; Ollama = (total_duration - eval_duration) proxy, warm-run mean; llama.cpp omitted (llama-bench reports no TTFT)"
+  },
+  "decode": {
+    "metal": {
+      "Llama-3.2-1B Q4_K_M": { "SAPIENT": 90.6, "llama.cpp": 111.3, "Ollama": 60.4 },
+      "Qwen2.5-1.5B Q4_K_M": { "SAPIENT": 82.2, "llama.cpp": 88.4, "Ollama": 86.3 }
+    },
+    "cpu": {
+      "Llama-3.2-1B Q4_K_M": { "SAPIENT": 56.7, "llama.cpp": 83.1 },
+      "Qwen2.5-1.5B Q4_K_M": { "SAPIENT": 40.6, "llama.cpp": 66.5 }
+    }
+  },
+  "ttft": {
+    "Llama-3.2-1B Q4_K_M": { "SAPIENT": 52, "SAPIENT (CPU)": 366, "Ollama": 152 },
+    "Qwen2.5-1.5B Q4_K_M": { "SAPIENT": 63, "SAPIENT (CPU)": 531, "Ollama": 133 }
+  }
+}

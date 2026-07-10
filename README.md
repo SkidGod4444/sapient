@@ -321,27 +321,32 @@ implementing and validating its architecture in `sapient-models`.
 
 ## Performance (Apple M4 16 GB · Raspberry Pi 5 · Jetson AGX Thor)
 
-**Head-to-head vs llama.cpp and Ollama** (same GGUF file, same machine, decode tok/s —
-full tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md)):
+**Head-to-head vs llama.cpp and Ollama** (same GGUF file, same machine, same
+session — re-measured on the **v0.5.3** binaries, 2026-07-09; method + full
+tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md)):
 
-| Apple M4 | SAPIENT `-metal` | llama.cpp (Metal) | Ollama |
+| Apple M4 (Metal/GPU), decode tok/s | SAPIENT `-metal` | llama.cpp (Metal) | Ollama |
 |---|---|---|---|
-| Llama-3.2-1B Q4_K_M | **103.2 tok/s** | 101.3 | 62.3 |
-| Qwen2.5-1.5B Q4_K_M | 73.8 | **79.1** | 75.8 |
+| Llama-3.2-1B Q4_K_M | **90.6** | 111.3 | 60.4† |
+| Qwen2.5-1.5B Q4_K_M | **82.2** | 88.4 | 86.3 |
 
-SAPIENT-Metal **trades blows with llama.cpp and beats Ollama by 1.66× on the 1B** —
-with the lowest TTFT (21–38 ms) — from a single daemon-free ~22 MB binary. The
+† Ollama's default `llama3.2:1b` tag ships Q8_0, not Q4_K_M.
+
+SAPIENT-Metal sits **within 10–20% of llama.cpp-Metal and beats Ollama by 1.5×
+on the 1B** — with the **lowest TTFT of the three** (52–63 ms warm vs Ollama's
+~130–150 ms) — from a single daemon-free ~22 MB binary. The
 **`MlxForwardEngine`** runs the whole forward pass as one MLX lazy graph: every
 activation stays on the GPU, one `eval()` per token.
 
-**The CPU engine is within 1.13–1.35× of llama.cpp** (was 1.8–3.8× at v0.5.0) after
+**The CPU engine is within 1.3–1.6× of llama.cpp** (was 1.8–3.8× at v0.5.0) after
 the v0.5.1 kernel ladder — multi-row GEMV, `Q4_K_R4` load-time weight repacking,
 W6A8 SDOT Q6_K, and i8mm SMMLA prefill kernels, every rung bit-identity-gated:
 
-| CPU decode, Llama-3.2-1B Q4_K_M | SAPIENT | llama.cpp |
+| CPU decode, tok/s | SAPIENT | llama.cpp |
 |---|---|---|
-| Apple M4 | **69.5 tok/s** | 78.7 |
-| Raspberry Pi 5 (16 GB) | **11.6 tok/s** | 14.7 |
+| Apple M4 — Llama-3.2-1B Q4_K_M | 56.7 | **83.1** |
+| Apple M4 — Qwen2.5-1.5B Q4_K_M | 40.6 | **66.5** |
+| Raspberry Pi 5 (16 GB) — Llama-3.2-1B Q4_K_M (v0.5.1 run) | 11.6 | **14.7** |
 
 A Pi 5 went **1.3 → 11.6 tok/s (8.9×)** on this model across v0.5.0 + v0.5.1 — 1B-class
 chat on a Pi is genuinely interactive. CPU prefill is 1.5× (M4) to 2× (Jetson Thor)
