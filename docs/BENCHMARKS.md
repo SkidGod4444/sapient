@@ -273,41 +273,32 @@ A/B/B/A on M4 CPU decode: llama-1B 61.2 → 61.8 tok/s (+0.9%), qwen-1.5B
 43.5 → 44.1 (+1.2%) — small because the R4 4-row kernels already amortized
 the reduction 4×; the single-row/remainder paths gain the most.
 
-**Decode threadpool landed** (2026-07-10, `feat/cpu-parity-2`): a persistent
-spin/park worker pool (`spinpool.rs`) replaces the per-GEMV rayon fork/join
-(~230 barriers per decoded token). Three findings from building it, all
-measured on M4: (1) the op-handoff needs the seqlock door CLOSED (odd
-generation bump) *before* draining active workers — the reverse order has a
-torn-slot race that segfaults under park/wake cycling; (2) the pool's hot
-atomics must be cache-line padded; (3) **long spinning actively hurts on
-Apple Silicon** — workers burning cores during a token's serial phases steal
-the package power budget from the critical-path thread (200k-iteration hot
-spin: 38.6 tok/s vs rayon 63) — the measured optimum is a short ~4k-iteration
-(~15 µs) spin then park (sweep: 0 → 54.2, 4k → 63.6, 16k → 59.1, 50k → 52.3).
-Result (interleaved A/B, order-swapped): llama-1B 62.1 vs rayon 62.9 (parity);
-qwen-1.5B **45.3 vs 43.0 (+5.3%)** — the barrier-heavy profile gains most.
-`SAPIENT_SPINPOOL=0` reverts to rayon; thermally-governed decode always uses
-rayon (spinning defeats core-shedding). **Cross-platform validation (same
-day, A/B over ssh):** Pi 5 a consistent **−3%** (rayon 10.3 vs spin 10.0
-tok/s, spin-budget insensitive); **Jetson AGX Thor (14 threads, qwen-1.5B) a
-2× REGRESSION** — rayon 22.9 vs spin 11.7, and hot-spin (never park) even
-worse at 8.9. So **the default is platform-gated: ON for macOS
-(parity-to-+5.3%), OFF on Linux** (`SAPIENT_SPINPOOL=1` opts in).
-
-**The Thor result falsifies the original hypothesis.** The pool makes each
-of the ~230 per-token barriers cheaper but keeps their COUNT — and it loses
-2× on exactly the machine where the 1.6× fork/join scaling gap was measured.
-Hot-spin being worse than park-spin rules out wake latency as the cost.
-llama.cpp's multicore edge therefore isn't cheap barriers: it's **one
-parallel region per graph pass** (threads flow through the whole token's op
-list with lightweight per-op sync, contiguous per-thread work, no central
-chunk counter per GEMV). Closing the server-ARM scaling gap means that
-redesign — publish a token's op-graph once, not 230 op dispatches — which is
-its own project. The spin pool stays as the measured macOS win + the
-experiment record.
+**Decode threadpool landed — guided spin/park pool, four design iterations,
+each measured** (2026-07-10, `feat/cpu-parity-2`): a persistent worker pool
+(`spinpool.rs`) replaces the per-GEMV rayon fork/join (~230 barriers per
+decoded token). The design arc, all A/B-measured on real decode:
+**v1** per-chunk dynamic claiming — M4 +5% (qwen), but 2× REGRESSION on
+14-core Thor (claim/completion RMW traffic on hot lines + scattered
+per-thread chunk order) and a seqlock ordering bug that segfaulted (odd bump
+must precede the active drain — stress-test pinned). **v2** static contiguous
+shares — fixed Thor (2× → −8%) but equal shares wait for the slowest E-core
+on M4 (45 → 31 tok/s). **v3** guided blocks (~3/participant off one counter)
+— Thor +8%, M4 still down (the lm_head's block≈8 gave E-cores 8× longer
+straggler tails). **v4** topology-aware block size (1 on P/E-heterogeneous
+macOS, guided on homogeneous server ARM): **M4 llama-1B +7.7% (62.9 vs
+58.4), M4 qwen +0.9%, Thor 14-core qwen +5.3% (24.7 vs 23.4), Pi 5 −4%
+(9.9 vs 10.3 — at ~100 ms/token there is no fork/join tax to reclaim on 4
+cores).** Also measured en route: hot spinning is anti-productive on Apple
+Silicon (serial-phase power/scheduler interference; optimum ≈ 4k-iteration
+spin then park), and both worker AND publisher threads need QoS pinning on
+macOS. Default (measurement-driven): ON for macOS and Linux/aarch64 ≥ 8
+threads; opt-in elsewhere (`SAPIENT_SPINPOOL=1/0` overrides; thermally
+governed decode always uses rayon).
 
 Remaining parity items: deeper output tiling for prefill (llama.cpp pp512
-remains well ahead), and the graph-level single-region decode pass above.
+remains well ahead), and a graph-level single-region decode pass (publish a
+token's whole op list once) if the remaining per-op publish cost ever shows
+up as the next bottleneck.
 
 Remaining parity items: deeper output tiling for prefill (llama.cpp pp512
 remains well ahead), and the Linux-side threadpool validation above.

@@ -59,6 +59,8 @@ struct OpSlot {
     call: unsafe fn(*const (), usize),
     ctx: *const (),
     n_chunks: usize,
+    /// Chunks per claimed block (guided scheduling granularity).
+    block: usize,
 }
 
 impl Default for OpSlot {
@@ -68,6 +70,7 @@ impl Default for OpSlot {
             call: noop,
             ctx: std::ptr::null(),
             n_chunks: 0,
+            block: 1,
         }
     }
 }
@@ -85,9 +88,19 @@ pub struct SpinPool {
     /// Seqlock generation: even = published, odd = slot being rewritten.
     generation: Pad<AtomicU64>,
     op: UnsafeCell<OpSlot>,
-    next_chunk: Pad<AtomicUsize>,
+    /// GUIDED claiming: participants grab contiguous BLOCKS of chunks off
+    /// this counter (~3 blocks per participant). Measured rationale: v1
+    /// per-chunk claiming load-balanced the M4's P/E cores (+5% vs rayon)
+    /// but its ~112 RMWs/op on two hot lines plus scattered per-thread
+    /// chunk order was a 2× regression on 14-core Thor; v2 static shares
+    /// fixed Thor (2× → −8%) but equal shares made every op wait for the
+    /// slowest E-core on M4 (45 → 31 tok/s, nothing left to steal). Guided
+    /// blocks keep v2's contiguity at ~4× less claim traffic than v1 while
+    /// letting fast cores take more blocks (v1's balance).
+    next_block: Pad<AtomicUsize>,
+    /// Completed BLOCKS (one increment per block, not per chunk).
     completed: Pad<AtomicUsize>,
-    /// Workers currently inside an op (validated slot copy → last claim).
+    /// Workers currently inside an op (validated slot copy → last share).
     active: Pad<AtomicUsize>,
     /// Serializes publishers.
     publish: Mutex<()>,
@@ -108,7 +121,7 @@ impl SpinPool {
         let pool = Box::leak(Box::new(SpinPool {
             generation: Pad(AtomicU64::new(0)),
             op: UnsafeCell::new(OpSlot::default()),
-            next_chunk: Pad(AtomicUsize::new(0)),
+            next_block: Pad(AtomicUsize::new(0)),
             completed: Pad(AtomicUsize::new(0)),
             active: Pad(AtomicUsize::new(0)),
             publish: Mutex::new(()),
@@ -126,6 +139,28 @@ impl SpinPool {
                 .expect("spawn spinpool worker");
         }
         pool
+    }
+
+    /// Execute this op's blocks: claim contiguous blocks of `op.block`
+    /// chunks off the shared counter until none remain. Dynamic (fast cores
+    /// take more blocks — the M4 P/E balance) yet contiguous within each
+    /// block (the Thor prefetch locality). One completion increment per
+    /// block. A parked worker simply claims nothing — no deadlock.
+    fn execute_blocks(&self, op: &OpSlot) {
+        loop {
+            let b = self.next_block.0.fetch_add(1, Ordering::Relaxed);
+            let lo = b * op.block;
+            if lo >= op.n_chunks {
+                break;
+            }
+            let hi = (lo + op.block).min(op.n_chunks);
+            for c in lo..hi {
+                // SAFETY: ctx outlives the op (the publisher blocks in
+                // `run` until every block completes).
+                unsafe { (op.call)(op.ctx, c) };
+            }
+            self.completed.0.fetch_add(1, Ordering::Release);
+        }
     }
 
     fn worker_loop(&self) {
@@ -182,16 +217,7 @@ impl SpinPool {
             // `active`; the next publisher waits for active == 0 before
             // touching the slot, so this copy is of a stable, published op.
             let op = unsafe { *self.op.get() };
-            loop {
-                let c = self.next_chunk.0.fetch_add(1, Ordering::Relaxed);
-                if c >= op.n_chunks {
-                    break;
-                }
-                // SAFETY: ctx outlives the op (the publisher blocks in
-                // `run` until `completed == n_chunks`).
-                unsafe { (op.call)(op.ctx, c) };
-                self.completed.0.fetch_add(1, Ordering::Release);
-            }
+            self.execute_blocks(&op);
             self.active.0.fetch_sub(1, Ordering::SeqCst);
             seen = g;
         }
@@ -253,14 +279,32 @@ impl SpinPool {
         // SAFETY: gen is odd (no new joiner passes its authoritative check)
         // and active == 0 (everyone inside has left) — no worker can be
         // reading the slot.
+        let participants = self.workers + 1;
+        // Block size is TOPOLOGY-dependent (both directions measured):
+        // heterogeneous P/E cores (M-series) need block = 1 — an E-core
+        // claiming a late multi-chunk block adds a straggler tail to every
+        // op (llama-1B lm_head block≈8 measured 62 → 44 tok/s on M4);
+        // homogeneous server ARM wants ~3 blocks/participant — per-chunk
+        // claim+completion RMW traffic was Thor's 2× regression, and guided
+        // blocks took it to +8% OVER rayon. SAPIENT_SPINPOOL_BLOCK overrides.
+        let block = block_size_override().unwrap_or({
+            if cfg!(target_os = "macos") {
+                1
+            } else {
+                (n_chunks / (3 * participants)).max(1)
+            }
+        });
+        let n_blocks = n_chunks.div_ceil(block);
+        let op = OpSlot {
+            call: thunk::<F>,
+            ctx: f as *const F as *const (),
+            n_chunks,
+            block,
+        };
         unsafe {
-            *self.op.get() = OpSlot {
-                call: thunk::<F>,
-                ctx: f as *const F as *const (),
-                n_chunks,
-            };
+            *self.op.get() = op;
         }
-        self.next_chunk.0.store(0, Ordering::Relaxed);
+        self.next_block.0.store(0, Ordering::Relaxed);
         self.completed.0.store(0, Ordering::Relaxed);
         self.generation.0.fetch_add(1, Ordering::SeqCst); // → even: published
         if self.parked.0.load(Ordering::SeqCst) > 0 {
@@ -269,16 +313,9 @@ impl SpinPool {
         }
 
         // Participate from the calling thread.
-        loop {
-            let c = self.next_chunk.0.fetch_add(1, Ordering::Relaxed);
-            if c >= n_chunks {
-                break;
-            }
-            f(c);
-            self.completed.0.fetch_add(1, Ordering::Release);
-        }
-        // Chunk writes become visible via the Release increments above.
-        while self.completed.0.load(Ordering::Acquire) < n_chunks {
+        self.execute_blocks(&op);
+        // Block writes become visible via the Release increments above.
+        while self.completed.0.load(Ordering::Acquire) < n_blocks {
             std::hint::spin_loop();
         }
     }
@@ -306,6 +343,18 @@ pub fn pool() -> &'static SpinPool {
     })
 }
 
+/// `SAPIENT_SPINPOOL_BLOCK`: fixed chunks-per-claimed-block override for the
+/// guided scheduler (topology experiments).
+fn block_size_override() -> Option<usize> {
+    static V: OnceLock<Option<usize>> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("SAPIENT_SPINPOOL_BLOCK")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&v| v >= 1)
+    })
+}
+
 /// Worker threads + the participating publisher — the parallelism the task
 /// count should be sized for when the pool is active (`gemv_chunk` uses it).
 pub fn parallelism() -> usize {
@@ -321,16 +370,18 @@ pub fn enabled() -> bool {
     let on = *ON.get_or_init(|| {
         std::env::var("SAPIENT_SPINPOOL")
             .map(|v| v != "0")
-            // Platform-gated default, per measurement (2026-07-10):
-            // macOS/M4 measured parity-to-+5.3% decode (qwen-1.5B wins most —
-            // more barriers per token), so it defaults ON there. Pi 5 (Linux/
-            // A76) measured a consistent −3% — at ~100 ms/token the fork/join
-            // tax is tiny and the pool's interleaved chunk claiming costs
-            // prefetch locality vs rayon's contiguous stealing — so Linux
-            // defaults OFF until server-ARM (Thor-class, the 1.6× fork/join
-            // scaling case this was built for) is measured. SAPIENT_SPINPOOL=1
-            // opts in anywhere.
-            .unwrap_or(cfg!(target_os = "macos"))
+            // Measurement-driven default (2026-07-10, guided v4): the win
+            // scales with thread count — more per-token fork/join tax to
+            // reclaim. M4 +7.7% (llama-1B) / +0.9% (qwen); Thor 14-core
+            // +5.3%; Pi 5 4-core −4% (at ~100 ms/token there is no tax to
+            // reclaim). So: ON for macOS and for Linux/aarch64 at ≥ 8
+            // threads (Thor in, Pi out); everything else (x86, Windows —
+            // unmeasured) stays opt-in. SAPIENT_SPINPOOL=1/0 overrides.
+            .unwrap_or_else(|_| {
+                cfg!(target_os = "macos")
+                    || (cfg!(all(target_os = "linux", target_arch = "aarch64"))
+                        && rayon::current_num_threads() >= 8)
+            })
     });
     on && crate::thermal::effective_threads() >= rayon::current_num_threads()
 }
