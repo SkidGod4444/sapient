@@ -350,9 +350,32 @@ Q4_K_M model and still pays the per-32 f32 tail).
 platform, so Q8_K activations are DEFAULT ON for the Q4_K_R4 paths**
 (`SAPIENT_Q8K_ACT=0` reverts).
 
-Remaining parity items: Q8_K for Q6_K (~⅓ of a Q4_K_M model still pays the
-per-32 tail), vectorized SMMLA sub-scale combine (M4 prefill), and a
-graph-level single-region decode pass if per-op publish cost ever surfaces.
+**Q6_K joined the Q8_K format** (2026-07-10, `feat/q6k-q8k` — same
+`SAPIENT_Q8K_ACT` gate, so the flag now covers both K-quants): Q6_K's per-16
+i8 scales made its f32 tail TWICE Q4_K's (three multiplies + fma per 16
+elements); the integer-domain combine cuts it 16×. Four kernels (scalar
+oracle, single-row NEON, R4 4-row, SMMLA×2), each bit-identity-gated;
+repack invariance holds on both Q6_K paths; greedy output on Q6_K-heavy
+llama-1B is byte-identical to the Q4_K-only Q8_K run. Measured off→on
+(COMBINED Q4_K+Q6_K format, same binary, order-swapped):
+
+| combined Q8_K vs per-32 | decode | prefill TTFT (2.2k tok) |
+|---|---:|---:|
+| **Thor 14-core qwen** | **+44.5%** (22.7→32.8) | **−16.3%** (30.7→25.7 s) |
+| M4 qwen-1.5B | **+12.5%** (40.6→45.7) | **−11.8%** (29.0→25.5 s) |
+| Pi 5 llama-1B | **+6.8%** (10.3→11.0) | — |
+
+(The M4 llama leg of this session was thermally corrupted mid-run and is
+excluded; the Q4_K-only morning reading (+4.9%) stands.) The Q6_K increment
+over the Q4_K-only rung: Thor decode +22.7 → +44.5, M4 qwen +6.3 → +12.5,
+Pi +3.9 → +6.8 — and it finally moved M4 prefill (+1–3% → −11.8%), because
+Q6_K's per-16→per-256 reduction is twice as deep as Q4_K's. **Thor's dense
+decode gap vs llama.cpp: 3.16× (v0.5.0) → ~2.6×**; cumulative today
+(block-sums + spin pool + Q8_K both quants): Thor 22.4 → 32.8 tok/s (+46%).
+
+Remaining parity items: vectorized SMMLA sub-scale combine (residual
+lane-extraction cost), and a graph-level single-region decode pass if
+per-op publish cost ever surfaces.
 
 Remaining parity items: deeper output tiling for prefill (llama.cpp pp512
 remains well ahead), and the Linux-side threadpool validation above.
