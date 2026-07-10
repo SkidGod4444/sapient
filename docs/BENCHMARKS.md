@@ -273,10 +273,26 @@ A/B/B/A on M4 CPU decode: llama-1B 61.2 → 61.8 tok/s (+0.9%), qwen-1.5B
 43.5 → 44.1 (+1.2%) — small because the R4 4-row kernels already amortized
 the reduction 4×; the single-row/remainder paths gain the most.
 
+**Decode threadpool landed** (2026-07-10, `feat/cpu-parity-2`): a persistent
+spin/park worker pool (`spinpool.rs`) replaces the per-GEMV rayon fork/join
+(~230 barriers per decoded token). Three findings from building it, all
+measured on M4: (1) the op-handoff needs the seqlock door CLOSED (odd
+generation bump) *before* draining active workers — the reverse order has a
+torn-slot race that segfaults under park/wake cycling; (2) the pool's hot
+atomics must be cache-line padded; (3) **long spinning actively hurts on
+Apple Silicon** — workers burning cores during a token's serial phases steal
+the package power budget from the critical-path thread (200k-iteration hot
+spin: 38.6 tok/s vs rayon 63) — the measured optimum is a short ~4k-iteration
+(~15 µs) spin then park (sweep: 0 → 54.2, 4k → 63.6, 16k → 59.1, 50k → 52.3).
+Result (interleaved A/B, order-swapped): llama-1B 62.1 vs rayon 62.9 (parity);
+qwen-1.5B **45.3 vs 43.0 (+5.3%)** — the barrier-heavy profile gains most.
+`SAPIENT_SPINPOOL=0` reverts to rayon; thermally-governed decode always uses
+rayon (spinning defeats core-shedding). **The Linux/ARM validation is the real
+gate** — the ~1.6× fork/join scaling penalty this targets was measured on
+Thor/Linux futexes, not macOS — pending a Pi 5 / Thor run.
+
 Remaining parity items: deeper output tiling for prefill (llama.cpp pp512
-remains well ahead), and the decode threadpool (~230 rayon fork/join
-barriers per decoded token — one per GEMV parallel region — vs llama.cpp's
-single persistent pool pass; the measured ~1.6× multicore-scaling gap).
+remains well ahead), and the Linux-side threadpool validation above.
 
 **The honest read:**
 - On **Apple Metal** SAPIENT is competitive with llama.cpp (−7% on qwen-1.5B,

@@ -327,14 +327,12 @@ fn matmul_nt_float(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resu
         };
         let mut out = vec![0.0f32; n];
         let chunk = gemv_chunk(n);
-        out.par_chunks_mut(chunk)
-            .enumerate()
-            .for_each(|(chunk_idx, cs)| {
-                for (local, slot) in cs.iter_mut().enumerate() {
-                    let j = chunk_idx * chunk + local;
-                    *slot = dot_f32_x_f16(x_data, &w_f16[j * k..(j + 1) * k]);
-                }
-            });
+        for_each_out_chunk(&mut out, chunk, |chunk_idx, cs| {
+            for (local, slot) in cs.iter_mut().enumerate() {
+                let j = chunk_idx * chunk + local;
+                *slot = dot_f32_x_f16(x_data, &w_f16[j * k..(j + 1) * k]);
+            }
+        });
         return Tensor::from_f32_vec(out, Shape::new([m, n]));
     }
 
@@ -347,14 +345,12 @@ fn matmul_nt_float(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resu
     if m == 1 && k >= 512 {
         // F32 GEMV decode — NEON/AVX2 vectorised dot products.
         let chunk = gemv_chunk(n);
-        out.par_chunks_mut(chunk)
-            .enumerate()
-            .for_each(|(chunk_idx, cs)| {
-                for (local, slot) in cs.iter_mut().enumerate() {
-                    let j = chunk_idx * chunk + local;
-                    *slot = dot_f32_fast(x_data, &w_data[j * k..(j + 1) * k]);
-                }
-            });
+        for_each_out_chunk(&mut out, chunk, |chunk_idx, cs| {
+            for (local, slot) in cs.iter_mut().enumerate() {
+                let j = chunk_idx * chunk + local;
+                *slot = dot_f32_fast(x_data, &w_data[j * k..(j + 1) * k]);
+            }
+        });
     } else {
         // Batched SGEMM for prefill — split across X row blocks so it uses
         // every core (one big single-threaded sgemm left most of the machine
@@ -415,12 +411,24 @@ fn matmul_nt_float(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resu
 // matrices (lm_head/151936 ÷ 512 = 297 tasks — same effect). Inert path
 // (== rayon::current_num_threads) is unchanged.
 fn gemv_chunk(n: usize) -> usize {
-    let ncpus = rayon::current_num_threads().max(1);
+    // The governed comparison is within RAYON's domain (the governor sheds
+    // rayon cores; the spin pool is disabled entirely while governed).
+    // Comparing eff against the spin pool's parallelism instead made a
+    // plain RAYON_NUM_THREADS=1 run look "governed" and collapse every
+    // GEMV to one chunk.
+    let rayon_n = rayon::current_num_threads().max(1);
     let eff = crate::thermal::effective_threads();
-    if eff < ncpus {
+    if eff < rayon_n {
         // Governed: one task per allowed thread; no upper chunk cap.
-        (n / eff.max(1)).max(16)
+        return (n / eff.max(1)).max(16);
+    }
+    // Task-count parallelism follows whichever pool will run the chunks.
+    let ncpus = if crate::spinpool::enabled() {
+        crate::spinpool::parallelism()
     } else {
+        rayon_n
+    };
+    {
         // Tasks per core (default 4, for load balancing). Env-tunable to probe
         // rayon fork/join overhead on high-core hosts where fewer, coarser tasks
         // per GEMV scale better (Neoverse: decode is coordination-bound, not
@@ -437,19 +445,84 @@ fn gemv_chunk(n: usize) -> usize {
     }
 }
 
-/// Compute n output rows of a quantized GEMV, batching rows per Rayon task.
+/// Raw output pointer that may cross threads: chunk geometry guarantees the
+/// slices built from it are disjoint (same contract as `par_chunks_mut`).
+/// Accessed via [`SyncPtr::get`] so closures capture the (Sync) wrapper, not
+/// the raw pointer field (edition-2021 closures capture individual fields).
+struct SyncPtr(*mut f32);
+unsafe impl Sync for SyncPtr {}
+impl SyncPtr {
+    fn get(&self) -> *mut f32 {
+        self.0
+    }
+}
+
+/// Dispatch a GEMV's disjoint output chunks either on the persistent spin
+/// pool (decode hot path — one atomic op-handoff instead of a rayon
+/// fork/join per matmul; see `spinpool.rs`) or on rayon (thermal-governed
+/// mode / `SAPIENT_SPINPOOL=0`). Chunk geometry is identical on both paths,
+/// so per-slot results are bit-identical.
+fn for_each_out_chunk<F>(out: &mut [f32], chunk: usize, f: F)
+where
+    F: Fn(usize, &mut [f32]) + Sync,
+{
+    if out.is_empty() {
+        return;
+    }
+    // SAPIENT_SPINPOOL_DEBUG=1: periodic dispatch-route census on stderr.
+    if std::env::var("SAPIENT_SPINPOOL_DEBUG").is_ok() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SPIN: AtomicU64 = AtomicU64::new(0);
+        static RAYON: AtomicU64 = AtomicU64::new(0);
+        let (s, r) = if crate::spinpool::enabled() {
+            (
+                SPIN.fetch_add(1, Ordering::Relaxed) + 1,
+                RAYON.load(Ordering::Relaxed),
+            )
+        } else {
+            (
+                SPIN.load(Ordering::Relaxed),
+                RAYON.fetch_add(1, Ordering::Relaxed) + 1,
+            )
+        };
+        if (s + r) % 2000 == 0 {
+            eprintln!(
+                "[spinpool-debug] spin={s} rayon={r} chunk={chunk} len={} n_chunks={}",
+                out.len(),
+                out.len().div_ceil(chunk)
+            );
+        }
+    }
+    if crate::spinpool::enabled() {
+        let len = out.len();
+        let n_chunks = len.div_ceil(chunk);
+        let base = SyncPtr(out.as_mut_ptr());
+        crate::spinpool::pool().run(n_chunks, &|ci| {
+            let start = ci * chunk;
+            let end = (start + chunk).min(len);
+            // SAFETY: [start, end) ranges are disjoint per chunk index and
+            // `out` outlives `run` (it blocks until every chunk completes).
+            let cs = unsafe { std::slice::from_raw_parts_mut(base.get().add(start), end - start) };
+            f(ci, cs);
+        });
+    } else {
+        out.par_chunks_mut(chunk)
+            .enumerate()
+            .for_each(|(ci, cs)| f(ci, cs));
+    }
+}
+
+/// Compute n output rows of a quantized GEMV, batching rows per task.
 /// `dot` receives one weight row's bytes plus the x vector.
 macro_rules! gemv_parallel {
     ($out:expr, $n:expr, $row_bytes:expr, $w_blocks:expr, $x_row:expr, $dot:expr) => {{
         let chunk = gemv_chunk($n);
-        $out.par_chunks_mut(chunk)
-            .enumerate()
-            .for_each(|(chunk_idx, chunk_slice)| {
-                for (local, slot) in chunk_slice.iter_mut().enumerate() {
-                    let j = chunk_idx * chunk + local;
-                    *slot = $dot(&$w_blocks[j * $row_bytes..(j + 1) * $row_bytes], $x_row);
-                }
-            });
+        for_each_out_chunk(&mut $out, chunk, |chunk_idx, chunk_slice| {
+            for (local, slot) in chunk_slice.iter_mut().enumerate() {
+                let j = chunk_idx * chunk + local;
+                *slot = $dot(&$w_blocks[j * $row_bytes..(j + 1) * $row_bytes], $x_row);
+            }
+        });
     }};
 }
 
@@ -563,21 +636,18 @@ fn matmul_nt_q8_0(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
             let chunk = gemv_chunk(n);
             // SAFETY: dot_q8_0_row_sdot requires neon (always true on aarch64)
             // and emits `sdot` (detected above via is_aarch64_feature_detected).
-            out[i * n..(i + 1) * n]
-                .par_chunks_mut(chunk)
-                .enumerate()
-                .for_each(|(ci, cs)| {
-                    for (local, slot) in cs.iter_mut().enumerate() {
-                        let j = ci * chunk + local;
-                        *slot = unsafe {
-                            quant::dot_q8_0_row_sdot(
-                                &w_blocks[j * row_bytes..(j + 1) * row_bytes],
-                                &x_i8,
-                                &x_scales,
-                            )
-                        };
-                    }
-                });
+            for_each_out_chunk(&mut out[i * n..(i + 1) * n], chunk, |ci, cs| {
+                for (local, slot) in cs.iter_mut().enumerate() {
+                    let j = ci * chunk + local;
+                    *slot = unsafe {
+                        quant::dot_q8_0_row_sdot(
+                            &w_blocks[j * row_bytes..(j + 1) * row_bytes],
+                            &x_i8,
+                            &x_scales,
+                        )
+                    };
+                }
+            });
         }
         return Tensor::from_f32_vec(out, Shape::new([m, n]));
     }
@@ -682,26 +752,23 @@ fn matmul_nt_q4_k_r4(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Re
             let x_sums = quant::i8_block_sums(&x_i8);
             let groups = n / 4;
             let gchunk = (gemv_chunk(n) / 4).max(1);
-            out[i * n..(i + 1) * n]
-                .par_chunks_mut(gchunk * 4)
-                .enumerate()
-                .for_each(|(ci, cs)| {
-                    let g0 = ci * gchunk;
-                    for (gl, slots) in cs.chunks_mut(4).enumerate() {
-                        let g = g0 + gl;
-                        debug_assert!(g < groups);
-                        // SAFETY: dotprod verified above; slice is one R4 group.
-                        let v = unsafe {
-                            quant::dot_q4_k_4rows_r4_neon(
-                                &w_blocks[g * group_bytes..(g + 1) * group_bytes],
-                                &x_i8,
-                                &x_scales,
-                                &x_sums,
-                            )
-                        };
-                        slots.copy_from_slice(&v[..slots.len()]);
-                    }
-                });
+            for_each_out_chunk(&mut out[i * n..(i + 1) * n], gchunk * 4, |ci, cs| {
+                let g0 = ci * gchunk;
+                for (gl, slots) in cs.chunks_mut(4).enumerate() {
+                    let g = g0 + gl;
+                    debug_assert!(g < groups);
+                    // SAFETY: dotprod verified above; slice is one R4 group.
+                    let v = unsafe {
+                        quant::dot_q4_k_4rows_r4_neon(
+                            &w_blocks[g * group_bytes..(g + 1) * group_bytes],
+                            &x_i8,
+                            &x_scales,
+                            &x_sums,
+                        )
+                    };
+                    slots.copy_from_slice(&v[..slots.len()]);
+                }
+            });
         }
         return Tensor::from_f32_vec(out, Shape::new([m, n]));
     }
@@ -753,45 +820,42 @@ fn matmul_nt_q4_k(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
             let (x_i8, x_scales) = quant::quantize_row_to_i8_blocks(x_row);
             let x_sums = quant::i8_block_sums(&x_i8);
             let chunk = gemv_chunk(n);
-            out[i * n..(i + 1) * n]
-                .par_chunks_mut(chunk)
-                .enumerate()
-                .for_each(|(ci, cs)| {
-                    // Multi-row GEMV: 4 weight rows share one pass over the
-                    // activations (llama.cpp-style) — 4× less x traffic and four
-                    // independent sdot chains. Remainder rows use the single-row
-                    // kernel; per-row results are bit-identical either way.
-                    let start = ci * chunk;
-                    let mut local = 0usize;
-                    while local + 4 <= cs.len() {
-                        let j = start + local;
-                        let r = |o: usize| &w_blocks[(j + o) * row_bytes..(j + o + 1) * row_bytes];
-                        // SAFETY: dotprod verified above; slices are whole Q4_K rows.
-                        let v = unsafe {
-                            quant::dot_q4_k_4rows_q8_neon(
-                                [r(0), r(1), r(2), r(3)],
-                                &x_i8,
-                                &x_scales,
-                                &x_sums,
-                            )
-                        };
-                        cs[local..local + 4].copy_from_slice(&v);
-                        local += 4;
-                    }
-                    for slot in &mut cs[local..] {
-                        let j = start + local;
-                        // SAFETY: as above.
-                        *slot = unsafe {
-                            quant::dot_q4_k_row_q8_neon(
-                                &w_blocks[j * row_bytes..(j + 1) * row_bytes],
-                                &x_i8,
-                                &x_scales,
-                                &x_sums,
-                            )
-                        };
-                        local += 1;
-                    }
-                });
+            for_each_out_chunk(&mut out[i * n..(i + 1) * n], chunk, |ci, cs| {
+                // Multi-row GEMV: 4 weight rows share one pass over the
+                // activations (llama.cpp-style) — 4× less x traffic and four
+                // independent sdot chains. Remainder rows use the single-row
+                // kernel; per-row results are bit-identical either way.
+                let start = ci * chunk;
+                let mut local = 0usize;
+                while local + 4 <= cs.len() {
+                    let j = start + local;
+                    let r = |o: usize| &w_blocks[(j + o) * row_bytes..(j + o + 1) * row_bytes];
+                    // SAFETY: dotprod verified above; slices are whole Q4_K rows.
+                    let v = unsafe {
+                        quant::dot_q4_k_4rows_q8_neon(
+                            [r(0), r(1), r(2), r(3)],
+                            &x_i8,
+                            &x_scales,
+                            &x_sums,
+                        )
+                    };
+                    cs[local..local + 4].copy_from_slice(&v);
+                    local += 4;
+                }
+                for slot in &mut cs[local..] {
+                    let j = start + local;
+                    // SAFETY: as above.
+                    *slot = unsafe {
+                        quant::dot_q4_k_row_q8_neon(
+                            &w_blocks[j * row_bytes..(j + 1) * row_bytes],
+                            &x_i8,
+                            &x_scales,
+                            &x_sums,
+                        )
+                    };
+                    local += 1;
+                }
+            });
         }
         return Tensor::from_f32_vec(out, Shape::new([m, n]));
     }
@@ -902,24 +966,21 @@ fn matmul_nt_q6_k_r4(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Re
             let x_row = &x_data[i * k..(i + 1) * k];
             let quantized = dotprod.then(|| quant::quantize_row_to_i8_blocks(x_row));
             let gchunk = (gemv_chunk(n) / 4).max(1);
-            out[i * n..(i + 1) * n]
-                .par_chunks_mut(gchunk * 4)
-                .enumerate()
-                .for_each(|(ci, cs)| {
-                    let g0 = ci * gchunk;
-                    for (gl, slots) in cs.chunks_mut(4).enumerate() {
-                        let g = g0 + gl;
-                        let group = &w_blocks[g * group_bytes..(g + 1) * group_bytes];
-                        // SAFETY: NEON baseline; dotprod verified when used.
-                        let v = match &quantized {
-                            Some((x_i8, x_scales)) => unsafe {
-                                quant::dot_q6_k_4rows_r4_q8_neon(group, x_i8, x_scales)
-                            },
-                            None => unsafe { quant::dot_q6_k_4rows_r4_neon(group, x_row) },
-                        };
-                        slots.copy_from_slice(&v[..slots.len()]);
-                    }
-                });
+            for_each_out_chunk(&mut out[i * n..(i + 1) * n], gchunk * 4, |ci, cs| {
+                let g0 = ci * gchunk;
+                for (gl, slots) in cs.chunks_mut(4).enumerate() {
+                    let g = g0 + gl;
+                    let group = &w_blocks[g * group_bytes..(g + 1) * group_bytes];
+                    // SAFETY: NEON baseline; dotprod verified when used.
+                    let v = match &quantized {
+                        Some((x_i8, x_scales)) => unsafe {
+                            quant::dot_q6_k_4rows_r4_q8_neon(group, x_i8, x_scales)
+                        },
+                        None => unsafe { quant::dot_q6_k_4rows_r4_neon(group, x_row) },
+                    };
+                    slots.copy_from_slice(&v[..slots.len()]);
+                }
+            });
         }
         return Tensor::from_f32_vec(out, Shape::new([m, n]));
     }
@@ -966,22 +1027,19 @@ fn matmul_nt_q6_k(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
             let x_row = &x_data[i * k..(i + 1) * k];
             let (x_i8, x_scales) = quant::quantize_row_to_i8_blocks(x_row);
             let chunk = gemv_chunk(n);
-            out[i * n..(i + 1) * n]
-                .par_chunks_mut(chunk)
-                .enumerate()
-                .for_each(|(ci, cs)| {
-                    for (local, slot) in cs.iter_mut().enumerate() {
-                        let j = ci * chunk + local;
-                        // SAFETY: dotprod verified above; slice is one Q6_K row.
-                        *slot = unsafe {
-                            quant::dot_q6_k_row_q8_neon(
-                                &w_blocks[j * row_bytes..(j + 1) * row_bytes],
-                                &x_i8,
-                                &x_scales,
-                            )
-                        };
-                    }
-                });
+            for_each_out_chunk(&mut out[i * n..(i + 1) * n], chunk, |ci, cs| {
+                for (local, slot) in cs.iter_mut().enumerate() {
+                    let j = ci * chunk + local;
+                    // SAFETY: dotprod verified above; slice is one Q6_K row.
+                    *slot = unsafe {
+                        quant::dot_q6_k_row_q8_neon(
+                            &w_blocks[j * row_bytes..(j + 1) * row_bytes],
+                            &x_i8,
+                            &x_scales,
+                        )
+                    };
+                }
+            });
         }
         return Tensor::from_f32_vec(out, Shape::new([m, n]));
     }
