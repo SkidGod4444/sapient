@@ -982,8 +982,17 @@ fn matmul_nt_q6_k_r4(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Re
     // ── i8mm SMMLA prefill path (m ≥ 2, ARMv8.6) — see matmul_nt_q4_k_r4 ────
     #[cfg(target_arch = "aarch64")]
     if m >= 2 && std::arch::is_aarch64_feature_detected!("i8mm") {
+        let q8k = q8k_activations();
         let quantized: Vec<(Vec<i8>, Vec<f32>)> = (0..m)
-            .map(|i| quant::quantize_row_to_i8_blocks(&x_data[i * k..(i + 1) * k]))
+            .map(|i| {
+                let row = &x_data[i * k..(i + 1) * k];
+                if q8k {
+                    let (q, s, _sums) = quant::quantize_row_to_q8k(row);
+                    (q, s)
+                } else {
+                    quant::quantize_row_to_i8_blocks(row)
+                }
+            })
             .collect();
         let groups = n / 4;
         let mut out_t = vec![0.0f32; n * m]; // [group-rows][m]
@@ -997,7 +1006,13 @@ fn matmul_nt_q6_k_r4(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Re
                     let (x0, s0) = &quantized[xi];
                     let (x1, s1) = &quantized[xi + 1];
                     // SAFETY: i8mm verified above; slice is one R4 group.
-                    let v = unsafe { quant::dot_q6_k_4rows_r4_x2_smmla(group, x0, s0, x1, s1) };
+                    let v = unsafe {
+                        if q8k {
+                            quant::dot_q6_k_4rows_r4_x2_q8k_smmla(group, x0, s0, x1, s1)
+                        } else {
+                            quant::dot_q6_k_4rows_r4_x2_smmla(group, x0, s0, x1, s1)
+                        }
+                    };
                     for r in 0..4 {
                         chunk[r * m + xi] = v[r][0];
                         chunk[r * m + xi + 1] = v[r][1];
@@ -1007,7 +1022,13 @@ fn matmul_nt_q6_k_r4(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Re
                 if xi < m {
                     let (x0, s0) = &quantized[xi];
                     // SAFETY: FEAT_I8MM implies dotprod-era NEON.
-                    let v = unsafe { quant::dot_q6_k_4rows_r4_q8_neon(group, x0, s0) };
+                    let v = unsafe {
+                        if q8k {
+                            quant::dot_q6_k_4rows_r4_q8k_neon(group, x0, s0)
+                        } else {
+                            quant::dot_q6_k_4rows_r4_q8_neon(group, x0, s0)
+                        }
+                    };
                     for r in 0..4 {
                         chunk[r * m + xi] = v[r];
                     }
@@ -1029,7 +1050,15 @@ fn matmul_nt_q6_k_r4(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Re
         let dotprod = std::arch::is_aarch64_feature_detected!("dotprod");
         for i in 0..m {
             let x_row = &x_data[i * k..(i + 1) * k];
-            let quantized = dotprod.then(|| quant::quantize_row_to_i8_blocks(x_row));
+            let q8k = q8k_activations();
+            let quantized = dotprod.then(|| {
+                if q8k {
+                    let (q, s, _sums) = quant::quantize_row_to_q8k(x_row);
+                    (q, s)
+                } else {
+                    quant::quantize_row_to_i8_blocks(x_row)
+                }
+            });
             let gchunk = (gemv_chunk(n) / 4).max(1);
             for_each_out_chunk(&mut out[i * n..(i + 1) * n], gchunk * 4, |ci, cs| {
                 let g0 = ci * gchunk;
@@ -1039,7 +1068,11 @@ fn matmul_nt_q6_k_r4(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Re
                     // SAFETY: NEON baseline; dotprod verified when used.
                     let v = match &quantized {
                         Some((x_i8, x_scales)) => unsafe {
-                            quant::dot_q6_k_4rows_r4_q8_neon(group, x_i8, x_scales)
+                            if q8k {
+                                quant::dot_q6_k_4rows_r4_q8k_neon(group, x_i8, x_scales)
+                            } else {
+                                quant::dot_q6_k_4rows_r4_q8_neon(group, x_i8, x_scales)
+                            }
                         },
                         None => unsafe { quant::dot_q6_k_4rows_r4_neon(group, x_row) },
                     };
@@ -1088,20 +1121,27 @@ fn matmul_nt_q6_k(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
     // W·A8 treatment that made Q4_K fast, applied to Q6_K.
     #[cfg(target_arch = "aarch64")]
     if std::arch::is_aarch64_feature_detected!("dotprod") {
+        let q8k = q8k_activations();
         for i in 0..m {
             let x_row = &x_data[i * k..(i + 1) * k];
-            let (x_i8, x_scales) = quant::quantize_row_to_i8_blocks(x_row);
+            let (x_i8, x_scales) = if q8k {
+                let (q, s, _sums) = quant::quantize_row_to_q8k(x_row);
+                (q, s)
+            } else {
+                quant::quantize_row_to_i8_blocks(x_row)
+            };
             let chunk = gemv_chunk(n);
             for_each_out_chunk(&mut out[i * n..(i + 1) * n], chunk, |ci, cs| {
                 for (local, slot) in cs.iter_mut().enumerate() {
                     let j = ci * chunk + local;
+                    let row = &w_blocks[j * row_bytes..(j + 1) * row_bytes];
                     // SAFETY: dotprod verified above; slice is one Q6_K row.
                     *slot = unsafe {
-                        quant::dot_q6_k_row_q8_neon(
-                            &w_blocks[j * row_bytes..(j + 1) * row_bytes],
-                            &x_i8,
-                            &x_scales,
-                        )
+                        if q8k {
+                            quant::dot_q6_k_row_q8k_neon(row, &x_i8, &x_scales)
+                        } else {
+                            quant::dot_q6_k_row_q8_neon(row, &x_i8, &x_scales)
+                        }
                     };
                 }
             });
