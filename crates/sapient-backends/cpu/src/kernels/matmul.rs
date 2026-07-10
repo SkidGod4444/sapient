@@ -452,6 +452,7 @@ fn gemv_chunk(n: usize) -> usize {
 /// 14-core +22.7%, Pi 5 +3.9%; Thor prefill −12.7% TTFT) with real-model
 /// greedy verification passed (llama.cpp-precedented per-256 accuracy
 /// class). `SAPIENT_Q8K_ACT=0` reverts to the per-32 W4A8 format.
+#[cfg(target_arch = "aarch64")]
 fn q8k_activations() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
