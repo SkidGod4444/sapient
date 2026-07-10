@@ -132,6 +132,10 @@ pub struct Pipeline {
     /// sequence currently represented in the engine's KV cache.
     prefix_cache: bool,
     last_prompt: Arc<std::sync::Mutex<Vec<u32>>>,
+    /// Whether the most recent reply stopped at the `max_new_tokens` cap
+    /// instead of a clean EOS/stop-sequence — i.e. it was cut off mid-thought.
+    /// Callers (the chat CLI) surface this so truncation is never silent.
+    last_truncated: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Pipeline {
@@ -264,6 +268,7 @@ impl Pipeline {
             mmap: false,
             prefix_cache: false,
             last_prompt: Arc::new(std::sync::Mutex::new(Vec::new())),
+            last_truncated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -384,6 +389,7 @@ impl Pipeline {
             mmap: use_mmap,
             prefix_cache: false,
             last_prompt: Arc::new(std::sync::Mutex::new(Vec::new())),
+            last_truncated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -505,6 +511,7 @@ impl Pipeline {
         let engine = Arc::clone(&self.engine);
         let prefix_cache = self.prefix_cache;
         let last_prompt = Arc::clone(&self.last_prompt);
+        let truncated = Arc::clone(&self.last_truncated);
 
         tokio::task::spawn_blocking(move || {
             // Reuse the already-loaded engine instead of rebuilding it — re-loading
@@ -590,6 +597,7 @@ impl Pipeline {
                     }
                 }
             }
+            truncated.store(!clean_stop, std::sync::atomic::Ordering::Relaxed);
             // Record the full token sequence now resident in the KV cache so the
             // next call can reuse its shared prefix.
             if prefix_cache {
@@ -621,6 +629,7 @@ impl Pipeline {
         let stop = self.config.stop_sequences.clone();
         let tok = Arc::clone(&self.tokenizer);
         let engine = Arc::clone(&self.engine);
+        let truncated = Arc::clone(&self.last_truncated);
 
         tokio::task::spawn_blocking(move || {
             // Reuse the already-loaded engine instead of rebuilding it — re-loading
@@ -705,6 +714,7 @@ impl Pipeline {
                     }
                 }
             }
+            truncated.store(!clean_stop, std::sync::atomic::Ordering::Relaxed);
         });
 
         ReceiverStream::new(rx)
@@ -748,9 +758,12 @@ impl Pipeline {
             all_tokens.push(next);
 
             if eos_ids.contains(&next) {
+                self.last_truncated
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
                 return Ok(generated);
             }
 
+            let mut clean_stop = false;
             for step in 1..config.max_new_tokens {
                 let logits = engine.forward_logits(&[next], true)?;
                 next = sampler.sample(&logits, &all_tokens)?;
@@ -759,6 +772,7 @@ impl Pipeline {
 
                 if eos_ids.contains(&next) {
                     debug!("EOS token generated at step {step}");
+                    clean_stop = true;
                     break;
                 }
 
@@ -769,13 +783,32 @@ impl Pipeline {
                         .iter()
                         .any(|s| decoded.contains(s.as_str()))
                     {
+                        clean_stop = true;
                         break;
                     }
                 }
             }
+            self.last_truncated
+                .store(!clean_stop, std::sync::atomic::Ordering::Relaxed);
 
             Ok(generated)
         })
+    }
+
+    /// True when the most recent reply stopped at the `max_new_tokens` cap
+    /// instead of a clean EOS/stop-sequence — i.e. it was cut off mid-thought.
+    /// The chat CLI surfaces this so truncation is never silent.
+    pub fn last_reply_truncated(&self) -> bool {
+        self.last_truncated
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Override the per-reply token cap after load. Needed because the GGUF
+    /// constructors (`from_gguf*`, and `from_pretrained` routing a GGUF-only
+    /// repo) don't take a `GenerationConfig` — `LoadOptions::generation` only
+    /// reaches the safetensors path.
+    pub fn set_max_new_tokens(&mut self, max_new_tokens: usize) {
+        self.config.max_new_tokens = max_new_tokens;
     }
 
     pub fn tokenizer(&self) -> &SapientTokenizer {
@@ -1049,6 +1082,16 @@ fn builtin_template_for(
         ArchType::Llama if id.contains("tinyllama") => (
             ChatTemplate::from_template(builtin::ZEPHYR),
             vec!["</s>".to_string()],
+        ),
+        // SmolLM2 is Llama-arch but ChatML-trained. Without this arm the generic
+        // "llama" model_type falls into the LLAMA2 [INST] template below, and the
+        // model answers an [INST]-wrapped prompt with an immediate end-of-turn
+        // (empty reply). Only GGUFs hit this — safetensors repos carry the real
+        // chat template in tokenizer_config.json. The id may be the GGUF
+        // general.name ("SmolLM2 360M Instruct"), so match case-insensitively.
+        ArchType::Llama if id.contains("smollm") => (
+            ChatTemplate::from_template(builtin::CHATML),
+            vec!["<|im_end|>".to_string()],
         ),
         ArchType::Llama
             if id.contains("llama-2")

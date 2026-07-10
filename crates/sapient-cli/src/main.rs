@@ -88,6 +88,11 @@ enum Commands {
         /// to stdout, so it's easy to script (e.g. feed into `sapient speak`).
         #[arg(short, long)]
         prompt: Option<String>,
+
+        /// Maximum tokens to generate per reply (default: 2048). When a reply
+        /// hits this cap a truncation notice is printed to stderr.
+        #[arg(short = 'n', long)]
+        max_tokens: Option<usize>,
     },
 
     /// Transcribe an audio file to text with a Whisper model (speech-to-text).
@@ -459,6 +464,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             draft_model,
             raw,
             prompt,
+            max_tokens,
         } => {
             chat_command(
                 model.as_str(),
@@ -469,6 +475,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 draft_model.as_deref(),
                 raw,
                 prompt.as_deref(),
+                max_tokens,
             )
             .await
         }
@@ -669,6 +676,7 @@ async fn chat_command(
     draft_model: Option<&str>,
     raw: bool,
     prompt: Option<&str>,
+    max_tokens: Option<usize>,
 ) -> Result<()> {
     // If speculative decoding is requested, branch into the speculative path.
     // (One-shot --prompt is handled by the standard path below.)
@@ -683,6 +691,10 @@ async fn chat_command(
         force_mmap,
         ..LoadOptions::default()
     };
+    // Chat replies default to a roomier cap than the library's 512 — long-form
+    // answers were silently cut mid-sentence at the old default. Truncation is
+    // also surfaced (see chat_truncation_notice) so it is never invisible.
+    load_opts.generation.max_new_tokens = max_tokens.unwrap_or(2048);
 
     let is_local_gguf = model.ends_with(".gguf") || std::path::Path::new(model).is_file();
 
@@ -767,6 +779,13 @@ async fn chat_command(
         ui::spinner_success(pb, format!("{model} ready"));
     }
 
+    // The GGUF constructors don't take a GenerationConfig, so apply the chat
+    // token cap directly (harmless double-set on the safetensors path).
+    let mut pipeline = pipeline;
+    let reply_cap = max_tokens.unwrap_or(2048);
+    pipeline.set_max_new_tokens(reply_cap);
+    let pipeline = pipeline;
+
     // One-shot mode: run a single chat turn (chat template + end-of-turn EOS, so
     // the reply is bounded and well-formed) and print ONLY the reply to stdout so
     // it's clean to capture in a script. Status/spinners already go to stderr —
@@ -777,6 +796,7 @@ async fn chat_command(
         think.finish_and_clear();
         let reply = reply.context("one-shot chat generation failed")?;
         println!("{}", reply.trim());
+        chat_truncation_notice(&pipeline, reply_cap);
         return Ok(());
     }
 
@@ -879,11 +899,23 @@ async fn chat_command(
                 .map(|t| t.len())
                 .unwrap_or(0);
             ui::print_gen_stats(tokens, start.elapsed(), ttft);
+            chat_truncation_notice(&pipeline, reply_cap);
         }
         history.push(ChatMessage::assistant(reply));
     }
 
     Ok(())
+}
+
+/// Surface a reply that stopped at the token cap instead of a clean end-of-turn
+/// — a capped reply looks like the model broke off mid-sentence, so it must
+/// never be silent. Goes to stderr so `chat -p` stdout stays script-clean.
+fn chat_truncation_notice(pipeline: &Pipeline, cap: usize) {
+    if pipeline.last_reply_truncated() {
+        ui::hint_err(format!(
+            "reply hit the {cap}-token cap and was cut off — raise it with --max-tokens"
+        ));
+    }
 }
 
 // ── Speculative chat ──────────────────────────────────────────────────────────
