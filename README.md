@@ -81,6 +81,7 @@ sapient chat openhorizon/phi-2
 sapient chat openhorizon/phi-2 --raw                    # plain Markdown text
 sapient chat openhorizon/qwen2.5-0.5b --backend auto   # auto | cpu | metal | wgpu
 sapient chat openhorizon/qwen2.5-0.5b -p "Tell me a joke"  # one-shot: single turn, reply to stdout (scriptable)
+sapient chat openhorizon/phi-4-mini -n 4096 -p "…"     # --max-tokens: per-reply cap (default 2048; capped replies print a notice)
 
 # Speculative decoding (faster generation with a draft model)
 sapient chat openhorizon/qwen2.5-1.5b --speculative

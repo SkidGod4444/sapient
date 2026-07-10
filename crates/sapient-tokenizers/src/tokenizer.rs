@@ -34,7 +34,9 @@ impl Default for TokenizerOptions {
 /// Supports every tokenizer type HF ships: BPE, WordPiece, Unigram (SentencePiece).
 /// Known end-of-turn / end-of-sequence marker tokens across model families.
 /// A model may define several (e.g. Qwen has both `<|endoftext|>` and
-/// `<|im_end|>`); generation must stop on *any* of them.
+/// `<|im_end|>`); generation must stop on *any* of them. Turn-enders that are
+/// `special: true` (e.g. Phi-3/Phi-4's `<|end|>`) are stripped by `decode`, so
+/// they can only be caught here by id — never as a stop *string*.
 const EOS_CANDIDATES: &[&str] = &[
     "</s>",
     "<eos>",
@@ -42,6 +44,7 @@ const EOS_CANDIDATES: &[&str] = &[
     "<|end_of_text|>",
     "<|eot_id|>",
     "<|im_end|>",
+    "<|end|>",
     "<end_of_turn>",
     "<|redacted_EOS|>",
 ];

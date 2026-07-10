@@ -425,6 +425,12 @@ pub fn hint(msg: impl std::fmt::Display) {
     println!("{} {}", style(INFO).cyan(), style(msg).dim());
 }
 
+/// `hint`, but on stderr — for notices alongside scriptable stdout output
+/// (e.g. the `chat -p` truncation notice must not pollute the captured reply).
+pub fn hint_err(msg: impl std::fmt::Display) {
+    eprintln!("{} {}", style(INFO).cyan(), style(msg).dim());
+}
+
 /// Render a simple aligned table with a dim header rule. Column widths use
 /// *display* width (ANSI stripped, wide glyphs counted) so styled cells,
 /// unicode model names, and emoji don't skew the alignment.
