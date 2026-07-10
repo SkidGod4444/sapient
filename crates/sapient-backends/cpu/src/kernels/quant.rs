@@ -328,6 +328,22 @@ pub fn quantize_row_to_i8_blocks(x: &[f32]) -> (Vec<i8>, Vec<f32>) {
     (q, scales)
 }
 
+/// Per-32-block sums of an i8-quantized activation row — Q8_K-style
+/// precomputed "bsums" (llama.cpp keeps the same sums inside its `block_q8_K`).
+///
+/// The Q4_K W4A8 kernels need `Σ x_i8` per activation sub-block for the
+/// `dmin·mn` correction term. Computing that reduction inside the row kernel
+/// repeats identical work for EVERY weight row (or 4-row group) of the matmul;
+/// hoisting it here runs it once per activation row instead. The values are
+/// exactly the sums the kernels previously reduced with `vaddlvq_s8`, so
+/// kernel results stay bit-for-bit identical.
+pub fn i8_block_sums(q: &[i8]) -> Vec<i32> {
+    debug_assert_eq!(q.len() % QK, 0);
+    q.chunks_exact(QK)
+        .map(|b| b.iter().map(|&v| v as i32).sum())
+        .collect()
+}
+
 /// Q8_0 block dot product against a pre-quantized i8 activation slice.
 ///
 /// Uses the ARMv8.4-A `sdot` instruction via inline assembly — stable Rust,
@@ -647,7 +663,12 @@ unsafe fn dot_q4_k_row_f32_neon(row_data: &[u8], x: &[f32]) -> f32 {
 /// the f32 path would use; `x_scales` has one scale per 32-element block. The math
 /// mirrors `dot_q4_k_row_f32`: per sub-block, with d_sub=d·sc, m_sub=dmin·m and
 /// x≈x_scale·x_i8,  Σ(d_sub·n−m_sub)·x  =  x_scale·(d_sub·Σ(n·x_i8) − m_sub·Σx_i8).
-pub fn dot_q4_k_row_q8_scalar(row_data: &[u8], x_i8: &[i8], x_scales: &[f32]) -> f32 {
+pub fn dot_q4_k_row_q8_scalar(
+    row_data: &[u8],
+    x_i8: &[i8],
+    x_scales: &[f32],
+    x_sums: &[i32],
+) -> f32 {
     let mut acc = 0.0f32;
     let mut x_off = 0usize;
     for block in row_data.chunks_exact(Q4_K_BLOCK_BYTES) {
@@ -671,17 +692,16 @@ pub fn dot_q4_k_row_q8_scalar(row_data: &[u8], x_i8: &[i8], x_scales: &[f32]) ->
             let xlo = &x_i8[x_off..x_off + 32];
             let xhi = &x_i8[x_off + 32..x_off + 64];
 
-            let (mut dot_lo, mut dot_hi, mut sum_lo, mut sum_hi) = (0i32, 0i32, 0i32, 0i32);
+            let (mut dot_lo, mut dot_hi) = (0i32, 0i32);
             for l in 0..32 {
                 let nlo = (qs[q_off + l] & 0x0F) as i32;
                 let nhi = (qs[q_off + l] >> 4) as i32;
                 dot_lo += nlo * xlo[l] as i32;
                 dot_hi += nhi * xhi[l] as i32;
-                sum_lo += xlo[l] as i32;
-                sum_hi += xhi[l] as i32;
             }
-            acc += x_scales[blk_lo] * (d1 * dot_lo as f32 - m1v * sum_lo as f32);
-            acc += x_scales[blk_hi] * (d2 * dot_hi as f32 - m2v * sum_hi as f32);
+            // Σx per sub-block comes precomputed (once per activation row).
+            acc += x_scales[blk_lo] * (d1 * dot_lo as f32 - m1v * x_sums[blk_lo] as f32);
+            acc += x_scales[blk_hi] * (d2 * dot_hi as f32 - m2v * x_sums[blk_hi] as f32);
 
             x_off += 64;
             q_off += 32;
@@ -758,8 +778,10 @@ pub unsafe fn dot_q4_k_4rows_r4_x2_smmla(
     packed: &[u8],
     x0_i8: &[i8],
     x0_scales: &[f32],
+    x0_sums: &[i32],
     x1_i8: &[i8],
     x1_scales: &[f32],
+    x1_sums: &[i32],
 ) -> [[f32; 2]; 4] {
     use std::arch::aarch64::*;
     let mask = vdupq_n_u8(0x0F);
@@ -778,7 +800,8 @@ pub unsafe fn dot_q4_k_4rows_r4_x2_smmla(
         let mut q_off = 0usize;
         let mut is = 0usize;
         for _ in 0..(QK_K / 64) {
-            // Activation vectors + per-sub-block sums for BOTH rows, once.
+            // Activation vectors for BOTH rows, once; per-sub-block sums come
+            // precomputed (once per activation row, `i8_block_sums`).
             let x0lo0 = vld1q_s8(x0_i8.as_ptr().add(x_off));
             let x0lo1 = vld1q_s8(x0_i8.as_ptr().add(x_off + 16));
             let x0hi0 = vld1q_s8(x0_i8.as_ptr().add(x_off + 32));
@@ -787,14 +810,8 @@ pub unsafe fn dot_q4_k_4rows_r4_x2_smmla(
             let x1lo1 = vld1q_s8(x1_i8.as_ptr().add(x_off + 16));
             let x1hi0 = vld1q_s8(x1_i8.as_ptr().add(x_off + 32));
             let x1hi1 = vld1q_s8(x1_i8.as_ptr().add(x_off + 48));
-            let sum_lo = [
-                vaddlvq_s8(x0lo0) as i32 + vaddlvq_s8(x0lo1) as i32,
-                vaddlvq_s8(x1lo0) as i32 + vaddlvq_s8(x1lo1) as i32,
-            ];
-            let sum_hi = [
-                vaddlvq_s8(x0hi0) as i32 + vaddlvq_s8(x0hi1) as i32,
-                vaddlvq_s8(x1hi0) as i32 + vaddlvq_s8(x1hi1) as i32,
-            ];
+            let sum_lo = [x0_sums[x_off / QK], x1_sums[x_off / QK]];
+            let sum_hi = [x0_sums[(x_off + 32) / QK], x1_sums[(x_off + 32) / QK]];
             let xs_lo = [x0_scales[x_off / QK], x1_scales[x_off / QK]];
             let xs_hi = [x0_scales[(x_off + 32) / QK], x1_scales[(x_off + 32) / QK]];
             // Pair the two activation rows per 8-byte k-segment: [x0_seg, x1_seg].
@@ -918,7 +935,12 @@ unsafe fn vtrn2q_s64_s8(
 /// the row's elements in 32-element blocks; `x_scales` has one scale per block.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon,dotprod")]
-pub unsafe fn dot_q4_k_row_q8_neon(row_data: &[u8], x_i8: &[i8], x_scales: &[f32]) -> f32 {
+pub unsafe fn dot_q4_k_row_q8_neon(
+    row_data: &[u8],
+    x_i8: &[i8],
+    x_scales: &[f32],
+    x_sums: &[i32],
+) -> f32 {
     use std::arch::aarch64::*;
     let mask = vdupq_n_u8(0x0F);
     let mut acc = 0.0f32;
@@ -954,14 +976,13 @@ pub unsafe fn dot_q4_k_row_q8_neon(row_data: &[u8], x_i8: &[i8], x_scales: &[f32
             let zero = vdupq_n_s32(0);
             let dot_lo = vaddvq_s32(sdot_s32(sdot_s32(zero, lo0, xlo0), lo1, xlo1));
             let dot_hi = vaddvq_s32(sdot_s32(sdot_s32(zero, hi0, xhi0), hi1, xhi1));
-            // Σ x_i8 per 32-sub-block for the min-correction term.
-            let sum_lo = vaddlvq_s8(xlo0) as i32 + vaddlvq_s8(xlo1) as i32;
-            let sum_hi = vaddlvq_s8(xhi0) as i32 + vaddlvq_s8(xhi1) as i32;
 
+            // Σ x_i8 per 32-sub-block (min-correction term) — precomputed once
+            // per activation row (`i8_block_sums`), not re-reduced per weight row.
             let blk_lo = x_off / QK;
             let blk_hi = (x_off + 32) / QK;
-            acc += x_scales[blk_lo] * (d1 * dot_lo as f32 - m1v * sum_lo as f32);
-            acc += x_scales[blk_hi] * (d2 * dot_hi as f32 - m2v * sum_hi as f32);
+            acc += x_scales[blk_lo] * (d1 * dot_lo as f32 - m1v * x_sums[blk_lo] as f32);
+            acc += x_scales[blk_hi] * (d2 * dot_hi as f32 - m2v * x_sums[blk_hi] as f32);
 
             x_off += 64;
             q_off += 32;
@@ -984,7 +1005,12 @@ pub unsafe fn dot_q4_k_row_q8_neon(row_data: &[u8], x_i8: &[i8], x_scales: &[f32
 /// slices must be complete Q4_K rows of equal length covered by `x_i8`/`x_scales`.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon,dotprod")]
-pub unsafe fn dot_q4_k_4rows_q8_neon(rows: [&[u8]; 4], x_i8: &[i8], x_scales: &[f32]) -> [f32; 4] {
+pub unsafe fn dot_q4_k_4rows_q8_neon(
+    rows: [&[u8]; 4],
+    x_i8: &[i8],
+    x_scales: &[f32],
+    x_sums: &[i32],
+) -> [f32; 4] {
     use std::arch::aarch64::*;
     let mask = vdupq_n_u8(0x0F);
     let mut acc = [0.0f32; 4];
@@ -1003,13 +1029,14 @@ pub unsafe fn dot_q4_k_4rows_q8_neon(rows: [&[u8]; 4], x_i8: &[i8], x_scales: &[
         let mut q_off = 0usize;
         let mut is = 0usize;
         for _ in 0..(QK_K / 64) {
-            // ── Shared activation work: loaded/summed ONCE for all 4 rows ──
+            // ── Shared activation work: loaded ONCE for all 4 rows; the
+            // per-sub-block Σx comes precomputed (once per activation row). ──
             let xlo0 = vld1q_s8(x_i8.as_ptr().add(x_off));
             let xlo1 = vld1q_s8(x_i8.as_ptr().add(x_off + 16));
             let xhi0 = vld1q_s8(x_i8.as_ptr().add(x_off + 32));
             let xhi1 = vld1q_s8(x_i8.as_ptr().add(x_off + 48));
-            let sum_lo = vaddlvq_s8(xlo0) as i32 + vaddlvq_s8(xlo1) as i32;
-            let sum_hi = vaddlvq_s8(xhi0) as i32 + vaddlvq_s8(xhi1) as i32;
+            let sum_lo = x_sums[x_off / QK];
+            let sum_hi = x_sums[(x_off + 32) / QK];
             let xs_lo = x_scales[x_off / QK];
             let xs_hi = x_scales[(x_off + 32) / QK];
 
@@ -1083,7 +1110,12 @@ pub fn repack_q4_k_rows4(blocks: &[u8], n: usize, k: usize) -> Vec<u8> {
 /// a whole Q4_K_R4 row-group covered by `x_i8`/`x_scales`.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon,dotprod")]
-pub unsafe fn dot_q4_k_4rows_r4_neon(packed: &[u8], x_i8: &[i8], x_scales: &[f32]) -> [f32; 4] {
+pub unsafe fn dot_q4_k_4rows_r4_neon(
+    packed: &[u8],
+    x_i8: &[i8],
+    x_scales: &[f32],
+    x_sums: &[i32],
+) -> [f32; 4] {
     use std::arch::aarch64::*;
     let mask = vdupq_n_u8(0x0F);
     let mut acc = [0.0f32; 4];
@@ -1105,8 +1137,8 @@ pub unsafe fn dot_q4_k_4rows_r4_neon(packed: &[u8], x_i8: &[i8], x_scales: &[f32
             let xlo1 = vld1q_s8(x_i8.as_ptr().add(x_off + 16));
             let xhi0 = vld1q_s8(x_i8.as_ptr().add(x_off + 32));
             let xhi1 = vld1q_s8(x_i8.as_ptr().add(x_off + 48));
-            let sum_lo = vaddlvq_s8(xlo0) as i32 + vaddlvq_s8(xlo1) as i32;
-            let sum_hi = vaddlvq_s8(xhi0) as i32 + vaddlvq_s8(xhi1) as i32;
+            let sum_lo = x_sums[x_off / QK];
+            let sum_hi = x_sums[(x_off + 32) / QK];
             let xs_lo = x_scales[x_off / QK];
             let xs_hi = x_scales[(x_off + 32) / QK];
 
@@ -2343,7 +2375,8 @@ mod tests {
 
         let f32_dot = dot_q4_k_row_f32(&row, &x);
         let (xi8, xsc) = quantize_row_to_i8_blocks(&x);
-        let q8_dot = dot_q4_k_row_q8_scalar(&row, &xi8, &xsc);
+        let xsums = i8_block_sums(&xi8);
+        let q8_dot = dot_q4_k_row_q8_scalar(&row, &xi8, &xsc, &xsums);
 
         let rel = (f32_dot - q8_dot).abs() / f32_dot.abs().max(1e-3);
         assert!(
@@ -2355,7 +2388,7 @@ mod tests {
         // integer dot; only f32 reduction order differs → tiny tolerance).
         #[cfg(target_arch = "aarch64")]
         if std::arch::is_aarch64_feature_detected!("dotprod") {
-            let neon = unsafe { dot_q4_k_row_q8_neon(&row, &xi8, &xsc) };
+            let neon = unsafe { dot_q4_k_row_q8_neon(&row, &xi8, &xsc, &xsums) };
             let rel_n = (neon - q8_dot).abs() / q8_dot.abs().max(1e-3);
             assert!(
                 rel_n < 1e-4,
@@ -2394,13 +2427,16 @@ mod tests {
             .map(|i| ((i * 37 % 97) as f32 - 48.0) * 0.02)
             .collect();
         let (x_i8, x_scales) = quantize_row_to_i8_blocks(&x);
+        let x_sums = i8_block_sums(&x_i8);
 
         for group in 0..2 {
             let j = group * 4;
             let r = |o: usize| &rows[(j + o) * row_bytes..(j + o + 1) * row_bytes];
-            let got = unsafe { dot_q4_k_4rows_q8_neon([r(0), r(1), r(2), r(3)], &x_i8, &x_scales) };
+            let got = unsafe {
+                dot_q4_k_4rows_q8_neon([r(0), r(1), r(2), r(3)], &x_i8, &x_scales, &x_sums)
+            };
             for (o, g) in got.iter().enumerate() {
-                let want = unsafe { dot_q4_k_row_q8_neon(r(o), &x_i8, &x_scales) };
+                let want = unsafe { dot_q4_k_row_q8_neon(r(o), &x_i8, &x_scales, &x_sums) };
                 assert_eq!(
                     g.to_bits(),
                     want.to_bits(),
@@ -2462,14 +2498,16 @@ mod tests {
             .map(|i| ((i * 53 % 89) as f32 - 44.0) * 0.02)
             .collect();
         let (x_i8, x_scales) = quantize_row_to_i8_blocks(&x);
+        let x_sums = i8_block_sums(&x_i8);
         let packed = repack_q4_k_rows4(&blocks, n, k);
-        let got = unsafe { dot_q4_k_4rows_r4_neon(&packed, &x_i8, &x_scales) };
+        let got = unsafe { dot_q4_k_4rows_r4_neon(&packed, &x_i8, &x_scales, &x_sums) };
         for (r, g) in got.iter().enumerate() {
             let want = unsafe {
                 dot_q4_k_row_q8_neon(
                     &blocks[r * row_bytes..(r + 1) * row_bytes],
                     &x_i8,
                     &x_scales,
+                    &x_sums,
                 )
             };
             assert_eq!(g.to_bits(), want.to_bits(), "row {r}: {g} vs {want}");
@@ -2637,12 +2675,16 @@ mod tests {
             .collect();
         let (x0_i8, x0_s) = quantize_row_to_i8_blocks(&x0);
         let (x1_i8, x1_s) = quantize_row_to_i8_blocks(&x1);
+        let x0_b = i8_block_sums(&x0_i8);
+        let x1_b = i8_block_sums(&x1_i8);
         let packed = repack_q4_k_rows4(&rows, n, k);
-        let got = unsafe { dot_q4_k_4rows_r4_x2_smmla(&packed, &x0_i8, &x0_s, &x1_i8, &x1_s) };
+        let got = unsafe {
+            dot_q4_k_4rows_r4_x2_smmla(&packed, &x0_i8, &x0_s, &x0_b, &x1_i8, &x1_s, &x1_b)
+        };
         for r in 0..4 {
             let row = &rows[r * row_bytes..(r + 1) * row_bytes];
-            let w0 = unsafe { dot_q4_k_row_q8_neon(row, &x0_i8, &x0_s) };
-            let w1 = unsafe { dot_q4_k_row_q8_neon(row, &x1_i8, &x1_s) };
+            let w0 = unsafe { dot_q4_k_row_q8_neon(row, &x0_i8, &x0_s, &x0_b) };
+            let w1 = unsafe { dot_q4_k_row_q8_neon(row, &x1_i8, &x1_s, &x1_b) };
             assert_eq!(
                 got[r][0].to_bits(),
                 w0.to_bits(),

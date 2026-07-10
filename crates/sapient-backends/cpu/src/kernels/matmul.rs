@@ -627,8 +627,12 @@ fn matmul_nt_q4_k_r4(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Re
     // group-major (transposed) so rayon tasks own contiguous chunks.
     #[cfg(target_arch = "aarch64")]
     if m >= 2 && std::arch::is_aarch64_feature_detected!("i8mm") {
-        let quantized: Vec<(Vec<i8>, Vec<f32>)> = (0..m)
-            .map(|i| quant::quantize_row_to_i8_blocks(&x_data[i * k..(i + 1) * k]))
+        let quantized: Vec<(Vec<i8>, Vec<f32>, Vec<i32>)> = (0..m)
+            .map(|i| {
+                let (q, s) = quant::quantize_row_to_i8_blocks(&x_data[i * k..(i + 1) * k]);
+                let sums = quant::i8_block_sums(&q);
+                (q, s, sums)
+            })
             .collect();
         let groups = n / 4;
         let mut out_t = vec![0.0f32; n * m]; // [group-rows][m]
@@ -639,10 +643,11 @@ fn matmul_nt_q4_k_r4(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Re
                 let group = &w_blocks[g * group_bytes..(g + 1) * group_bytes];
                 let mut xi = 0usize;
                 while xi + 2 <= m {
-                    let (x0, s0) = &quantized[xi];
-                    let (x1, s1) = &quantized[xi + 1];
+                    let (x0, s0, b0) = &quantized[xi];
+                    let (x1, s1, b1) = &quantized[xi + 1];
                     // SAFETY: i8mm verified above; slice is one R4 group.
-                    let v = unsafe { quant::dot_q4_k_4rows_r4_x2_smmla(group, x0, s0, x1, s1) };
+                    let v =
+                        unsafe { quant::dot_q4_k_4rows_r4_x2_smmla(group, x0, s0, b0, x1, s1, b1) };
                     for r in 0..4 {
                         chunk[r * m + xi] = v[r][0];
                         chunk[r * m + xi + 1] = v[r][1];
@@ -650,9 +655,9 @@ fn matmul_nt_q4_k_r4(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Re
                     xi += 2;
                 }
                 if xi < m {
-                    let (x0, s0) = &quantized[xi];
+                    let (x0, s0, b0) = &quantized[xi];
                     // SAFETY: FEAT_I8MM implies dotprod-era NEON.
-                    let v = unsafe { quant::dot_q4_k_4rows_r4_neon(group, x0, s0) };
+                    let v = unsafe { quant::dot_q4_k_4rows_r4_neon(group, x0, s0, b0) };
                     for r in 0..4 {
                         chunk[r * m + xi] = v[r];
                     }
@@ -674,6 +679,7 @@ fn matmul_nt_q4_k_r4(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Re
         for i in 0..m {
             let x_row = &x_data[i * k..(i + 1) * k];
             let (x_i8, x_scales) = quant::quantize_row_to_i8_blocks(x_row);
+            let x_sums = quant::i8_block_sums(&x_i8);
             let groups = n / 4;
             let gchunk = (gemv_chunk(n) / 4).max(1);
             out[i * n..(i + 1) * n]
@@ -690,6 +696,7 @@ fn matmul_nt_q4_k_r4(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Re
                                 &w_blocks[g * group_bytes..(g + 1) * group_bytes],
                                 &x_i8,
                                 &x_scales,
+                                &x_sums,
                             )
                         };
                         slots.copy_from_slice(&v[..slots.len()]);
@@ -705,6 +712,7 @@ fn matmul_nt_q4_k_r4(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Re
     for i in 0..m {
         let x_row = &x_data[i * k..(i + 1) * k];
         let (x_i8, x_scales) = quant::quantize_row_to_i8_blocks(x_row);
+        let x_sums = quant::i8_block_sums(&x_i8);
         let nb = k / 256;
         let mut row_buf = vec![0u8; row_bytes];
         for g in 0..n / 4 {
@@ -714,7 +722,8 @@ fn matmul_nt_q4_k_r4(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Re
                     row_buf[b * Q4_K_BLOCK_BYTES..(b + 1) * Q4_K_BLOCK_BYTES]
                         .copy_from_slice(&w_blocks[src..src + Q4_K_BLOCK_BYTES]);
                 }
-                out[i * n + g * 4 + r] = quant::dot_q4_k_row_q8_scalar(&row_buf, &x_i8, &x_scales);
+                out[i * n + g * 4 + r] =
+                    quant::dot_q4_k_row_q8_scalar(&row_buf, &x_i8, &x_scales, &x_sums);
             }
         }
     }
@@ -742,6 +751,7 @@ fn matmul_nt_q4_k(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
         for i in 0..m {
             let x_row = &x_data[i * k..(i + 1) * k];
             let (x_i8, x_scales) = quant::quantize_row_to_i8_blocks(x_row);
+            let x_sums = quant::i8_block_sums(&x_i8);
             let chunk = gemv_chunk(n);
             out[i * n..(i + 1) * n]
                 .par_chunks_mut(chunk)
@@ -762,6 +772,7 @@ fn matmul_nt_q4_k(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
                                 [r(0), r(1), r(2), r(3)],
                                 &x_i8,
                                 &x_scales,
+                                &x_sums,
                             )
                         };
                         cs[local..local + 4].copy_from_slice(&v);
@@ -775,6 +786,7 @@ fn matmul_nt_q4_k(x: &Tensor, w: &Tensor, m: usize, k: usize, n: usize) -> Resul
                                 &w_blocks[j * row_bytes..(j + 1) * row_bytes],
                                 &x_i8,
                                 &x_scales,
+                                &x_sums,
                             )
                         };
                         local += 1;

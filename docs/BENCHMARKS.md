@@ -263,8 +263,20 @@ M4 numbers here are cool-machine readings; Pi/Thor runs are short and
 consistent. Cool-machine decode reference (128-tok greedy): **llama-1B 69.5
 tok/s (1.13× behind llama.cpp), qwen-1.5B ~51 (1.22×)**.
 
+**Q8_K-style precomputed activation block-sums landed** (2026-07-10,
+`feat/cpu-parity-2`): the per-32-block Σx that the Q4_K W4A8 kernels need for
+the `dmin·mn` term is now computed once per activation row at quantization
+time (`i8_block_sums`) instead of re-reduced with `vaddlvq_s8` inside every
+weight row/group. Bit-identical output (same integer sums; all four kernel
+bit-identity gates + the engine repack gate unchanged). Measured, interleaved
+A/B/B/A on M4 CPU decode: llama-1B 61.2 → 61.8 tok/s (+0.9%), qwen-1.5B
+43.5 → 44.1 (+1.2%) — small because the R4 4-row kernels already amortized
+the reduction 4×; the single-row/remainder paths gain the most.
+
 Remaining parity items: deeper output tiling for prefill (llama.cpp pp512
-remains well ahead), and Q8_K-style precomputed activation block-sums.
+remains well ahead), and the decode threadpool (~230 rayon fork/join
+barriers per decoded token — one per GEMV parallel region — vs llama.cpp's
+single persistent pool pass; the measured ~1.6× multicore-scaling gap).
 
 **The honest read:**
 - On **Apple Metal** SAPIENT is competitive with llama.cpp (−7% on qwen-1.5B,
