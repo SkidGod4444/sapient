@@ -88,11 +88,29 @@ public final class ChatViewModel: ObservableObject {
             DispatchQueue.main.async { self?.messages[replyIndex].text += token }
         }
 
+        // Capture the resolved session ON the main actor — the queue closure
+        // must not read isolated state (older Swift compilers reject it, and
+        // Swift 6 makes it a hard error).
+        let existingSession: LlmSession? = needsLoad ? nil : session
+
         inferenceQueue.async { [weak self] in
             do {
-                let session = try self?.resolveSession(alias: alias, needsLoad: needsLoad)
+                let active: LlmSession
+                if let existing = existingSession {
+                    active = existing
+                } else {
+                    active = try LlmSession.load(
+                        model: alias,
+                        options: GenerationOptions(maxTokens: 512, temperature: 0.7)
+                    )
+                    DispatchQueue.main.async {
+                        self?.session = active
+                        self?.loadedAlias = alias
+                        self?.backendLabel = active.backendLabel()
+                    }
+                }
                 DispatchQueue.main.async { self?.status = .generating }
-                _ = try session?.chatStream(userMessage: prompt, listener: listener)
+                _ = try active.chatStream(userMessage: prompt, listener: listener)
                 DispatchQueue.main.async { self?.status = .idle }
             } catch {
                 DispatchQueue.main.async {
@@ -113,24 +131,5 @@ public final class ChatViewModel: ObservableObject {
         session?.reset()
         messages.removeAll()
         status = .idle
-    }
-
-    /// Runs on `inferenceQueue` — the blocking load happens here.
-    private nonisolated func resolveSession(alias: String, needsLoad: Bool) throws -> LlmSession {
-        if !needsLoad, let existing = sessionSnapshot() { return existing }
-        let session = try LlmSession.load(
-            model: alias,
-            options: GenerationOptions(maxTokens: 512, temperature: 0.7)
-        )
-        DispatchQueue.main.async {
-            self.session = session
-            self.loadedAlias = alias
-            self.backendLabel = session.backendLabel()
-        }
-        return session
-    }
-
-    private nonisolated func sessionSnapshot() -> LlmSession? {
-        DispatchQueue.main.sync { session }
     }
 }
