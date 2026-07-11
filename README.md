@@ -249,8 +249,10 @@ the **safe-testing guide for personal devices**):
   [`sapient-ffi`](crates/sapient-ffi) crate via UniFFI. One object API:
   `LlmSession.load(model, options)` → `chat(...)` /
   `chatStream(..., listener)` (token callback; return `false` to cancel) /
-  `reset()`. Cross-compiles validated for iOS device + simulator and Android
-  arm64.
+  `reset()`. Ready-made packages ship with every release
+  (`sapient-swift.zip` — XCFramework + Swift Package for iOS/simulator/macOS;
+  `sapient-android.zip` — drop-in Gradle module), or build them locally with
+  `scripts/package-swift.sh` / `scripts/package-android.sh`.
 
   ```swift
   let session = try LlmSession.load(model: "qwen2.5-0.5b",

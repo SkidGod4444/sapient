@@ -489,6 +489,12 @@ OpenAI-compatible API with streaming (`chatStream` async generator); a native on
 transport over `sapient-ffi` is the next rung. **Read `docs/MOBILE.md` before testing on a
 phone** — it has the build recipes and the safe-testing ladder for personal hardware.
 
+Packaging is one command per platform: `scripts/package-swift.sh --smoke` assembles
+`SapientFFI.xcframework` + a local Swift Package (and proves it by compiling and running a
+macOS binary against it), and `scripts/package-android.sh` assembles a drop-in Gradle
+library module (prebuilt `.so` + generated Kotlin + JNA dependency). CI runs both, and
+releases attach the resulting zips.
+
 ---
 
 ## 5. Every dependency (outside tool) and what it does

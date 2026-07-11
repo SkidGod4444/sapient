@@ -56,15 +56,23 @@ Key design decisions (why it looks like this):
 | Surface | Tech | Status |
 |---|---|---|
 | Rust host apps | `sapient-ffi` crate (or `sapient-generate` directly) | ✅ shipped, unit + e2e tested |
-| Swift (iOS/macOS) | UniFFI bindgen → `sapient_ffi.swift` + C header/modulemap | ✅ generation validated, `swiftc -parse` clean; XCFramework packaging = next rung |
-| Kotlin (Android/JVM) | UniFFI bindgen → `sapient_ffi.kt` (JNA) | ✅ generation validated; AAR packaging = next rung |
-| iOS device build | `aarch64-apple-ios` staticlib | ✅ cross-compiles (needs `IPHONEOS_DEPLOYMENT_TARGET=14.0`) |
-| iOS simulator build | `aarch64-apple-ios-sim` staticlib | ✅ cross-compiles |
-| Android build | `aarch64-linux-android` cdylib via NDK ≥ 26 | ✅ cross-compiles (~11 MB `.so`, API 24+) |
-| Node.js | `@openhorizon/sapient` → `sapient serve` HTTP | ✅ shipped; 11 tests + live-serve verified |
+| Swift (iOS/macOS) | `scripts/package-swift.sh` → `SapientFFI.xcframework` + Swift Package | ✅ shipped — packaged, and a compiled macOS smoke binary runs against it in CI |
+| Kotlin (Android/JVM) | `scripts/package-android.sh` → drop-in Gradle module (`.so` + Kotlin + JNA dep) | ✅ shipped — uniffi exports verified; Maven-published AAR = later rung |
+| iOS device build | `aarch64-apple-ios` staticlib | ✅ in the XCFramework (needs `IPHONEOS_DEPLOYMENT_TARGET=14.0` — the script sets it) |
+| iOS simulator build | `aarch64-apple-ios-sim` staticlib | ✅ in the XCFramework |
+| macOS build | `aarch64-apple-darwin` staticlib | ✅ in the XCFramework (Mac apps + the CI smoke test) |
+| Android build | `aarch64-linux-android` cdylib via NDK ≥ 26 | ✅ in the module (~11 MB `.so`, API 24+; `--emulator` adds x86_64) |
+| CI / release artifacts | `package-swift` + `package-android` jobs; zips attach to GitHub releases | ✅ shipped (CI + release.yml) |
+| Node.js | `@openhorizon/sapient` → `sapient serve` HTTP | ✅ shipped; 12 tests + live-serve verified |
 | React Native | same TS SDK (`fetch` injectable; `expo/fetch` for streaming) | ✅ non-streamed + streamed via expo/fetch; on-device native module = later rung |
 | Sample apps (SwiftUI / Compose) | demo chat apps | ⬜ next rung |
 | On-device thermal/battery-aware scheduling | iOS/Android governor (the CPU `ThermalGovernor` reads Linux sysfs only) | ⬜ later rung |
+
+**Size expectations:** the Swift package zip is ~180 MB (three *static*
+slices — archives carry the whole engine pre-dead-strip); an app that links
+it pays only ~53 MB in its binary (measured on the CI smoke executable —
+the full engine: all forward engines, tokenizers, audio, hub client). The
+Android zip is ~4 MB (the `.so` is already dead-stripped).
 
 ## 3. The FFI API in one glance
 
@@ -86,52 +94,48 @@ Generated names are idiomatic per language (`chat_stream` → `chatStream`).
 - `session.reset()` / `session.transcript()` / `session.model()` /
   `session.backendLabel()` / `session.isMmap()`.
 
-## 4. Build & bindings generation
+## 4. Build & packaging
 
-All commands run from the repo root. The bindings generator reads the
-compiled library, so build first:
+**One command per platform** (repo root). Each script builds the Rust
+targets, generates the bindings, assembles the consumable artifact, and
+validates it — the same scripts run in CI, and their zips attach to every
+GitHub release.
 
 ```bash
-# 1. Build the library for your host (dev loop)
-cargo build -p sapient-ffi --release
+# Apple: SapientFFI.xcframework (iOS device + simulator + macOS) + Swift Package
+#        --smoke also compiles & RUNS a macOS binary against the packaged lib
+./scripts/package-swift.sh --smoke     # → dist/mobile/sapient-swift{,.zip}
 
-# 2. Generate Swift + Kotlin sources from it
+# Android: drop-in Gradle library module (arm64 .so + Kotlin + JNA dep wired)
+#          --emulator adds the x86_64 ABI for x86-host emulators
+./scripts/package-android.sh           # → dist/mobile/sapient-android{,.zip}
+```
+
+Under the hood (for debugging, or building by hand): the bindings generator
+reads the compiled host library —
+
+```bash
+cargo build -p sapient-ffi --release
 cargo run -p sapient-ffi --features bindgen --bin uniffi-bindgen -- \
   generate --library target/release/libsapient_ffi.dylib \
   --language swift --language kotlin --out-dir bindings/generated
 ```
 
-Outputs: `sapient_ffi.swift` + `sapient_ffiFFI.h` + `sapient_ffiFFI.modulemap`
-(Swift) and `uniffi/sapient_ffi/sapient_ffi.kt` (Kotlin, needs the
-[JNA](https://github.com/java-native-access/jna) jar at runtime). Generated
-sources are **not** committed — regenerate whenever the crate's exported API
-changes.
+Generated sources and `dist/` are **not** committed — rerun the script
+whenever the crate's exported API changes. Two cross-compile traps the
+scripts handle for you (keep them in mind if building manually): iOS needs
+`IPHONEOS_DEPLOYMENT_TARGET=14.0` (else the C deps compile against the SDK
+default and the link fails on `___chkstk_darwin`), and Android needs
+`CXX_aarch64_linux_android` set alongside `CC` (esaxx-rs is C++).
 
-### iOS (validated on this repo)
+### iOS / macOS — consuming the Swift Package
 
-```bash
-rustup target add aarch64-apple-ios aarch64-apple-ios-sim
-
-# IMPORTANT: without a modern deployment target the C deps (onig_sys) compile
-# against the SDK default and the link fails on ___chkstk_darwin.
-IPHONEOS_DEPLOYMENT_TARGET=14.0 cargo build -p sapient-ffi --release --target aarch64-apple-ios
-IPHONEOS_DEPLOYMENT_TARGET=14.0 cargo build -p sapient-ffi --release --target aarch64-apple-ios-sim
-```
-
-Package the two `libsapient_ffi.a` slices + the generated header/modulemap as
-an XCFramework (rename the modulemap to `module.modulemap` inside each
-Headers dir):
-
-```bash
-xcodebuild -create-xcframework \
-  -library target/aarch64-apple-ios/release/libsapient_ffi.a     -headers bindings/generated/ios-headers \
-  -library target/aarch64-apple-ios-sim/release/libsapient_ffi.a -headers bindings/generated/ios-headers \
-  -output SapientFFI.xcframework
-```
-
-Drop `SapientFFI.xcframework` + `sapient_ffi.swift` into an Xcode target (or
-wrap in a Swift Package). The static archive is large before linking; the
-app slice dead-strips to a small fraction.
+`dist/mobile/sapient-swift/` is a complete local Swift Package: the
+generated `sapient_ffi.swift` + the XCFramework as a `binaryTarget`, with
+the required link flags (`c++`, `iconv`, `SystemConfiguration`,
+`CoreFoundation`) already declared. In Xcode: *File → Add Package
+Dependencies → Add Local…* and select the directory; or in a
+`Package.swift`: `.package(path: "../sapient-swift")`.
 
 ```swift
 // Call from a background queue — load() blocks (and downloads on first run).
@@ -148,25 +152,16 @@ final class Printer: TokenListener {
 let reply = try session.chatStream(userMessage: "Hi!", listener: Printer())
 ```
 
-### Android (validated on this repo, NDK 26)
+### Android — consuming the Gradle module
 
-```bash
-rustup target add aarch64-linux-android
-NDKB=$HOME/Library/Android/sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/darwin-x86_64/bin
-
-# esaxx-rs is C++ → CXX must be set too, not just CC.
-CC_aarch64_linux_android=$NDKB/aarch64-linux-android24-clang \
-CXX_aarch64_linux_android=$NDKB/aarch64-linux-android24-clang++ \
-AR_aarch64_linux_android=$NDKB/llvm-ar \
-CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$NDKB/aarch64-linux-android24-clang \
-cargo build -p sapient-ffi --release --target aarch64-linux-android
-```
-
-(Or install [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk), which sets all
-of that up: `cargo ndk -t arm64-v8a build -p sapient-ffi --release`.)
-
-Ship `libsapient_ffi.so` in `src/main/jniLibs/arm64-v8a/`, add the generated
-`sapient_ffi.kt` and a `net.java.dev.jna:jna:5.14.0@aar` dependency:
+`dist/mobile/sapient-android/` is a complete `com.android.library` module:
+`build.gradle.kts` (JNA dependency wired), the `.so` under
+`src/main/jniLibs/arm64-v8a/`, and the generated Kotlin. Copy it next to
+your app module, add `include(":sapient-android")` to `settings.gradle.kts`
+and `implementation(project(":sapient-android"))` to the app. (The script
+auto-locates the NDK from `ANDROID_NDK_HOME` / `ANDROID_NDK_LATEST_HOME` /
+the SDK dir; [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk) remains a
+fine manual alternative.)
 
 ```kotlin
 // Call from Dispatchers.IO — load() blocks (and downloads on first run).
@@ -330,16 +325,22 @@ and Android today**, so during development *you* are the governor:
 
 ## 7. Remaining rungs (tracked in ROADMAP.md Phase 5 / Notion Phase 11)
 
-1. **Packaging:** XCFramework build script + Swift Package; Android AAR
-   (bundled `.so` + generated Kotlin + JNA) — turn the validated commands
-   above into CI artifacts.
-2. **Sample apps:** minimal SwiftUI + Jetpack Compose chat apps (the
-   phase's success metric: a 1B Q4 model on-device in a demo app).
+1. ~~**Packaging + CI**~~ ✅ shipped: `scripts/package-swift.sh` (XCFramework
+   + Swift Package + CI-run macOS smoke binary) and
+   `scripts/package-android.sh` (Gradle module, exports verified); CI jobs
+   `package-swift`/`package-android` and release-attached zips. Still open
+   from this rung: **registry publishing** (SwiftPM registry / Maven AAR —
+   needs a Gradle build in CI) and versioned checksummed URLs in the
+   install-docs.
+2. **Sample apps:** minimal SwiftUI + Jetpack Compose chat apps consuming
+   the packaged artifacts (the phase's success metric: a 1B Q4 model
+   on-device in a demo app).
 3. **Native TS transport:** napi module for Node, JSI/TurboModule for React
    Native over `sapient-ffi` — same `SapientClient` API, no server.
 4. **On-device niceties:** iOS/Android thermal governor hooks
    (`ProcessInfo.thermalState` / `PowerManager` → the existing
    effective-threads mechanism), download progress callbacks, background-safe
    model eviction.
-5. **CI:** cross-compile jobs for the three mobile targets + TS SDK
-   build/test job.
+5. **Typed mid-stream errors:** promote the engine's in-band `Error: …`
+   stream fragment to a typed error (`Result`-carrying stream in
+   `sapient-generate` — shared with serve; flagged in the PR #38 review).

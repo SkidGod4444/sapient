@@ -119,6 +119,46 @@ jobs:
       - run: sudo apt-get update -q && sudo apt-get install -y libasound2-dev
       - run: cargo doc --workspace --no-deps
 
+  # ── Mobile packaging (Phase 11) ──────────────────────────────────────────────
+  # Builds the real artifacts consumers get: the Apple XCFramework + Swift
+  # Package (plus a compiled-and-RUN macOS smoke binary against the packaged
+  # static lib) and the Android Gradle module (arm64 .so + generated Kotlin,
+  # uniffi exports verified). Slow-ish cold (release profile ×
+  # several targets) — rust-cache keeps warm runs reasonable.
+  package-swift:
+    name: Package (Swift/Apple)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+      - name: Package + smoke test
+        run: ./scripts/package-swift.sh --smoke
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sapient-swift
+          path: dist/mobile/sapient-swift.zip
+          retention-days: 7
+
+  package-android:
+    name: Package (Android)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: Package
+        run: ./scripts/package-android.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sapient-android
+          path: dist/mobile/sapient-android.zip
+          retention-days: 7
+
   # ── TypeScript SDK (sdks/typescript) ─────────────────────────────────────────
   sdk-ts:
     name: TypeScript SDK
