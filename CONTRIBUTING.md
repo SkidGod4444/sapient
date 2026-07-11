@@ -119,6 +119,8 @@ crates/
 
 sdks/typescript/            # @openhorizon/sapient — TS SDK for Node.js/React Native
                             #   (talks to `sapient serve`; npm test = tsc + node --test)
+examples/                   # Sample chat apps: swift-chat (SwiftUI macOS+iOS),
+                            #   android-chat (Compose), react-native-chat (Expo)
 install.sh / install.ps1    # Install scripts (attached to releases)
 Formula/sapient.rb          # Homebrew formula template
 .github/workflows/          # CI and release automation

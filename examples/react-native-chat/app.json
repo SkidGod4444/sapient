@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "SAPIENT Chat",
+    "slug": "sapient-chat",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "platforms": [
+      "ios",
+      "android"
+    ],
+    "ios": {
+      "bundleIdentifier": "so.openhorizon.sapient.chat.rn"
+    },
+    "android": {
+      "package": "so.openhorizon.sapient.chat.rn"
+    },
+    "plugins": [
+      "expo-asset"
+    ]
+  }
+}

@@ -43,19 +43,32 @@ export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-12.0}"
 
 IOS_TARGET=aarch64-apple-ios
 SIM_TARGET=aarch64-apple-ios-sim
+SIM_X86_TARGET=x86_64-apple-ios   # x86_64 slice IS the Intel simulator
 MAC_TARGET=aarch64-apple-darwin
 
 echo "==> Ensuring rust targets"
-for t in "$IOS_TARGET" "$SIM_TARGET"; do
+for t in "$IOS_TARGET" "$SIM_TARGET" "$SIM_X86_TARGET"; do
   rustup target list --installed | grep -q "^$t\$" || rustup target add "$t"
 done
 
 echo "==> Building sapient-ffi static libs (this is the slow part)"
 cargo build -p sapient-ffi --release --target "$IOS_TARGET"
 cargo build -p sapient-ffi --release --target "$SIM_TARGET"
+cargo build -p sapient-ffi --release --target "$SIM_X86_TARGET"
 cargo build -p sapient-ffi --release --target "$MAC_TARGET"
 # Host dylib for the bindings generator (reads exported metadata from it).
 cargo build -p sapient-ffi --release
+
+# Universal simulator library — Xcode's generic iOS Simulator destination
+# links BOTH arm64 and x86_64; an arm64-only slice fails with
+# "symbol(s) not found for architecture x86_64" (and Intel-Mac devs need it).
+echo "==> Creating universal simulator library (arm64 + x86_64)"
+SIM_UNIVERSAL_DIR="target/ios-sim-universal/release"
+mkdir -p "$SIM_UNIVERSAL_DIR"
+lipo -create \
+  "target/$SIM_TARGET/release/libsapient_ffi.a" \
+  "target/$SIM_X86_TARGET/release/libsapient_ffi.a" \
+  -output "$SIM_UNIVERSAL_DIR/libsapient_ffi.a"
 
 echo "==> Generating Swift bindings"
 GEN_DIR="$OUT_DIR/generated-swift"
@@ -76,7 +89,7 @@ XCF="$OUT_DIR/SapientFFI.xcframework"
 rm -rf "$XCF"
 xcodebuild -create-xcframework \
   -library "target/$IOS_TARGET/release/libsapient_ffi.a" -headers "$HEADERS_DIR" \
-  -library "target/$SIM_TARGET/release/libsapient_ffi.a" -headers "$HEADERS_DIR" \
+  -library "$SIM_UNIVERSAL_DIR/libsapient_ffi.a" -headers "$HEADERS_DIR" \
   -library "target/$MAC_TARGET/release/libsapient_ffi.a" -headers "$HEADERS_DIR" \
   -output "$XCF"
 

@@ -35,18 +35,23 @@ use sapient_tokenizers::chat::ChatMessage;
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
-/// Errors crossing the FFI boundary. Message strings carry the underlying
-/// `anyhow` chain so host apps can log something actionable.
+/// Errors crossing the FFI boundary. The `reason` strings carry the
+/// underlying `anyhow` chain so host apps can log something actionable.
+///
+/// The field is deliberately NOT named `message`: UniFFI maps error enums to
+/// Kotlin exception classes, and a `message` field collides with
+/// `Throwable.message` ("hides member of supertype" — the generated Kotlin
+/// doesn't compile; found by the Android sample app).
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum SapientError {
-    #[error("model load failed: {message}")]
-    Load { message: String },
-    #[error("generation failed: {message}")]
-    Generation { message: String },
-    #[error("invalid argument: {message}")]
-    InvalidArgument { message: String },
-    #[error("internal error: {message}")]
-    Internal { message: String },
+    #[error("model load failed: {reason}")]
+    Load { reason: String },
+    #[error("generation failed: {reason}")]
+    Generation { reason: String },
+    #[error("invalid argument: {reason}")]
+    InvalidArgument { reason: String },
+    #[error("internal error: {reason}")]
+    Internal { reason: String },
 }
 
 // ── Runtime plumbing ──────────────────────────────────────────────────────────
@@ -137,7 +142,7 @@ pub fn list_models() -> Vec<ModelEntry> {
 #[uniffi::export]
 pub fn resolve_alias(name: String) -> Result<String, SapientError> {
     sapient_hub::registry::resolve_model_alias(&name).map_err(|e| SapientError::InvalidArgument {
-        message: e.to_string(),
+        reason: e.to_string(),
     })
 }
 
@@ -222,7 +227,7 @@ impl GenerationOptions {
             Some("metal") => Ok(B::Metal),
             Some("wgpu") => Ok(B::Wgpu),
             Some(other) => Err(SapientError::InvalidArgument {
-                message: format!("unknown backend '{other}' (expected auto|cpu|metal|wgpu)"),
+                reason: format!("unknown backend '{other}' (expected auto|cpu|metal|wgpu)"),
             }),
         }
     }
@@ -305,7 +310,7 @@ impl LlmSession {
         let mut pipeline =
             run_async(async move { Pipeline::from_pretrained_with_opts(&alias, load_opts).await })
                 .map_err(|e| SapientError::Load {
-                    message: format!("{e:#}"),
+                    reason: format!("{e:#}"),
                 })?;
         // Multi-turn chats re-send the whole history; the prefix cache keeps
         // the KV for the shared prefix so only the new turn is prefilled.
@@ -327,7 +332,7 @@ impl LlmSession {
         let config = self.config.clone();
         let reply = run_async(async move { pipeline.chat_with_config(&messages, &config).await })
             .map_err(|e| SapientError::Generation {
-            message: format!("{e:#}"),
+            reason: format!("{e:#}"),
         })?;
         self.commit_turn(&user_message, &reply);
         Ok(reply)
@@ -361,7 +366,7 @@ impl LlmSession {
                 async move { Ok(pipeline.chat_stream_with_config(&messages, &config).await) },
             )
             .map_err(|e| SapientError::Generation {
-                message: format!("{e:#}"),
+                reason: format!("{e:#}"),
             })?;
         // Consume on the caller's thread — blocking_recv must not run on a
         // runtime worker. Dropping `rx` early is the cancellation signal.
@@ -500,13 +505,13 @@ mod tests {
     #[ignore = "downloads a model — network + disk"]
     fn e2e_chat_and_stream_smollm2() {
         let session = LlmSession::load(
-            "smollm2-135m".into(),
+            "smollm2-135m-q4".into(),
             GenerationOptions {
                 max_tokens: 32,
                 ..GenerationOptions::default()
             },
         )
-        .expect("load smollm2-135m");
+        .expect("load smollm2-135m-q4");
         let reply = session.chat("Reply with one short sentence: hello!".into());
         let reply = reply.expect("chat turn");
         assert!(!reply.trim().is_empty());

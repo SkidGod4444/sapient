@@ -65,7 +65,7 @@ Key design decisions (why it looks like this):
 | CI / release artifacts | `package-swift` + `package-android` jobs; zips attach to GitHub releases | ✅ shipped (CI + release.yml) |
 | Node.js | `@openhorizon/sapient` → `sapient serve` HTTP | ✅ shipped; 12 tests + live-serve verified |
 | React Native | same TS SDK (`fetch` injectable; `expo/fetch` for streaming) | ✅ non-streamed + streamed via expo/fetch; on-device native module = later rung |
-| Sample apps (SwiftUI / Compose) | demo chat apps | ⬜ next rung |
+| Sample apps | SwiftUI (macOS + iOS) · Jetpack Compose · React Native/Expo — `examples/` | ✅ shipped; all three CI-built (APK/simulator/Metro-bundle) |
 | On-device thermal/battery-aware scheduling | iOS/Android governor (the CPU `ThermalGovernor` reads Linux sysfs only) | ⬜ later rung |
 
 **Size expectations:** the Swift package zip is ~180 MB (three *static*
@@ -95,6 +95,10 @@ Generated names are idiomatic per language (`chat_stream` → `chatStream`).
   `session.backendLabel()` / `session.isMmap()`.
 
 ## 4. Build & packaging
+
+**Working sample apps for all three stacks live in [`examples/`](../examples)**
+(SwiftUI macOS+iOS, Jetpack Compose, React Native/Expo) — start there; the
+sections below are the underlying pieces.
 
 **One command per platform** (repo root). Each script builds the Rust
 targets, generates the bindings, assembles the consumable artifact, and
@@ -217,10 +221,10 @@ jailbreak, root, sideloaded provisioning hacks, or disabling OS protections
 
 | Rung | Where | What it validates | Model |
 |---|---|---|---|
-| 1 | **Mac, Rust tests** | API logic, error paths (`cargo test -p sapient-ffi`), real inference (`cargo test -p sapient-ffi --release -- --ignored`) | smollm2-135m |
-| 2 | **Mac, host bindings** | the generated Swift/Kotlin actually drives the dylib (macOS Swift target / JVM + JNA — no device involved) | smollm2-135m |
-| 3 | **iOS Simulator / Android emulator** | packaging, sandbox paths, `HF_HOME`, UI wiring. *Correctness only — perf numbers here are meaningless.* | smollm2-135m |
-| 4 | **Real device, short runs** | memory ceiling, real tok/s, first-token latency — runs of **≤ 60 s**, device on a desk, not in a case | smollm2-135m → qwen2.5-0.5b |
+| 1 | **Mac, Rust tests** | API logic, error paths (`cargo test -p sapient-ffi`), real inference (`cargo test -p sapient-ffi --release -- --ignored`) | smollm2-135m-q4 |
+| 2 | **Mac, host bindings** | the generated Swift/Kotlin actually drives the dylib (macOS Swift target / JVM + JNA — no device involved) | smollm2-135m-q4 |
+| 3 | **iOS Simulator / Android emulator** | packaging, sandbox paths, `HF_HOME`, UI wiring. *Correctness only — perf numbers here are meaningless.* | smollm2-135m-q4 |
+| 4 | **Real device, short runs** | memory ceiling, real tok/s, first-token latency — runs of **≤ 60 s**, device on a desk, not in a case | smollm2-135m-q4 → qwen2.5-0.5b |
 | 5 | **Real device, longer soak** | sustained decode + thermal behavior — only after rung 4 is boring, and still supervised (never overnight, never in a pocket/bag) | qwen2.5-0.5b |
 
 For React Native there's a rung 0 that skips the device entirely: point the
@@ -233,7 +237,7 @@ iOS enforces per-app memory limits (jetsam): a phone app that allocates more
 than roughly **50–60 % of device RAM** is killed on the spot, and the limit is
 lower in the background. Android's LMK behaves similarly under pressure.
 
-- **Dev default: `smollm2-135m`** (~100 MB Q8). It loads in seconds and
+- **Dev default: `smollm2-135m-q4`** (~100 MB Q8). It loads in seconds and
   exercises every code path. Only move up once the plumbing works.
 - **Phone ceiling: ~1B Q4** (e.g. `llama3.2-1b-q4`, ~0.8 GB) on a 6–8 GB
   device. `qwen2.5-0.5b` (~0.4 GB) is the comfortable middle.
@@ -332,9 +336,13 @@ and Android today**, so during development *you* are the governor:
    from this rung: **registry publishing** (SwiftPM registry / Maven AAR —
    needs a Gradle build in CI) and versioned checksummed URLs in the
    install-docs.
-2. **Sample apps:** minimal SwiftUI + Jetpack Compose chat apps consuming
-   the packaged artifacts (the phase's success metric: a 1B Q4 model
-   on-device in a demo app).
+2. ~~**Sample apps**~~ ✅ shipped: `examples/swift-chat` (shared SwiftUI over
+   the packaged Swift Package — macOS app via `swift run`, iOS app via
+   XcodeGen), `examples/android-chat` (Compose over the packaged Gradle
+   module), `examples/react-native-chat` (Expo + TS SDK, the rung-0 loop).
+   All CI-built. **Still open: the success-metric run itself** — a 1B Q4
+   model on a physical device, which is a user-driven ladder-rung-4 step
+   (see §5); the apps default to `smollm2-135m-q4` for exactly that reason.
 3. **Native TS transport:** napi module for Node, JSI/TurboModule for React
    Native over `sapient-ffi` — same `SapientClient` API, no server.
 4. **On-device niceties:** iOS/Android thermal governor hooks
