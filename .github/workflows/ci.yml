@@ -136,6 +136,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Package + smoke test
         run: ./scripts/package-swift.sh --smoke
+      - name: Build macOS example app
+        run: swift build --package-path examples/swift-chat
+      - name: Build iOS example app (simulator)
+        run: |
+          brew install xcodegen
+          cd examples/swift-chat
+          xcodegen
+          xcodebuild -project SapientChat.xcodeproj -scheme SapientChatApp \
+            -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO
       - uses: actions/upload-artifact@v4
         with:
           name: sapient-swift
@@ -153,6 +162,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Package
         run: ./scripts/package-android.sh
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Build Compose example app
+        working-directory: examples/android-chat
+        run: ./gradlew :app:assembleDebug --console=plain
       - uses: actions/upload-artifact@v4
         with:
           name: sapient-android
@@ -178,3 +194,9 @@ jobs:
           cache-dependency-path: sdks/typescript/package-lock.json
       - run: npm ci
       - run: npm test
+      - name: React Native example — typecheck + headless bundle
+        working-directory: examples/react-native-chat
+        run: |
+          npm ci
+          npm run typecheck
+          npm run bundle:check

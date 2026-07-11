@@ -273,6 +273,10 @@ the **safe-testing guide for personal devices**):
     process.stdout.write(tok);
   ```
 
+- **Sample apps** — [`examples/`](examples): streaming chat apps for all
+  three stacks (SwiftUI macOS+iOS, Jetpack Compose, React Native/Expo),
+  CI-built.
+
 ---
 
 ## Supported Models

@@ -119,6 +119,8 @@ crates/
 
 sdks/typescript/            # @openhorizon/sapient — TS SDK for Node.js/React Native
                             #   (talks to `sapient serve`; npm test = tsc + node --test)
+examples/                   # Sample chat apps: swift-chat (SwiftUI macOS+iOS),
+                            #   android-chat (Compose), react-native-chat (Expo)
 install.sh / install.ps1    # Install scripts (attached to releases)
 Formula/sapient.rb          # Homebrew formula template
 .github/workflows/          # CI and release automation
@@ -303,7 +305,7 @@ Run serially (`--test-threads=1`) when multiple tests touch the same cached mode
 ### FFI and TypeScript SDK tests
 
 ```bash
-# sapient-ffi: unit tests, plus an ignored real-model e2e (downloads SmolLM2-135M)
+# sapient-ffi: unit tests, plus an ignored real-model e2e (downloads `smollm2-135m-q4`)
 cargo test -p sapient-ffi
 cargo test -p sapient-ffi --release -- --ignored
 

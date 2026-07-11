@@ -1,0 +1,54 @@
+# XcodeGen spec for the iOS app target (the .xcodeproj is generated, not
+# committed):
+#
+#   ./scripts/package-swift.sh      # from the repo root, once
+#   cd examples/swift-chat
+#   xcodegen                        # brew install xcodegen
+#   open SapientChat.xcodeproj      # or xcodebuild — see README.md
+#
+# Simulator builds need no signing. For a personal device, select your
+# (free) personal team in Signing & Capabilities — and read
+# docs/MOBILE.md §5 first.
+name: SapientChat
+options:
+  bundleIdPrefix: so.openhorizon
+  deploymentTarget:
+    iOS: "16.0"
+  # xcodegen ≥2.44 stamps the Xcode 16 project format (objectVersion 77),
+  # which Xcode 15 (CI's macos-14 default) refuses to open ("future Xcode
+  # project file format"). The object graph is still classic PBX, so
+  # downgrade the stamp to the Xcode 14 format after generation.
+  postGenCommand: >-
+    sed -i '' -e 's/objectVersion = 77;/objectVersion = 56;/'
+    -e '/minimizedProjectReferenceProxies/d'
+    -e 's/preferredProjectObjectVersion = 77;/compatibilityVersion = "Xcode 14.0";/'
+    SapientChat.xcodeproj/project.pbxproj
+packages:
+  # NOTE: must not share a name with the project/target — a "SapientChat"
+  # package reference left the generated scheme's buildable with an empty
+  # supported-platforms list (xcodebuild: "Ineligible destinations").
+  SapientChatPackage:
+    path: .
+targets:
+  SapientChat:
+    type: application
+    platform: iOS
+    sources:
+      - iOS
+    dependencies:
+      - package: SapientChatPackage
+        product: SapientChatUI
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: so.openhorizon.sapient.chat
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_CFBundleDisplayName: SAPIENT Chat
+        SWIFT_VERSION: "5.9"
+schemes:
+  SapientChatApp:
+    build:
+      targets:
+        SapientChat: all
+    run:
+      config: Debug
