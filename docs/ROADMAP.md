@@ -328,9 +328,21 @@ napi/JSI over the FFI crate next). Full build/use/testing guide (including the
   `health`. Zero runtime deps; 11 tests (SSE decoder units + mock-serve
   integration incl. mid-stream cancellation) + verified live against
   `sapient serve` with a real model.
-- [ ] **Packaging** — XCFramework build script + Swift Package; Android AAR
-  (`.so` + generated Kotlin + JNA dep); CI cross-compile jobs for all three
-  mobile targets + a TS SDK job.
+- [x] **Packaging** (2026-07-11) — `scripts/package-swift.sh`: XCFramework
+  (iOS device + simulator + **macOS** slices) + a complete local Swift
+  Package (generated source + binaryTarget + the link flags a consumer needs
+  — `c++`/`iconv`/`SystemConfiguration`/`CoreFoundation`, the last two found
+  by the smoke gate, not guessed); `--smoke` compiles and **runs** a macOS
+  binary against the packaged static lib (catalog surface, no download — CI
+  runs it). `scripts/package-android.sh`: NDK auto-location, drop-in
+  `com.android.library` Gradle module (arm64-v8a `.so` + generated Kotlin +
+  JNA dep wired; `--emulator` adds x86_64), uniffi exports verified via
+  `llvm-nm`. CI jobs `package-swift` (macos-14) + `package-android`
+  (ubuntu); release.yml builds both and attaches
+  `sapient-swift.zip`/`sapient-android.zip` (+ sha256) to every release via
+  the existing artifact globs. Sizes: Swift zip ~180 MB (static slices;
+  a linked app pays ~53 MB), Android zip ~4 MB. Still open: SwiftPM-registry
+  / Maven publishing (needs Gradle-in-CI; the module bundle stands in).
 - [ ] **Sample apps** — minimal SwiftUI + Jetpack Compose chat apps.
 - [ ] **Native TS transport** — napi module (Node) and JSI/TurboModule (React
   Native) over `sapient-ffi`; same `SapientClient` API, no server process.

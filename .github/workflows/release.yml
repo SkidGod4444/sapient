@@ -240,10 +240,60 @@ jobs:
             ${{ env.ARCHIVE }}.sha256
           retention-days: 1
 
+  # ── Mobile packaging (Phase 11) — Swift Package + Android module ────────────
+  # The zips land on the release via the existing artifacts/**/*.zip glob.
+  mobile-swift:
+    name: Package — Swift/Apple
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - name: Package + smoke test
+        run: ./scripts/package-swift.sh --smoke
+      - name: Generate SHA256 checksum
+        run: |
+          cd dist/mobile
+          shasum -a 256 sapient-swift.zip > sapient-swift.zip.sha256
+          cat sapient-swift.zip.sha256
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sapient-swift
+          path: |
+            dist/mobile/sapient-swift.zip
+            dist/mobile/sapient-swift.zip.sha256
+          retention-days: 1
+
+  mobile-android:
+    name: Package — Android
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - name: Package
+        run: ./scripts/package-android.sh
+      - name: Generate SHA256 checksum
+        run: |
+          cd dist/mobile
+          sha256sum sapient-android.zip > sapient-android.zip.sha256
+          cat sapient-android.zip.sha256
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sapient-android
+          path: |
+            dist/mobile/sapient-android.zip
+            dist/mobile/sapient-android.zip.sha256
+          retention-days: 1
+
   # ── Create GitHub Release ───────────────────────────────────────────────────
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, mobile-swift, mobile-android]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (for release notes)

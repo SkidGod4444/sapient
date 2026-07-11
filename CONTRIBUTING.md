@@ -312,9 +312,12 @@ cd sdks/typescript && npm install && npm test
 ```
 
 If you change `sapient-ffi`'s exported API, regenerate and eyeball the bindings
-(they are not committed): see `docs/MOBILE.md` §4. **Before testing on a phone,
-read `docs/MOBILE.md` §5** — the safe-testing ladder for personal hardware is a
-project rule, not a suggestion.
+(they are not committed): see `docs/MOBILE.md` §4. The packaging scripts double
+as integration tests — `./scripts/package-swift.sh --smoke` compiles and runs a
+real macOS binary against the packaged XCFramework (CI runs this too), and
+`./scripts/package-android.sh` verifies the `.so`'s uniffi exports. **Before
+testing on a phone, read `docs/MOBILE.md` §5** — the safe-testing ladder for
+personal hardware is a project rule, not a suggestion.
 
 ### Benchmarks
 

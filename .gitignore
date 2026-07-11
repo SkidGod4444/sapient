@@ -5,3 +5,5 @@ __pycache__/
 *.pyc
 .firecrawl
 results/
+# Mobile packaging output (scripts/package-{swift,android}.sh)
+dist/
