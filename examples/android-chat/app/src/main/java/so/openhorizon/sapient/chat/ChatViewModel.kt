@@ -3,6 +3,7 @@ package so.openhorizon.sapient.chat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -34,7 +35,12 @@ class ChatViewModel : ViewModel() {
 
     private var session: LlmSession? = null
     private var loadedAlias: String? = null
-    private val cancelled = AtomicBoolean(false)
+    // Per-send flag: a new send must NOT reopen an old stream's cancel gate,
+    // so each turn gets its own; this points at the active turn's.
+    private var activeCancel: AtomicBoolean? = null
+    // Bumped by every send and by Clear — stale writes from an old stream
+    // (tokens, status flips) compare against it and drop.
+    private val turnEpoch = AtomicInteger(0)
 
     val isBusy: StateFlow<Status> get() = status
 
@@ -49,13 +55,17 @@ class ChatViewModel : ViewModel() {
         val alias = modelAlias.value
         val needsLoad = session == null || loadedAlias != alias
         status.value = if (needsLoad) Status.Loading(alias) else Status.Generating
-        cancelled.set(false)
+
+        val epoch = turnEpoch.incrementAndGet()
+        val cancelled = AtomicBoolean(false)
+        activeCancel = cancelled
 
         val listener = object : TokenListener {
             override fun onToken(token: String): Boolean {
                 messages.update { msgs ->
-                    // The transcript can be cleared mid-stream — never index blindly.
-                    if (replyIndex > msgs.lastIndex) return@update msgs
+                    // The transcript can be cleared (and refilled by a new
+                    // turn) while a stream drains — drop stale tokens.
+                    if (turnEpoch.get() != epoch || replyIndex > msgs.lastIndex) return@update msgs
                     msgs.toMutableList().also {
                         it[replyIndex] = it[replyIndex].copy(text = it[replyIndex].text + token)
                     }
@@ -77,10 +87,11 @@ class ChatViewModel : ViewModel() {
                 } else {
                     session!!
                 }
-                status.value = Status.Generating
+                if (turnEpoch.get() == epoch) status.value = Status.Generating
                 active.chatStream(prompt, listener)
-                status.value = Status.Idle
+                if (turnEpoch.get() == epoch) status.value = Status.Idle
             } catch (e: Exception) {
+                if (turnEpoch.get() != epoch) return@launch
                 messages.update { msgs ->
                     if (replyIndex > msgs.lastIndex) return@update msgs
                     msgs.toMutableList().also { it[replyIndex] = it[replyIndex].copy(text = "") }
@@ -91,13 +102,15 @@ class ChatViewModel : ViewModel() {
     }
 
     /** Stop mid-reply; the partial text stays in the transcript by design. */
-    fun stop() = cancelled.set(true)
+    fun stop() {
+        activeCancel?.set(true)
+    }
 
     fun clearConversation() {
-        // Stop any in-flight stream first so a late token can't target a
-        // reply bubble that no longer exists (the UI disables Clear while
-        // busy, but the stream outlives the tap by at least one token).
-        cancelled.set(true)
+        // Stop any in-flight stream and invalidate its epoch so a late token
+        // or status flip from the old turn can't touch the fresh transcript.
+        turnEpoch.incrementAndGet()
+        activeCancel?.set(true)
         session?.reset()
         messages.value = emptyList()
         status.value = Status.Idle

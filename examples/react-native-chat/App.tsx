@@ -42,6 +42,9 @@ export default function App() {
   const [status, setStatus] = useState<Status>({ kind: 'idle' });
   const history = useRef<ChatMessage[]>([]);
   const abort = useRef<AbortController | null>(null);
+  // Bumped by every send and by Clear — stale writes from an old stream
+  // (status flips, history pushes) compare against it and drop.
+  const turn = useRef(0);
   const listRef = useRef<FlatList<Bubble>>(null);
 
   const client = useMemo(
@@ -63,6 +66,7 @@ export default function App() {
     setStatus({ kind: 'generating' });
 
     history.current.push({ role: 'user', content: prompt });
+    const myTurn = ++turn.current;
     const controller = new AbortController();
     abort.current = controller;
     let reply = '';
@@ -76,29 +80,30 @@ export default function App() {
           prev.map((b) => (b.id === replyId ? { ...b, text: reply } : b)),
         );
       }
+      if (myTurn !== turn.current) return; // Clear reset history under us
       history.current.push({ role: 'assistant', content: reply });
       setStatus({ kind: 'idle' });
     } catch (e) {
+      if (myTurn !== turn.current) return; // Clear reset history under us
       if (controller.signal.aborted) {
-        // Stopped by the user — keep the partial reply as context. Skip if
-        // the abort came from Clear (history was reset under us).
-        if (history.current.at(-1)?.role === 'user') {
-          history.current.push({ role: 'assistant', content: reply });
-        }
+        // Stopped by the user — keep the partial reply as context.
+        history.current.push({ role: 'assistant', content: reply });
         setStatus({ kind: 'idle' });
       } else {
         history.current.pop();
         setStatus({ kind: 'error', detail: e instanceof Error ? e.message : String(e) });
       }
     } finally {
-      abort.current = null;
+      if (abort.current === controller) abort.current = null;
     }
   }, [client, draft, model, status.kind]);
 
   const stop = useCallback(() => abort.current?.abort(), []);
   const clear = useCallback(() => {
-    // Abort any in-flight stream first — Clear stays enabled while
-    // generating, and an orphaned stream would keep appending to history.
+    // Abort any in-flight stream and invalidate its turn — Clear stays
+    // enabled while generating, and an orphaned stream would otherwise
+    // keep appending to the fresh history.
+    turn.current++;
     abort.current?.abort();
     history.current = [];
     setBubbles([]);

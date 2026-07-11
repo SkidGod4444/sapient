@@ -52,6 +52,9 @@ public final class ChatViewModel: ObservableObject {
     private var session: LlmSession?
     private var loadedAlias: String?
     private var cancellation: Cancellation?
+    /// Bumped by every send and by Clear — stale async writes from an old
+    /// stream (status flips, error text) compare against it and drop.
+    private var turnEpoch = 0
     /// The FFI is blocking by design — keep it off the main thread and off
     /// the Swift cooperative pool. Serial: one turn at a time.
     private let inferenceQueue = DispatchQueue(label: "so.openhorizon.sapient.inference")
@@ -75,20 +78,26 @@ public final class ChatViewModel: ObservableObject {
         guard !prompt.isEmpty, !isBusy else { return }
 
         messages.append(DisplayMessage(role: .user, text: prompt))
-        messages.append(DisplayMessage(role: .assistant, text: ""))
-        let replyIndex = messages.count - 1
+        let reply = DisplayMessage(role: .assistant, text: "")
+        messages.append(reply)
+        let replyId = reply.id
 
         let alias = modelAlias
         let needsLoad = session == nil || loadedAlias != alias
         status = needsLoad ? .loading(model: alias) : .generating
 
+        turnEpoch += 1
+        let epoch = turnEpoch
         let cancellation = Cancellation()
         self.cancellation = cancellation
         let listener = StreamListener(cancellation: cancellation) { [weak self] token in
             DispatchQueue.main.async {
-                // The transcript can be cleared mid-stream — never index blindly.
-                guard let self, replyIndex < self.messages.count else { return }
-                self.messages[replyIndex].text += token
+                // Route by bubble identity, not index — the transcript can be
+                // cleared (and refilled by a new turn) while a stream drains.
+                guard let self,
+                      let idx = self.messages.firstIndex(where: { $0.id == replyId })
+                else { return }
+                self.messages[idx].text += token
             }
         }
 
@@ -113,15 +122,22 @@ public final class ChatViewModel: ObservableObject {
                         self?.backendLabel = active.backendLabel()
                     }
                 }
-                DispatchQueue.main.async { self?.status = .generating }
+                DispatchQueue.main.async {
+                    guard let self, epoch == self.turnEpoch else { return }
+                    self.status = .generating
+                }
                 _ = try active.chatStream(userMessage: prompt, listener: listener)
-                DispatchQueue.main.async { self?.status = .idle }
+                DispatchQueue.main.async {
+                    guard let self, epoch == self.turnEpoch else { return }
+                    self.status = .idle
+                }
             } catch {
                 DispatchQueue.main.async {
-                    if let self, replyIndex < self.messages.count {
-                        self.messages[replyIndex].text = ""
+                    guard let self, epoch == self.turnEpoch else { return }
+                    if let idx = self.messages.firstIndex(where: { $0.id == replyId }) {
+                        self.messages[idx].text = ""
                     }
-                    self?.status = .failed("\(error)")
+                    self.status = .failed("\(error)")
                 }
             }
         }
@@ -134,8 +150,9 @@ public final class ChatViewModel: ObservableObject {
     }
 
     public func clearConversation() {
-        // Stop any in-flight stream first so a late token can't target a
-        // reply bubble that no longer exists.
+        // Stop any in-flight stream and invalidate its epoch so a late token
+        // or status flip from the old turn can't touch the fresh transcript.
+        turnEpoch += 1
         cancellation?.cancel()
         session?.reset()
         messages.removeAll()
