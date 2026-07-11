@@ -335,7 +335,19 @@ impl LlmSession {
 
     /// Streaming chat turn: `listener.on_token` receives each text fragment
     /// as it decodes; returning `false` cancels generation. Returns the full
-    /// (possibly cancelled-partial) reply, which is committed to history.
+    /// (possibly cancelled-partial) reply, which is committed to history —
+    /// on cancel that is intentional, so the history matches what the user
+    /// saw and the prefix cache stays aligned with the engine's KV state.
+    ///
+    /// Error semantics: `Err` covers failures *starting* the stream (prompt
+    /// formatting, runtime). A generation failure *mid-stream* follows the
+    /// engine's in-band convention — the pipeline emits a final
+    /// `Error: …` text fragment and ends the stream (exactly what
+    /// `sapient serve` SSE clients see) — because the token channel carries
+    /// only `String`, with no sideband to distinguish error-close from
+    /// normal close. Promoting that to a typed error needs a
+    /// `Result`-carrying stream in `sapient-generate` (shared with
+    /// serve/CLI) and is tracked as a Phase 11 follow-up rung.
     pub fn chat_stream(
         &self,
         user_message: String,

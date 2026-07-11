@@ -13,7 +13,7 @@ One Rust core, three ways in. The chat/generate engine (`sapient-generate`'s
 `Pipeline`) is wrapped once by a small, stable, blocking API and surfaced per
 ecosystem:
 
-```
+```text
                          ┌────────────────────────────┐
                          │       your application      │
                          └──┬─────────┬───────────┬───┘

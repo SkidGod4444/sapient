@@ -338,6 +338,12 @@ napi/JSI over the FFI crate next). Full build/use/testing guide (including the
   (`ProcessInfo.thermalState` / `PowerManager.getThermalStatus` feeding the
   existing effective-threads mechanism), download-progress callbacks,
   `HF_HOME`-in-app-caches helper, background-safe eviction.
+- [ ] **Typed mid-stream errors** — the pipeline's token stream carries only
+  `String`; a generation failure mid-stream arrives as an in-band `Error: …`
+  fragment (serve's SSE clients see the same). Promoting that to a typed
+  error for `sapient-ffi`'s `chat_stream` (and serve) needs a
+  `Result`-carrying stream in `sapient-generate` — engine-API change, its own
+  rung (flagged in PR #38 review).
 - **Success metric:** a 1B Q4 model running on-device in a demo app (see
   MOBILE.md §5.2 for why 1B, not 3B, is the phone ceiling).
 

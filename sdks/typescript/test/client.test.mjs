@@ -29,6 +29,9 @@ async function withServer(handler, run) {
   try {
     await run(new SapientClient({ baseUrl: `http://127.0.0.1:${port}` }), port);
   } finally {
+    // A failed test can leave a streaming connection open; close() alone
+    // would then hang until the runner's timeout.
+    server.closeAllConnections?.();
     server.close();
   }
 }
@@ -139,6 +142,21 @@ test('models() unwraps the OpenAI list shape', async () => {
       const models = await client.models();
       assert.equal(models.length, 1);
       assert.equal(models[0].id, 'qwen2.5-0.5b');
+    },
+  );
+});
+
+test('health() returns the server report', async () => {
+  await withServer(
+    (req, res) => {
+      assert.equal(req.url, '/v1/health');
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ status: 'ok', version: '0.5.3', resident_models: [] }));
+    },
+    async (client) => {
+      const health = await client.health();
+      assert.equal(health.status, 'ok');
+      assert.deepEqual(health.resident_models, []);
     },
   );
 });
