@@ -1,0 +1,35 @@
+{
+  "name": "@openhorizon/sapient",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for SAPIENT — talk to a local `sapient serve` from Node.js or React Native, with streaming chat",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SkidGod4444/sapient.git",
+    "directory": "sdks/typescript"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test \"test/*.test.mjs\""
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  }
+}

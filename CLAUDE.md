@@ -42,6 +42,7 @@ SAPIENT is a pure-Rust edge LLM inference engine. The crates form a clear depend
 
 ```
 sapient-cli              ← the `sapient` binary (chat, transcribe, speak, converse, stats, pull, run, models, update …)
+sapient-ffi              ← embedding surface (UniFFI → Swift/Kotlin; staticlib/cdylib for iOS/Android) over sapient-generate
   sapient-generate       ← Pipeline API (from_pretrained / from_gguf, generate, chat, stream) + TranscribePipeline + SpeakPipeline
     sapient-models       ← forward engines (LLM) + AudioEngine (Whisper) + SnacDecoder (TTS) + weight loading
     sapient-hub          ← HF Hub client, curated registry, ModelInfo, WhisperConfig
@@ -298,6 +299,17 @@ The streaming generator (`generate_stream`) buffers decoded text and withholds u
 
 ### Builtin chat-template guessing for GGUFs (`builtin_template_for`)
 GGUFs without an embedded/HF chat template get a builtin guessed from arch + model_type + id (`pipeline.rs`). Traps: SmolLM2 is Llama-arch but **ChatML**-trained — without its own arm it fell into the generic `mt.contains("llama")` → LLAMA2 `[INST]` arm and answered every prompt with an immediate end-of-turn (empty reply; raw `run` completion worked, and the safetensors repo worked because it carries the real template). DeepSeek-R1-distill (also Llama-arch, its own `<|User|>` template) still hits the LLAMA2 arm — untested because not downloaded.
+
+### sapient-ffi + SDKs (Phase 5 / Notion Phase 11 — mobile & embedding)
+`crates/sapient-ffi` is the stable embedding surface: a **blocking** UniFFI (0.29 proc-macro, no UDL) API — `version()`, `list_models()`, `resolve_alias()`, and `LlmSession` (`load` constructor → `chat` / `chat_stream(listener)` / `reset` / `transcript` / `backend_label` / `is_mmap`) — generating idiomatic Swift and Kotlin. Full build/usage/dev-safety guide: `docs/MOBILE.md`. Invariants:
+- **Futures run on runtime workers, never `block_on` on the caller** (`run_async` = `runtime().spawn` + `block_on(JoinHandle)`): `Pipeline` internals use `tokio::task::block_in_place`, which panics on a thread that isn't a multi-thread-runtime worker. A private 2-worker runtime lives in a `OnceLock`; inference itself runs on tokio's blocking pool.
+- **Streaming/cancellation:** `TokenListener::on_token(String) -> bool` (`#[uniffi::export(with_foreign)]`); `chat_stream` consumes `ReceiverStream::into_inner()` with `blocking_recv()` on the caller's thread (never on a worker — would panic). Returning `false` breaks the loop and drops the receiver → the engine's next `blocking_send` errs → generation halts. No new engine API.
+- **Sessions hold history + enable the prefix cache** (`enable_prefix_cache` before wrapping in `Arc`), so multi-turn FFI chats only prefill the new turn, like serve. History commits only after a successful turn; sampling options map all-unset → `Greedy`, else `Combined` with neutral defaults (`top_k 0`/`top_p 1.0`/`rp 1.0` are no-ops).
+- **Bindings are generated, not committed:** `cargo run -p sapient-ffi --features bindgen --bin uniffi-bindgen -- generate --library target/release/libsapient_ffi.dylib --language swift --language kotlin --out-dir …`. The `uniffi-bindgen` bin is behind the `bindgen` feature (`required-features`) so normal builds don't pull uniffi's CLI deps.
+- **Cross-compile facts (validated):** iOS device/sim need `IPHONEOS_DEPLOYMENT_TARGET=14.0` — without it onig_sys's C objects target the SDK default and the link dies on `___chkstk_darwin`; Android (NDK 26, API 24) needs `CXX_aarch64_linux_android` set too (esaxx-rs is C++), yielding a ~11 MB arm64 `.so`. The chain pulls **no audio-device libs** (cpal is feature-gated off in sapient-audio by default). Crate is `publish = false` (repo-wide no-crates.io rule) with crate-type `["lib","staticlib","cdylib"]`.
+- Tests: unit (catalog/options/backend mapping) + `e2e_chat_and_stream_smollm2` (**ignored** — downloads SmolLM2-135M; run `cargo test -p sapient-ffi --release -- --ignored`; asserts streamed tokens concat == returned reply and transcript length 4).
+
+**TypeScript SDK (`sdks/typescript`, npm `@openhorizon/sapient`)** — Node ≥ 18 / React Native client for `sapient serve` (the Phase-11 Node/RN path until the native napi/JSI transport lands): `SapientClient` (`chat`, `chatStream` async-generator over SSE, `models`, `health`) with **injectable `fetch`** (RN's built-in fetch can't stream — callers pass `expo/fetch`; breaking out of `chatStream` cancels the reader → cancels generation server-side). Zero runtime deps; `SseDecoder` is a pure incremental parser. `npm test` = tsc build + `node --test "test/*.test.mjs"` (Node 24 needs the glob, not a bare dir) — SSE units + a mock-serve integration suite (shapes mirror `server.rs`); also verified live against a real `sapient serve`. The npm package is **not published yet** — publishing is a release-flow decision.
 
 ## Adding a new model architecture
 

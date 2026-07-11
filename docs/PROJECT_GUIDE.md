@@ -55,6 +55,13 @@ summary before we dive into the internals.
 Intel/AMD/Nvidia — and Intel Macs ship a `-gpu` (wgpu→Metal) build. There's also a live
 `sapient stats` resource monitor.
 
+**Mobile & embedding SDKs (Phase 11 first cut).** SAPIENT can now be embedded outside Rust:
+the `sapient-ffi` crate generates **Swift** (iOS/macOS) and **Kotlin** (Android/JVM) bindings
+via UniFFI (chat + streaming with cancel, model catalog), with iOS and Android cross-compiles
+validated; Node.js / React Native get the first-party **TypeScript SDK**
+(`@openhorizon/sapient`) that talks to `sapient serve` with streaming. Build recipes and the
+personal-device safe-testing ladder live in `docs/MOBILE.md`.
+
 **Performance leap (Sprint 1–3 engine overhaul):**
 - Flash-Edge attention: online-softmax tiled algorithm — O(head_dim) working memory, NEON `vfmaq_f32`.
 - Q8_0 KV cache: in-place mutable updates via `Tensor::as_bytes_mut()` — 4× RAM reduction vs F32 for long contexts.
@@ -465,6 +472,22 @@ libraries above.
 - `stats.rs` — `sapient stats` (aliases `top`/`monitor`): a ~1 Hz in-place TUI showing every
   `sapient` process's CPU% + RSS, per-core bars, system memory, on-disk model-cache footprint,
   and (on a GPU build) the detected accelerator. Ctrl-C to exit.
+
+### 📱 `sapient-ffi` — embedding SAPIENT in other languages (mobile & SDKs)
+The stable boundary layer for apps that aren't written in Rust. A small **blocking** API
+(`version()`, `list_models()`, `resolve_alias()`, and `LlmSession`: `load` → `chat` /
+`chat_stream` / `reset` / `transcript`) is exported through **UniFFI**, which generates
+idiomatic **Swift** (iOS/macOS) and **Kotlin** (Android/JVM) bindings from the compiled
+library. Streaming replies arrive through a `TokenListener` callback the app implements;
+returning `false` from it cancels generation. Internally a private tokio runtime drives the
+same `Pipeline` the CLI uses (prefix cache on, so multi-turn chats skip re-prefilling
+history). Cross-compiles are validated for iOS device/simulator and Android arm64.
+
+Node.js and React Native use the **TypeScript SDK** instead (`sdks/typescript`, npm name
+`@openhorizon/sapient`): a zero-dependency client that talks to `sapient serve` over its
+OpenAI-compatible API with streaming (`chatStream` async generator); a native on-device
+transport over `sapient-ffi` is the next rung. **Read `docs/MOBILE.md` before testing on a
+phone** — it has the build recipes and the safe-testing ladder for personal hardware.
 
 ---
 

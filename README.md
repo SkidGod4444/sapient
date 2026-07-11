@@ -239,6 +239,40 @@ let text = p.generate_with_config("Write a haiku about Rust", &cfg).await?;
 
 ---
 
+## SDKs — Swift · Kotlin · TypeScript (mobile & embedding)
+
+Embed the same engine outside Rust (first cut — see
+[`docs/MOBILE.md`](docs/MOBILE.md) for build recipes, packaging status, and
+the **safe-testing guide for personal devices**):
+
+- **Swift (iOS/macOS) & Kotlin (Android/JVM)** — generated from the
+  [`sapient-ffi`](crates/sapient-ffi) crate via UniFFI. One object API:
+  `LlmSession.load(model, options)` → `chat(...)` /
+  `chatStream(..., listener)` (token callback; return `false` to cancel) /
+  `reset()`. Cross-compiles validated for iOS device + simulator and Android
+  arm64.
+
+  ```swift
+  let session = try LlmSession.load(model: "qwen2.5-0.5b",
+                                    options: GenerationOptions(maxTokens: 256))
+  let reply = try session.chat(userMessage: "Hi!")
+  ```
+
+- **TypeScript (Node.js / React Native)** —
+  [`@openhorizon/sapient`](sdks/typescript): a zero-dependency client for
+  `sapient serve` with streaming chat (native on-device transport is the next
+  rung; the API won't change).
+
+  ```ts
+  import { SapientClient } from '@openhorizon/sapient';
+  const client = new SapientClient(); // http://127.0.0.1:11435
+  for await (const tok of client.chatStream(
+    [{ role: 'user', content: 'Tell me a haiku.' }], 'qwen2.5-0.5b'))
+    process.stdout.write(tok);
+  ```
+
+---
+
 ## Supported Models
 
 SAPIENT ships a **curated registry** — every model below is one whose architecture is

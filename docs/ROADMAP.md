@@ -61,6 +61,15 @@
   **Server (12.3) done:** `/v1/chat/completions` accepts OpenAI image parts as
   base64 data URIs, routed through `VlmPipeline` in a third LRU cache;
   remote image URLs are refused by design.
+- 🚧 **Mobile & embedding SDKs (Phase 5 / Notion Phase 11 — first cut)** — the
+  `sapient-ffi` crate (UniFFI): `LlmSession` chat + streaming-with-cancel over the
+  existing `Pipeline`, generating idiomatic **Swift** and **Kotlin** bindings;
+  cross-compiles validated for iOS device/simulator + Android arm64. Plus the
+  first-party **TypeScript SDK** (`sdks/typescript`, `@openhorizon/sapient`) for
+  Node.js / React Native — speaks to `sapient serve` today (streaming SSE,
+  verified against a live server), binds `sapient-ffi` natively next. Dev-safety
+  + build guide: [MOBILE.md](MOBILE.md). Remaining: packaging (XCFramework/AAR),
+  sample apps, native TS transport.
 - 🚧 **Streaming voice loop (Phase 10 first cut)** — incremental STT during speech
   (`LiveStt`, transcript ready at end-of-utterance), early-first-clause TTS handoff,
   barge-in (`SpeakerPlayback::clear` + mic monitor), per-turn latency breakdown.
@@ -290,12 +299,53 @@ Notion roadmap's Phase 8 — "Own the Raspberry Pi".)
 - [ ] Continuous (in-flight) batching + parallel slots + chunked prefill; paged KV (block pool) — large single-sequence-engine rewrite.
 - [ ] OpenAI-compatible `logprobs`, `n` parameters.
 
-## Phase 5 — Phones (iOS / Android)  → **`v0.4.0`**
-Most constrained, biggest "wow".
-- Library packaging: stable C FFI / UniFFI bindings; static lib for mobile.
-- Mobile mmap + thermal/throttle-aware scheduling.
-- Sample iOS (Swift) and Android (Kotlin/JNI) apps.
-- **Success metric:** a 1–3B Q4 model running on-device in a demo app.
+## Phase 5 — Mobile & embedding SDKs (Notion milestone: Phase 11)  → **`v0.6.x`**
+Most constrained, biggest "wow". Approach (2026-07-11 revision): one Rust FFI
+crate, three ecosystems — **Swift + Kotlin via UniFFI**, **Node.js/React
+Native via a first-party TypeScript SDK** (HTTP → `sapient serve` today,
+napi/JSI over the FFI crate next). Full build/use/testing guide (including the
+**personal-hardware safe-testing ladder**): [MOBILE.md](MOBILE.md).
+
+- [x] **`sapient-ffi` crate (UniFFI)** — blocking `LlmSession` API (load → chat /
+  chat_stream / reset / transcript) over the existing `Pipeline` (prefix cache
+  on, internal tokio runtime); streaming via a foreign `TokenListener` callback
+  whose `false` return cancels generation (drops the token channel — no new
+  engine API). `version()` / `list_models()` / `resolve_alias()`. Unit-tested +
+  ignored real-model e2e (chat + stream on SmolLM2-135M).
+- [x] **Swift + Kotlin bindings generation** — `uniffi-bindgen` (behind the
+  `bindgen` feature) emits `sapient_ffi.swift` (+ C header/modulemap;
+  `swiftc -parse` clean) and `sapient_ffi.kt` (JNA). Generated at build time,
+  not committed.
+- [x] **Mobile cross-compiles validated** — `aarch64-apple-ios` +
+  `aarch64-apple-ios-sim` staticlibs (needs `IPHONEOS_DEPLOYMENT_TARGET=14.0` —
+  else `___chkstk_darwin` link failure from onig_sys) and `aarch64-linux-android`
+  cdylib via NDK 26 (~11 MB `.so`; `CXX_aarch64_linux_android` required —
+  esaxx-rs is C++). Audio-device deps (cpal) stay out of this dependency chain
+  (feature-gated off).
+- [x] **TypeScript SDK first cut** (`sdks/typescript`, `@openhorizon/sapient`) —
+  `SapientClient` with injectable `fetch` (Node ≥ 18 / RN / expo-fetch):
+  `chat`, `chatStream` (SSE, break/abort cancels server-side), `models`,
+  `health`. Zero runtime deps; 11 tests (SSE decoder units + mock-serve
+  integration incl. mid-stream cancellation) + verified live against
+  `sapient serve` with a real model.
+- [ ] **Packaging** — XCFramework build script + Swift Package; Android AAR
+  (`.so` + generated Kotlin + JNA dep); CI cross-compile jobs for all three
+  mobile targets + a TS SDK job.
+- [ ] **Sample apps** — minimal SwiftUI + Jetpack Compose chat apps.
+- [ ] **Native TS transport** — napi module (Node) and JSI/TurboModule (React
+  Native) over `sapient-ffi`; same `SapientClient` API, no server process.
+- [ ] **On-device niceties** — iOS/Android thermal hooks
+  (`ProcessInfo.thermalState` / `PowerManager.getThermalStatus` feeding the
+  existing effective-threads mechanism), download-progress callbacks,
+  `HF_HOME`-in-app-caches helper, background-safe eviction.
+- [ ] **Typed mid-stream errors** — the pipeline's token stream carries only
+  `String`; a generation failure mid-stream arrives as an in-band `Error: …`
+  fragment (serve's SSE clients see the same). Promoting that to a typed
+  error for `sapient-ffi`'s `chat_stream` (and serve) needs a
+  `Result`-carrying stream in `sapient-generate` — engine-API change, its own
+  rung (flagged in PR #38 review).
+- **Success metric:** a 1B Q4 model running on-device in a demo app (see
+  MOBILE.md §5.2 for why 1B, not 3B, is the phone ceiling).
 
 ---
 
