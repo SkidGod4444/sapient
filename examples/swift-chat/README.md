@@ -39,9 +39,12 @@ appear — `xcrun simctl launch <sim> so.openhorizon.sapient.chat -autosend
 "Hi"` drives a real end-to-end turn on a simulator with no UI scripting
 (this is how the in-app inference gate was verified).
 
-Two integration notes baked into this example:
+Three integration notes baked into this example:
 - The SwiftPM package is named `SapientChatKit`, NOT `SapientChat` — a name
   collision with the Xcode project binds the app scheme to the package and
   destination resolution fails with "supported platforms is empty".
+- xcodegen ≥2.44 stamps the Xcode 16 project format (objectVersion 77),
+  which Xcode 15 refuses to open — `project.yml`'s `postGenCommand`
+  downgrades the generated project to the classic format automatically.
 - The FFI is blocking: all engine calls run on a dedicated serial
   `DispatchQueue`, never the main thread or the Swift cooperative pool.

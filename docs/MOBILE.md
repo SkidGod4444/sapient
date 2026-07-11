@@ -237,7 +237,7 @@ iOS enforces per-app memory limits (jetsam): a phone app that allocates more
 than roughly **50–60 % of device RAM** is killed on the spot, and the limit is
 lower in the background. Android's LMK behaves similarly under pressure.
 
-- **Dev default: `smollm2-135m-q4`** (~100 MB Q8). It loads in seconds and
+- **Dev default: `smollm2-135m-q4`** (~100 MB Q4 GGUF). It loads in seconds and
   exercises every code path. Only move up once the plumbing works.
 - **Phone ceiling: ~1B Q4** (e.g. `llama3.2-1b-q4`, ~0.8 GB) on a 6–8 GB
   device. `qwen2.5-0.5b` (~0.4 GB) is the comfortable middle.

@@ -20,8 +20,9 @@ npm start                                  # Expo — press i for iOS simulator,
 ```
 
 In the app, set **Base URL**:
-- iOS simulator / Android emulator on the same machine: `http://127.0.0.1:11435`
-  (Android emulator: `http://10.0.2.2:11435`)
+- iOS simulator (same machine): `http://127.0.0.1:11435`
+- Android emulator (same machine): `http://10.0.2.2:11435` — the emulator's
+  alias for the host's loopback; `127.0.0.1` is the emulator itself
 - Physical phone (Expo Go, same Wi-Fi): `http://<your-dev-machine-lan-ip>:11435`
 
 Streaming uses `expo/fetch` (RN's built-in fetch can't stream bodies) —

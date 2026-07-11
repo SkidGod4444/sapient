@@ -54,6 +54,8 @@ class ChatViewModel : ViewModel() {
         val listener = object : TokenListener {
             override fun onToken(token: String): Boolean {
                 messages.update { msgs ->
+                    // The transcript can be cleared mid-stream — never index blindly.
+                    if (replyIndex > msgs.lastIndex) return@update msgs
                     msgs.toMutableList().also {
                         it[replyIndex] = it[replyIndex].copy(text = it[replyIndex].text + token)
                     }
@@ -80,6 +82,7 @@ class ChatViewModel : ViewModel() {
                 status.value = Status.Idle
             } catch (e: Exception) {
                 messages.update { msgs ->
+                    if (replyIndex > msgs.lastIndex) return@update msgs
                     msgs.toMutableList().also { it[replyIndex] = it[replyIndex].copy(text = "") }
                 }
                 status.value = Status.Failed(e.message ?: e.toString())
@@ -91,6 +94,10 @@ class ChatViewModel : ViewModel() {
     fun stop() = cancelled.set(true)
 
     fun clearConversation() {
+        // Stop any in-flight stream first so a late token can't target a
+        // reply bubble that no longer exists (the UI disables Clear while
+        // busy, but the stream outlives the tap by at least one token).
+        cancelled.set(true)
         session?.reset()
         messages.value = emptyList()
         status.value = Status.Idle

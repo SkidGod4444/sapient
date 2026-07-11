@@ -80,8 +80,11 @@ export default function App() {
       setStatus({ kind: 'idle' });
     } catch (e) {
       if (controller.signal.aborted) {
-        // Stopped by the user — keep the partial reply as context.
-        history.current.push({ role: 'assistant', content: reply });
+        // Stopped by the user — keep the partial reply as context. Skip if
+        // the abort came from Clear (history was reset under us).
+        if (history.current.at(-1)?.role === 'user') {
+          history.current.push({ role: 'assistant', content: reply });
+        }
         setStatus({ kind: 'idle' });
       } else {
         history.current.pop();
@@ -94,6 +97,9 @@ export default function App() {
 
   const stop = useCallback(() => abort.current?.abort(), []);
   const clear = useCallback(() => {
+    // Abort any in-flight stream first — Clear stays enabled while
+    // generating, and an orphaned stream would keep appending to history.
+    abort.current?.abort();
     history.current = [];
     setBubbles([]);
     setStatus({ kind: 'idle' });

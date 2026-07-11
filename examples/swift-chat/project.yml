@@ -14,6 +14,15 @@ options:
   bundleIdPrefix: so.openhorizon
   deploymentTarget:
     iOS: "16.0"
+  # xcodegen ≥2.44 stamps the Xcode 16 project format (objectVersion 77),
+  # which Xcode 15 (CI's macos-14 default) refuses to open ("future Xcode
+  # project file format"). The object graph is still classic PBX, so
+  # downgrade the stamp to the Xcode 14 format after generation.
+  postGenCommand: >-
+    sed -i '' -e 's/objectVersion = 77;/objectVersion = 56;/'
+    -e '/minimizedProjectReferenceProxies/d'
+    -e 's/preferredProjectObjectVersion = 77;/compatibilityVersion = "Xcode 14.0";/'
+    SapientChat.xcodeproj/project.pbxproj
 packages:
   # NOTE: must not share a name with the project/target — a "SapientChat"
   # package reference left the generated scheme's buildable with an empty

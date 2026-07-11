@@ -85,7 +85,11 @@ public final class ChatViewModel: ObservableObject {
         let cancellation = Cancellation()
         self.cancellation = cancellation
         let listener = StreamListener(cancellation: cancellation) { [weak self] token in
-            DispatchQueue.main.async { self?.messages[replyIndex].text += token }
+            DispatchQueue.main.async {
+                // The transcript can be cleared mid-stream — never index blindly.
+                guard let self, replyIndex < self.messages.count else { return }
+                self.messages[replyIndex].text += token
+            }
         }
 
         // Capture the resolved session ON the main actor — the queue closure
@@ -114,7 +118,9 @@ public final class ChatViewModel: ObservableObject {
                 DispatchQueue.main.async { self?.status = .idle }
             } catch {
                 DispatchQueue.main.async {
-                    self?.messages[replyIndex].text = ""
+                    if let self, replyIndex < self.messages.count {
+                        self.messages[replyIndex].text = ""
+                    }
                     self?.status = .failed("\(error)")
                 }
             }
@@ -128,6 +134,9 @@ public final class ChatViewModel: ObservableObject {
     }
 
     public func clearConversation() {
+        // Stop any in-flight stream first so a late token can't target a
+        // reply bubble that no longer exists.
+        cancellation?.cancel()
         session?.reset()
         messages.removeAll()
         status = .idle
