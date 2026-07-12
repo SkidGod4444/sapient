@@ -360,12 +360,48 @@ napi/JSI over the FFI crate next). Full build/use/testing guide (including the
   dep). CI builds all three (simulator build / assembleDebug / headless
   Metro bundle). The success-metric device run (1B Q4 on a phone) is the
   user-driven ladder-rung-4 step.
-- [ ] **Native TS transport** — napi module (Node) and JSI/TurboModule (React
-  Native) over `sapient-ffi`; same `SapientClient` API, no server process.
-- [ ] **On-device niceties** — iOS/Android thermal hooks
-  (`ProcessInfo.thermalState` / `PowerManager.getThermalStatus` feeding the
-  existing effective-threads mechanism), download-progress callbacks,
-  `HF_HOME`-in-app-caches helper, background-safe eviction.
+- [x] **GPU on-device** (2026-07-12) — the mobile packages compile the wgpu
+  backend in by default (`--cpu-only` opts out): **Metal on iOS/macOS, Vulkan
+  on Android**. `Auto` now probes for a usable adapter before routing to wgpu
+  (the `whisper_wants_wgpu` precedent, extended to the LLM path) so a broken
+  driver or GPU-less emulator falls back to CPU instead of failing; explicit
+  `--backend wgpu` still errors clearly. **Gate passed: a real inference turn
+  inside the iOS-simulator app on wgpu→Metal** (header label "wgpu (Apple iOS
+  simulator GPU (Metal))"); quantized-resident Q4_K/Q6_K + f16 KV ran under
+  the simulator's Apple2-family caps. Traps recorded: wgpu-hal's Metal
+  surface needs `Metal`+`QuartzCore` linked (smoke gate caught
+  `kCAGravityTopLeft`); Xcode does NOT re-link an updated xcframework at the
+  same path (delete DerivedData or you silently keep the old engine).
+  Research-informed honesty (docs/MOBILE.md §6): decode starts near CPU
+  parity (GEMV-shaped kernels); prefill + power draw are the day-one wins;
+  the 55–70 tok/s MLX/llama.cpp-class ceiling is the existing multi-row
+  kernel project. iOS forbids background GPU — the sample app stops
+  generation on `scenePhase != .active`. Physical-device measurements are
+  the user-driven ladder-rung-4 step.
+- [ ] **Native TS transport** — napi module (Node) and RN JSI/TurboModule
+  over `sapient-ffi`; same `SapientClient` API, no server process. Research
+  settled the design (2026-07-12): **uniffi-bindgen-react-native** (ubrn,
+  Mozilla/Filament) generating TS + JSI C++ + a TurboModule from the
+  existing proc-macro crate; requires async FFI exports (blocking calls
+  would freeze/deadlock Hermes) and a Transport seam in the TS SDK
+  (HttpTransport = today's code, NativeTransport in the RN package); Expo
+  Go is permanently out — `expo prebuild` + dev builds; uniffi must be
+  pinned in lockstep with ubrn (=0.29.3 ↔ ubrn 0.29.3-1, or both to 0.31).
+- [x] **On-device thermal hooks** (rung 11.3, 2026-07-12) — the CPU
+  `ThermalGovernor` gained an external 4-level override
+  (`set_external_thermal_level`; stricter-of sysfs/external wins; one
+  `SAPIENT_THERMAL=off` hatch for both) exported over FFI as
+  `set_thermal_level(nominal|fair|serious|critical)` → full/¾/½/¼ decode
+  threads. Sample apps are the reference wiring: Swift observes
+  `thermalStateDidChangeNotification` (+ Low Power Mode clamps to ≥fair)
+  with the two verified traps handled (read-before-register or the
+  notification never fires; the iOS 15 `isLowPowerModeEnabled` deadlock —
+  hop queues); Kotlin uses `PowerManager.addThermalStatusListener` with
+  Google's ADPF mapping (SEVERE+ → critical). Differentiating: verified
+  that MLC/llama.cpp-mobile/MediaPipe ship NO engine-side thermal response,
+  and RunAnywhere only routes to cloud on thermal. Still open from this
+  rung: download-progress callbacks, background-safe eviction; battery
+  admission gates are app-layer policy (MOBILE.md §7).
 - [ ] **Typed mid-stream errors** — the pipeline's token stream carries only
   `String`; a generation failure mid-stream arrives as an in-band `Error: …`
   fragment (serve's SSE clients see the same). Promoting that to a typed

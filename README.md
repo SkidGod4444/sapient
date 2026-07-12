@@ -252,7 +252,11 @@ the **safe-testing guide for personal devices**):
   `reset()`. Ready-made packages ship with every release
   (`sapient-swift.zip` — XCFramework + Swift Package for iOS/simulator/macOS;
   `sapient-android.zip` — drop-in Gradle module), or build them locally with
-  `scripts/package-swift.sh` / `scripts/package-android.sh`.
+  `scripts/package-swift.sh` / `scripts/package-android.sh`. The packages
+  include **GPU inference (wgpu: Metal on iOS, Vulkan on Android)** — `auto`
+  probes for a GPU at load and falls back to CPU — and **thermal governance**:
+  forward the OS thermal signal via `setThermalLevel(...)` and the engine
+  sheds decode threads as the phone heats (MOBILE.md §6–7).
 
   ```swift
   let session = try LlmSession.load(model: "qwen2.5-0.5b",

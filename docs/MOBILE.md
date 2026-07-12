@@ -425,6 +425,7 @@ fair/serious/critical on a physical iPhone to test all of this.
 | `chatStream()` throws "not streamable" in React Native | RN's fetch can't stream — pass `expo/fetch` in `ClientOptions.fetch`, or use `chat()`. |
 | UI freezes during generation | You called the blocking API on the main thread. Background queue / `Dispatchers.IO` / worker. |
 | Kotlin bindgen warning "ktlint not found" | Cosmetic — the generated `.kt` is valid, just unformatted. |
+| App still runs the OLD engine after re-running `package-swift.sh` | Xcode caches the binaryTarget: an updated `SapientFFI.xcframework` at the same path is NOT re-linked. Delete the app's DerivedData (and `.build` for SwiftPM CLI builds) and rebuild. Verify with `session.backendLabel()`. |
 
 ## 9. Remaining rungs (tracked in ROADMAP.md Phase 5 / Notion Phase 11)
 
