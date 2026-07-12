@@ -141,6 +141,10 @@ android {
 dependencies {
     // UniFFI's Kotlin bindings load the native lib through JNA.
     implementation("net.java.dev.jna:jna:5.14.0@aar")
+    // The async FFI exports (load_session, chat_async, chat_stream_async,
+    // chat_messages_stream) generate suspend functions —
+    // suspendCancellableCoroutine needs kotlinx-coroutines.
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
 }
 EOF
 cat > "$MOD/README.md" <<'EOF'
