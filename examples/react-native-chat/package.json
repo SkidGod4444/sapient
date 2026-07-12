@@ -6,12 +6,18 @@
   "scripts": {
     "start": "expo start",
     "typecheck": "tsc --noEmit",
-    "bundle:check": "expo export --platform ios --output-dir .expo-export"
+    "bundle:check": "expo export --platform ios --output-dir .expo-export",
+    "prebuild:ios": "expo prebuild -p ios --no-install",
+    "prebuild:android": "expo prebuild -p android",
+    "android": "expo run:android",
+    "ios": "expo run:ios"
   },
   "dependencies": {
     "@openhorizon/sapient": "file:../../sdks/typescript",
+    "@openhorizon/sapient-react-native": "file:../../sdks/react-native",
     "expo": "~52.0.0",
     "expo-asset": "~11.0.5",
+    "expo-file-system": "~18.0.12",
     "expo-status-bar": "~2.0.1",
     "react": "18.3.1",
     "react-native": "0.76.5"

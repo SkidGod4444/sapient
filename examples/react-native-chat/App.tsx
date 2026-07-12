@@ -1,18 +1,26 @@
-// SAPIENT chat over the TypeScript SDK — the React Native "rung 0" dev loop
-// from docs/MOBILE.md: inference runs on `sapient serve` (your dev machine /
-// server / Pi), the phone only renders. Streaming uses expo/fetch because
-// RN's built-in fetch cannot stream response bodies.
+// SAPIENT chat over the TypeScript SDK — now with BOTH transports:
 //
-//   sapient serve                       # on your dev machine
-//   npm install && npm start           # here; point Base URL at its LAN IP
+//   • on-device (default): the engine runs inside the app over
+//     @openhorizon/sapient-react-native (sapient-ffi → UniFFI → JSI).
+//     Needs a development build (`npx expo prebuild` + run) — Expo Go
+//     cannot load native code.
+//   • server: HTTP to `sapient serve` (the rung-0 dev loop from
+//     docs/MOBILE.md; streaming via expo/fetch because RN's built-in
+//     fetch cannot stream response bodies).
+//
+// The SapientClient API is identical over both — only the transport
+// changes. Toggle at runtime in the header.
 import { SapientClient, type ChatMessage } from '@openhorizon/sapient';
+import { NativeTransport } from '@openhorizon/sapient-react-native';
 import { fetch as expoFetch } from 'expo/fetch';
+import * as FileSystem from 'expo-file-system';
 import { StatusBar } from 'expo-status-bar';
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Button,
   FlatList,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   SafeAreaView,
   StyleSheet,
@@ -32,14 +40,25 @@ type Status =
   | { kind: 'generating' }
   | { kind: 'error'; detail: string };
 
+type Mode = 'device' | 'server';
+
+// Keep model downloads inside the app sandbox's Caches so the OS can
+// reclaim them and uninstall removes them (docs/MOBILE.md §5.4).
+const cacheDir = FileSystem.cacheDirectory
+  ? FileSystem.cacheDirectory.replace(/^file:\/\//, '') + 'sapient'
+  : undefined;
+
 export default function App() {
+  const [mode, setMode] = useState<Mode>('device');
   // Simulators/emulators can reach the host via localhost; a physical phone
-  // needs the dev machine's LAN IP (same Wi-Fi).
+  // needs the dev machine's LAN IP (same Wi-Fi). Android emulator: 10.0.2.2.
   const [baseUrl, setBaseUrl] = useState('http://127.0.0.1:11435');
-  const [model, setModel] = useState('qwen2.5-0.5b');
+  // Dev default per docs/MOBILE.md §5.2 — smallest model until boring.
+  const [model, setModel] = useState('smollm2-135m-q4');
   const [draft, setDraft] = useState('');
   const [bubbles, setBubbles] = useState<Bubble[]>([]);
   const [status, setStatus] = useState<Status>({ kind: 'idle' });
+  const [backend, setBackend] = useState<string | null>(null);
   const history = useRef<ChatMessage[]>([]);
   const abort = useRef<AbortController | null>(null);
   // Bumped by every send and by Clear — stale writes from an old stream
@@ -47,13 +66,19 @@ export default function App() {
   const turn = useRef(0);
   const listRef = useRef<FlatList<Bubble>>(null);
 
+  // One resident model at a time — the transport survives mode flips so a
+  // loaded model stays warm when toggling back.
+  const native = useMemo(() => new NativeTransport({ cacheDir }), []);
   const client = useMemo(
-    () => new SapientClient({ baseUrl, fetch: expoFetch as unknown as typeof fetch }),
-    [baseUrl],
+    () =>
+      mode === 'device'
+        ? new SapientClient({ transport: native })
+        : new SapientClient({ baseUrl, fetch: expoFetch as unknown as typeof fetch }),
+    [mode, baseUrl, native],
   );
 
-  const send = useCallback(async () => {
-    const prompt = draft.trim();
+  const send = useCallback(async (promptOverride?: string) => {
+    const prompt = (promptOverride ?? draft).trim();
     if (!prompt || status.kind === 'generating') return;
     setDraft('');
 
@@ -83,6 +108,7 @@ export default function App() {
       if (myTurn !== turn.current) return; // Clear reset history under us
       history.current.push({ role: 'assistant', content: reply });
       setStatus({ kind: 'idle' });
+      if (mode === 'device') setBackend(native.backendLabel());
     } catch (e) {
       if (myTurn !== turn.current) return; // Clear reset history under us
       if (controller.signal.aborted) {
@@ -96,7 +122,25 @@ export default function App() {
     } finally {
       if (abort.current === controller) abort.current = null;
     }
-  }, [client, draft, model, status.kind]);
+  }, [client, draft, mode, model, native, status.kind]);
+
+  // Test/demo hook (the RN twin of the Swift app's `-autosend`): launching
+  // via `sapientchat://chat?autosend=<prompt>` sends one message on start —
+  // `xcrun simctl openurl <sim> "sapientchat://chat?autosend=Hi"` drives a
+  // real end-to-end on-device turn with no UI scripting.
+  const sendRef = useRef(send);
+  sendRef.current = send;
+  useEffect(() => {
+    Linking.getInitialURL().then((url) => {
+      const m = url && /[?&]autosend=([^&]+)/.exec(url);
+      if (m) sendRef.current(decodeURIComponent(m[1]));
+    });
+    const sub = Linking.addEventListener('url', ({ url }) => {
+      const m = /[?&]autosend=([^&]+)/.exec(url);
+      if (m) sendRef.current(decodeURIComponent(m[1]));
+    });
+    return () => sub.remove();
+  }, []);
 
   const stop = useCallback(() => abort.current?.abort(), []);
   const clear = useCallback(() => {
@@ -110,27 +154,39 @@ export default function App() {
     setStatus({ kind: 'idle' });
   }, []);
 
+  const subtitle =
+    status.kind === 'generating'
+      ? 'generating…'
+      : status.kind === 'error'
+        ? `error: ${status.detail}`
+        : mode === 'device'
+          ? `on-device${backend ? ` · ${backend}` : ''} · ${model}`
+          : `via sapient serve · ${model}`;
+
   return (
     <SafeAreaView style={styles.root}>
       <StatusBar style="auto" />
       <View style={styles.header}>
-        <Text style={styles.title}>SAPIENT Chat</Text>
-        <Text style={styles.subtitle}>
-          {status.kind === 'generating'
-            ? 'generating…'
-            : status.kind === 'error'
-              ? `error: ${status.detail}`
-              : `via sapient serve · ${model}`}
-        </Text>
-        <View style={styles.settingsRow}>
-          <TextInput
-            style={[styles.settingsInput, { flex: 3 }]}
-            value={baseUrl}
-            onChangeText={setBaseUrl}
-            autoCapitalize="none"
-            autoCorrect={false}
-            placeholder="http://<dev-machine-ip>:11435"
+        <View style={styles.titleRow}>
+          <Text style={styles.title}>SAPIENT Chat</Text>
+          <Button
+            title={mode === 'device' ? 'on-device' : 'server'}
+            onPress={() => setMode((m) => (m === 'device' ? 'server' : 'device'))}
+            disabled={status.kind === 'generating'}
           />
+        </View>
+        <Text style={styles.subtitle}>{subtitle}</Text>
+        <View style={styles.settingsRow}>
+          {mode === 'server' && (
+            <TextInput
+              style={[styles.settingsInput, { flex: 3 }]}
+              value={baseUrl}
+              onChangeText={setBaseUrl}
+              autoCapitalize="none"
+              autoCorrect={false}
+              placeholder="http://<dev-machine-ip>:11435"
+            />
+          )}
           <TextInput
             style={[styles.settingsInput, { flex: 2 }]}
             value={model}
@@ -168,12 +224,12 @@ export default function App() {
             onChangeText={setDraft}
             placeholder="Message…"
             editable={status.kind !== 'generating'}
-            onSubmitEditing={send}
+            onSubmitEditing={() => send()}
           />
           {status.kind === 'generating' ? (
             <Button title="Stop" onPress={stop} />
           ) : (
-            <Button title="Send" onPress={send} disabled={!draft.trim()} />
+            <Button title="Send" onPress={() => send()} disabled={!draft.trim()} />
           )}
           <Button title="Clear" onPress={clear} disabled={bubbles.length === 0} />
         </View>
@@ -185,6 +241,7 @@ export default function App() {
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#fff' },
   header: { padding: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: '#ccc' },
+  titleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   title: { fontSize: 17, fontWeight: '600' },
   subtitle: { fontSize: 12, color: '#666', marginTop: 2 },
   settingsRow: { flexDirection: 'row', gap: 8, marginTop: 8 },

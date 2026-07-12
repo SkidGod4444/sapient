@@ -23,10 +23,12 @@ ecosystem:
               UniFFI-generated bindings         @openhorizon/sapient
                     │             │                   │
                     ▼             ▼                   ▼
-              ┌──────────────────────────┐   ┌──────────────────────┐
-              │ crates/sapient-ffi       │   │ HTTP → sapient serve │  (today)
-              │ staticlib / cdylib       │   │ napi / RN-JSI → ffi  │  (next rung)
-              └────────────┬─────────────┘   └──────────────────────┘
+              ┌──────────────────────────┐   ┌──────────────────────────┐
+              │ crates/sapient-ffi       │   │ Transport-pluggable:     │
+              │ staticlib / cdylib       │   │  HTTP → sapient serve    │
+              └────────────┬─────────────┘   │  NativeTransport → ffi   │
+                           │                 │  (RN on-device, JSI)     │
+                           │                 └──────────────────────────┘
                            ▼
               sapient-generate → sapient-models → sapient-backends-cpu
               (Pipeline, chat, streaming, prefix cache — the same engine
@@ -64,7 +66,8 @@ Key design decisions (why it looks like this):
 | Android build | `aarch64-linux-android` cdylib via NDK ≥ 26 | ✅ in the module (~11 MB `.so`, API 24+; `--emulator` adds x86_64) |
 | CI / release artifacts | `package-swift` + `package-android` jobs; zips attach to GitHub releases | ✅ shipped (CI + release.yml) |
 | Node.js | `@openhorizon/sapient` → `sapient serve` HTTP | ✅ shipped; 12 tests + live-serve verified |
-| React Native | same TS SDK (`fetch` injectable; `expo/fetch` for streaming) | ✅ non-streamed + streamed via expo/fetch; on-device native module = later rung |
+| React Native (server mode) | same TS SDK (`fetch` injectable; `expo/fetch` for streaming) | ✅ non-streamed + streamed via expo/fetch |
+| React Native **on-device** | `sdks/react-native` — uniffi-bindgen-react-native → JSI TurboModule; `NativeTransport` plugs into `SapientClient` | ✅ shipped — needs a dev build (`expo prebuild`), Expo Go can't load it |
 | Sample apps | SwiftUI (macOS + iOS) · Jetpack Compose · React Native/Expo — `examples/` | ✅ shipped; all three CI-built (APK/simulator/Metro-bundle) |
 | GPU inference on-device | wgpu — **Metal on iOS, Vulkan on Android** — packaged in by default | ✅ in the packages (`--cpu-only` opts out); `auto` probes the adapter and falls back to CPU. See §6. |
 | On-device thermal governance | `set_thermal_level()` FFI ← `ProcessInfo.thermalState` / `PowerManager` thermal status | ✅ shipped — engine sheds decode threads under OS thermal pressure. See §7. |
@@ -209,11 +212,27 @@ for await (const tok of client.chatStream(
   process.stdout.write(tok);
 ```
 
-React Native: `new SapientClient({ baseUrl: 'http://<your-mac-lan-ip>:11435' })`
-works out of the box for `chat()`; for `chatStream()` pass `fetch` from
-`expo/fetch` (RN's built-in fetch can't stream bodies). The native on-device
-module (napi/JSI over `sapient-ffi`) is the next rung — the client API will
-not change.
+React Native has BOTH transports behind the same client:
+
+- **Server mode** (works in Expo Go): `new SapientClient({ baseUrl:
+  'http://<your-mac-lan-ip>:11435' })`; for `chatStream()` pass `fetch` from
+  `expo/fetch` (RN's built-in fetch can't stream bodies).
+- **On-device** (`sdks/react-native`, needs an `expo prebuild` dev build):
+
+```ts
+import { SapientClient } from '@openhorizon/sapient';
+import { NativeTransport } from '@openhorizon/sapient-react-native';
+const client = new SapientClient({
+  transport: new NativeTransport({ cacheDir: /* app caches dir */ }),
+});
+// same chat()/chatStream() calls — the engine runs in-process (UniFFI→JSI),
+// GPU by default with CPU fallback.
+```
+
+Build the native library once with `npm run ubrn:ios` / `ubrn:android` in
+`sdks/react-native` (uniffi-bindgen-react-native drives cargo + codegen; the
+npm ubrn version is PINNED in lockstep with the crate's `uniffi = "=0.29.3"`).
+The Node-side napi transport is a later rung — the client API will not change.
 
 ## 5. 🔒 Testing during development WITHOUT risking your hardware
 
@@ -245,6 +264,11 @@ lower in the background. Android's LMK behaves similarly under pressure.
 
 - **Dev default: `smollm2-135m-q4`** (~100 MB Q4 GGUF). It loads in seconds and
   exercises every code path. Only move up once the plumbing works.
+  **Expectation-setting:** a 135M model validates *plumbing*, not
+  intelligence — it drifts off-topic and rarely stops on its own; that is
+  the model, not a bug. The samples decode **greedily** (deterministic,
+  least drift; raising temperature makes a tiny model worse). Coherent
+  answers start at `qwen2.5-0.5b` and get real at `llama3.2-1b-q4`.
 - **Phone ceiling: ~1B Q4** (e.g. `llama3.2-1b-q4`, ~0.8 GB) on a 6–8 GB
   device. `qwen2.5-0.5b` (~0.4 GB) is the comfortable middle.
 - **Never ship a 3B+ file to a phone "to see what happens"** — you'll spend
@@ -322,6 +346,20 @@ and Android today**, so during development *you* are the governor:
   ladder.
 
 ## 6. GPU on-device (wgpu: Metal on iOS, Vulkan on Android)
+
+Both gates below are real screenshots from the iOS simulator — the SwiftUI
+app and the React Native app each running a full inference turn **inside the
+app process on the wgpu→Metal GPU path** (the header label is the engine's
+own resolved backend, not UI copy):
+
+| SwiftUI (`examples/swift-chat`) | React Native (`examples/react-native-chat`) |
+|---|---|
+| ![Swift app on-device GPU turn](assets/mobile/swift-ios-gpu-turn.png) | ![RN app on-device GPU turn](assets/mobile/rn-ios-ondevice-gpu-turn.png) |
+
+*(Both show `smollm2-135m-q4` — the plumbing-validation size. The rambling
+answers are what a 135M model IS; see §5.2. The samples decode greedily —
+deterministic and least drift-prone — and coherence starts at
+`qwen2.5-0.5b`/`llama3.2-1b-q4`.)*
 
 The packaged mobile libraries compile the `wgpu` backend in by default
 (`package-swift.sh` / `package-android.sh`; `--cpu-only` opts out). With

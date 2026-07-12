@@ -226,6 +226,10 @@ extern "C" {
         RustBuffer name, 
         RustCallStatus *uniffi_out_err
     );
+    void uniffi_sapient_ffi_fn_func_set_cache_dir(
+        RustBuffer path, 
+        RustCallStatus *uniffi_out_err
+    );
     void uniffi_sapient_ffi_fn_func_set_thermal_level(
         RustBuffer level, 
         RustCallStatus *uniffi_out_err
@@ -451,6 +455,8 @@ extern "C" {
     uint16_t uniffi_sapient_ffi_checksum_func_load_session(
     );
     uint16_t uniffi_sapient_ffi_checksum_func_resolve_alias(
+    );
+    uint16_t uniffi_sapient_ffi_checksum_func_set_cache_dir(
     );
     uint16_t uniffi_sapient_ffi_checksum_func_set_thermal_level(
     );
@@ -2472,6 +2478,14 @@ NativeSapientFfi::NativeSapientFfi(
             return this->cpp_uniffi_sapient_ffi_fn_func_resolve_alias(rt, thisVal, args, count);
         }
     );
+    props["ubrn_uniffi_sapient_ffi_fn_func_set_cache_dir"] = jsi::Function::createFromHostFunction(
+        rt,
+        jsi::PropNameID::forAscii(rt, "ubrn_uniffi_sapient_ffi_fn_func_set_cache_dir"),
+        1,
+        [this](jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_uniffi_sapient_ffi_fn_func_set_cache_dir(rt, thisVal, args, count);
+        }
+    );
     props["ubrn_uniffi_sapient_ffi_fn_func_set_thermal_level"] = jsi::Function::createFromHostFunction(
         rt,
         jsi::PropNameID::forAscii(rt, "ubrn_uniffi_sapient_ffi_fn_func_set_thermal_level"),
@@ -2936,6 +2950,14 @@ NativeSapientFfi::NativeSapientFfi(
             return this->cpp_uniffi_sapient_ffi_checksum_func_resolve_alias(rt, thisVal, args, count);
         }
     );
+    props["ubrn_uniffi_sapient_ffi_checksum_func_set_cache_dir"] = jsi::Function::createFromHostFunction(
+        rt,
+        jsi::PropNameID::forAscii(rt, "ubrn_uniffi_sapient_ffi_checksum_func_set_cache_dir"),
+        0,
+        [this](jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_uniffi_sapient_ffi_checksum_func_set_cache_dir(rt, thisVal, args, count);
+        }
+    );
     props["ubrn_uniffi_sapient_ffi_checksum_func_set_thermal_level"] = jsi::Function::createFromHostFunction(
         rt,
         jsi::PropNameID::forAscii(rt, "ubrn_uniffi_sapient_ffi_checksum_func_set_thermal_level"),
@@ -3350,6 +3372,16 @@ jsi::Value NativeSapientFfi::cpp_uniffi_sapient_ffi_fn_func_resolve_alias(jsi::R
 
         
         return uniffi::sapient_ffi::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeSapientFfi::cpp_uniffi_sapient_ffi_fn_func_set_cache_dir(jsi::Runtime& rt, const jsi::Value& thisVal, const jsi::Value* args, size_t count) {
+        RustCallStatus status = uniffi::sapient_ffi::Bridging<RustCallStatus>::rustSuccess(rt);
+        uniffi_sapient_ffi_fn_func_set_cache_dir(uniffi::sapient_ffi::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[0]), 
+            &status
+        );
+        uniffi::sapient_ffi::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status, args[count - 1]);
+
+        
+        return jsi::Value::undefined();
 }
 jsi::Value NativeSapientFfi::cpp_uniffi_sapient_ffi_fn_func_set_thermal_level(jsi::Runtime& rt, const jsi::Value& thisVal, const jsi::Value* args, size_t count) {
         RustCallStatus status = uniffi::sapient_ffi::Bridging<RustCallStatus>::rustSuccess(rt);
@@ -3798,6 +3830,13 @@ jsi::Value NativeSapientFfi::cpp_uniffi_sapient_ffi_checksum_func_load_session(j
 }
 jsi::Value NativeSapientFfi::cpp_uniffi_sapient_ffi_checksum_func_resolve_alias(jsi::Runtime& rt, const jsi::Value& thisVal, const jsi::Value* args, size_t count) {
         auto value = uniffi_sapient_ffi_checksum_func_resolve_alias(
+        );
+
+        
+        return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeSapientFfi::cpp_uniffi_sapient_ffi_checksum_func_set_cache_dir(jsi::Runtime& rt, const jsi::Value& thisVal, const jsi::Value* args, size_t count) {
+        auto value = uniffi_sapient_ffi_checksum_func_set_cache_dir(
         );
 
         

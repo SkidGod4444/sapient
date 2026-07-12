@@ -314,7 +314,10 @@ cd sdks/typescript && npm install && npm test
 ```
 
 If you change `sapient-ffi`'s exported API, regenerate and eyeball the bindings
-(they are not committed): see `docs/MOBILE.md` §4. The packaging scripts double
+(Swift/Kotlin are not committed; the React Native package's generated TS/C++ in
+`sdks/react-native/{src,cpp}/generated` IS committed — regenerate it with
+`npm run ubrn:ios` there, which also applies the `ubrn:postgen` fix-up): see
+`docs/MOBILE.md` §4. The packaging scripts double
 as integration tests — `./scripts/package-swift.sh --smoke` compiles and runs a
 real macOS binary against the packaged XCFramework (CI runs this too), and
 `./scripts/package-android.sh` verifies the `.so`'s uniffi exports. Both build

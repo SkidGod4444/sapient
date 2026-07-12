@@ -135,6 +135,21 @@ export function resolveAlias(name: string): string /*throws*/ {
     ));
     }
 /**
+ * Point the model cache (`HF_HOME`) somewhere sensible for the platform —
+ * on mobile, the app's Caches directory, so the OS can reclaim downloads
+ * and uninstall removes them (docs/MOBILE.md §5.4). Call BEFORE the first
+ * session load. Swift/Kotlin hosts can equally `setenv("HF_HOME", …)`;
+ * JS hosts (React Native) have no setenv, hence this export.
+ */
+export function setCacheDir(path: string): void {uniffiCaller.rustCall(
+            /*caller:*/ (callStatus) => { nativeModule().ubrn_uniffi_sapient_ffi_fn_func_set_cache_dir(
+        FfiConverterString.lower(path),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift,
+    );
+    }
+/**
  * Feed the host OS's thermal state into the engine. The decode thread target
  * shrinks as pressure rises (fair → ¾ of cores, serious → ½, critical → ¼)
  * and restores when the device cools — same mechanism as the Linux sysfs
@@ -1394,6 +1409,9 @@ function uniffiEnsureInitialized() {
     }
     if (nativeModule().ubrn_uniffi_sapient_ffi_checksum_func_resolve_alias() !== 55233) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_sapient_ffi_checksum_func_resolve_alias");
+    }
+    if (nativeModule().ubrn_uniffi_sapient_ffi_checksum_func_set_cache_dir() !== 9493) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_sapient_ffi_checksum_func_set_cache_dir");
     }
     if (nativeModule().ubrn_uniffi_sapient_ffi_checksum_func_set_thermal_level() !== 45426) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_sapient_ffi_checksum_func_set_thermal_level");

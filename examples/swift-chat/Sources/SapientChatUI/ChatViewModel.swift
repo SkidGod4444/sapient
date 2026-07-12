@@ -151,9 +151,12 @@ public final class ChatViewModel: ObservableObject {
                 if let existing = existingSession {
                     active = existing
                 } else {
+                    // Greedy decoding: deterministic and least drift-prone — the right
+                    // default for the tiny dev models (docs/MOBILE.md §5.2); raise
+                    // temperature only with 0.5B+ models.
                     active = try LlmSession.load(
                         model: alias,
-                        options: GenerationOptions(maxTokens: 512, temperature: 0.7)
+                        options: GenerationOptions(maxTokens: 512)
                     )
                     DispatchQueue.main.async {
                         self?.session = active

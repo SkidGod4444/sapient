@@ -146,11 +146,22 @@ pub fn resolve_alias(name: String) -> Result<String, SapientError> {
     })
 }
 
+/// Point the model cache (`HF_HOME`) somewhere sensible for the platform —
+/// on mobile, the app's Caches directory, so the OS can reclaim downloads
+/// and uninstall removes them (docs/MOBILE.md §5.4). Call BEFORE the first
+/// session load. Swift/Kotlin hosts can equally `setenv("HF_HOME", …)`;
+/// JS hosts (React Native) have no setenv, hence this export.
+#[uniffi::export]
+pub fn set_cache_dir(path: String) {
+    std::env::set_var("HF_HOME", path);
+}
+
 // ── Thermal (roadmap 11.3) ───────────────────────────────────────────────────
 
 /// Host-OS thermal pressure. iOS `ProcessInfo.thermalState` maps 1:1;
-/// Android `PowerManager` thermal status maps NONE/LIGHT→NOMINAL,
-/// MODERATE→FAIR, SEVERE→SERIOUS, CRITICAL+→CRITICAL.
+/// Android `PowerManager` thermal status maps per Google's ADPF guidance:
+/// NONE→NOMINAL, LIGHT→FAIR, MODERATE→SERIOUS, SEVERE and above→CRITICAL
+/// ("SEVERE+ = drop below the sustainable level").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum ThermalLevel {
     Nominal,
@@ -480,9 +491,12 @@ where
     F: FnOnce() -> Result<T, SapientError> + Send + 'static,
     T: Send + 'static,
 {
-    runtime().spawn_blocking(f).await.map_err(|e| SapientError::Internal {
-        reason: format!("sapient-ffi worker join error: {e}"),
-    })?
+    runtime()
+        .spawn_blocking(f)
+        .await
+        .map_err(|e| SapientError::Internal {
+            reason: format!("sapient-ffi worker join error: {e}"),
+        })?
 }
 
 /// Async version of [`LlmSession::load`] (a free function — uniffi
@@ -543,10 +557,7 @@ fn to_chat_messages(messages: Vec<Message>) -> Result<Vec<ChatMessage>, SapientE
 #[uniffi::export]
 impl LlmSession {
     /// Async version of [`Self::chat`].
-    pub async fn chat_async(
-        self: Arc<Self>,
-        user_message: String,
-    ) -> Result<String, SapientError> {
+    pub async fn chat_async(self: Arc<Self>, user_message: String) -> Result<String, SapientError> {
         unblock(move || self.chat(user_message)).await
     }
 

@@ -10,6 +10,7 @@ import {
   GenerationOptions,
   listModels,
   loadSession,
+  setCacheDir,
   version,
   type LlmSessionInterface,
   type Message,
@@ -28,9 +29,9 @@ type ChatResult = {
   content: string;
   model: string;
   finishReason: string | null;
-  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
 };
-type ModelInfo = { id: string; object?: string; owned_by?: string };
+type ModelInfo = { id: string; object: string; owned_by?: string };
 
 export interface NativeTransportOptions {
   /**
@@ -43,6 +44,13 @@ export interface NativeTransportOptions {
   topP?: number;
   /** `auto` (default: GPU when available, CPU fallback) | `cpu` | `wgpu`. */
   backend?: string;
+  /**
+   * Model-cache directory (`HF_HOME`) — pass the app's caches dir (e.g.
+   * `expo-file-system`'s `Paths.cache`/`cacheDirectory`, `file://` prefix
+   * stripped) so the OS can reclaim downloads and uninstall removes them.
+   * Applied before the first load.
+   */
+  cacheDir?: string;
 }
 
 /**
@@ -168,6 +176,7 @@ export class NativeTransport {
     if (this.loading) await this.loading.catch(() => {});
     if (this.session && this.loadedModel === model) return this.session;
 
+    if (this.options.cacheDir) setCacheDir(this.options.cacheDir);
     const opts = GenerationOptions.create({
       maxTokens: callOptions.maxTokens ?? this.options.maxTokens ?? 512,
       temperature: callOptions.temperature ?? this.options.temperature,

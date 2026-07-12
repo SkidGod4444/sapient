@@ -34,6 +34,7 @@ interface NativeModuleInterface {
     ubrn_uniffi_sapient_ffi_fn_func_list_models(uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     ubrn_uniffi_sapient_ffi_fn_func_load_session(model: Uint8Array, options: Uint8Array): bigint;
     ubrn_uniffi_sapient_ffi_fn_func_resolve_alias(name: Uint8Array, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
+    ubrn_uniffi_sapient_ffi_fn_func_set_cache_dir(path: Uint8Array, uniffi_out_err: UniffiRustCallStatus): void;
     ubrn_uniffi_sapient_ffi_fn_func_set_thermal_level(level: Uint8Array, uniffi_out_err: UniffiRustCallStatus): void;
     ubrn_uniffi_sapient_ffi_fn_func_thermal_level(uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     ubrn_uniffi_sapient_ffi_fn_func_version(uniffi_out_err: UniffiRustCallStatus): Uint8Array;
@@ -92,6 +93,7 @@ interface NativeModuleInterface {
     ubrn_uniffi_sapient_ffi_checksum_func_list_models(): number;
     ubrn_uniffi_sapient_ffi_checksum_func_load_session(): number;
     ubrn_uniffi_sapient_ffi_checksum_func_resolve_alias(): number;
+    ubrn_uniffi_sapient_ffi_checksum_func_set_cache_dir(): number;
     ubrn_uniffi_sapient_ffi_checksum_func_set_thermal_level(): number;
     ubrn_uniffi_sapient_ffi_checksum_func_thermal_level(): number;
     ubrn_uniffi_sapient_ffi_checksum_func_version(): number;

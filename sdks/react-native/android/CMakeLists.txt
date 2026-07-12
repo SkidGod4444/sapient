@@ -3,9 +3,12 @@ project(SapientReactNative)
 
 set (CMAKE_VERBOSE_MAKEFILE ON)
 
+# The module impl + JSI bindings are uniffi-bindgen-react-native output
+# (the scaffold's demo impl was removed).
 add_library(
     openhorizon-sapient-react-native    STATIC
-    ../cpp/SapientReactNativeImpl.cpp
+    ../cpp/openhorizon-sapient-react-native.cpp
+    ../cpp/generated/sapient_ffi.cpp
 )
 
 set_target_properties(
