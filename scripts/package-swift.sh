@@ -27,10 +27,14 @@ cd "$REPO_ROOT"
 
 OUT_DIR="dist/mobile"
 SMOKE=0
+# GPU (wgpu→Metal) is ON by default: `Auto` probes for an adapter at load and
+# falls back to CPU, so the GPU-featured library is safe everywhere.
+FEATURES="--features wgpu"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --smoke) SMOKE=1; shift ;;
     --out) OUT_DIR="$2"; shift 2 ;;
+    --cpu-only) FEATURES=""; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -51,13 +55,13 @@ for t in "$IOS_TARGET" "$SIM_TARGET" "$SIM_X86_TARGET"; do
   rustup target list --installed | grep -q "^$t\$" || rustup target add "$t"
 done
 
-echo "==> Building sapient-ffi static libs (this is the slow part)"
-cargo build -p sapient-ffi --release --target "$IOS_TARGET"
-cargo build -p sapient-ffi --release --target "$SIM_TARGET"
-cargo build -p sapient-ffi --release --target "$SIM_X86_TARGET"
-cargo build -p sapient-ffi --release --target "$MAC_TARGET"
+echo "==> Building sapient-ffi static libs (this is the slow part)${FEATURES:+ [gpu: wgpu]}"
+cargo build -p sapient-ffi --release --target "$IOS_TARGET" $FEATURES
+cargo build -p sapient-ffi --release --target "$SIM_TARGET" $FEATURES
+cargo build -p sapient-ffi --release --target "$SIM_X86_TARGET" $FEATURES
+cargo build -p sapient-ffi --release --target "$MAC_TARGET" $FEATURES
 # Host dylib for the bindings generator (reads exported metadata from it).
-cargo build -p sapient-ffi --release
+cargo build -p sapient-ffi --release $FEATURES
 
 # Universal simulator library — Xcode's generic iOS Simulator destination
 # links BOTH arm64 and x86_64; an arm64-only slice fails with
@@ -123,6 +127,9 @@ let package = Package(
                 // reqwest/hyper-util read system proxy settings on Apple.
                 .linkedFramework("SystemConfiguration"),
                 .linkedFramework("CoreFoundation"),
+                // wgpu's Metal backend (GPU inference) — CAMetalLayer &co.
+                .linkedFramework("Metal"),
+                .linkedFramework("QuartzCore"),
             ]
         ),
     ]
@@ -173,6 +180,7 @@ EOF
     -I "$MAC_SLICE_DIR/Headers" \
     -L "$MAC_SLICE_DIR" -lsapient_ffi -lc++ -liconv \
     -framework SystemConfiguration -framework CoreFoundation \
+    -framework Metal -framework QuartzCore \
     -o "$SMOKE_DIR/smoke"
   "$SMOKE_DIR/smoke"
   echo "==> Smoke test PASSED"

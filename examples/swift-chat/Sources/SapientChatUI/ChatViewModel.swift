@@ -45,6 +45,9 @@ public final class ChatViewModel: ObservableObject {
     @Published public private(set) var messages: [DisplayMessage] = []
     @Published public private(set) var status: Status = .idle
     @Published public private(set) var backendLabel: String?
+    /// Non-nil while the OS reports thermal pressure (shown in the header;
+    /// the engine is already shedding decode threads via `setThermalLevel`).
+    @Published public private(set) var thermalLabel: String?
     /// Dev default per docs/MOBILE.md §5.2: iterate on the smallest model;
     /// switch to e.g. `llama3.2-1b-q4` only once the plumbing is boring.
     @Published public var modelAlias = "smollm2-135m-q4"
@@ -65,6 +68,42 @@ public final class ChatViewModel: ObservableObject {
         if let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
             setenv("HF_HOME", caches.appendingPathComponent("sapient").path, 1)
         }
+        observeThermalState()
+    }
+
+    /// Feed the OS thermal signal into the engine (docs/MOBILE.md §Thermal):
+    /// the decode thread target shrinks under pressure and restores on cool.
+    /// Two documented traps live here: `thermalState` MUST be read once
+    /// BEFORE registering for the notification or it never fires, and
+    /// `isLowPowerModeEnabled` must NOT be read synchronously inside the
+    /// power-state callback (iOS 15 deadlock, FB9741207) — hence the hop.
+    private func observeThermalState() {
+        let push: @Sendable () -> Void = { [weak self] in
+            let pi = ProcessInfo.processInfo
+            var level: ThermalLevel
+            switch pi.thermalState {
+            case .nominal: level = .nominal
+            case .fair: level = .fair
+            case .serious: level = .serious
+            case .critical: level = .critical
+            @unknown default: level = .serious
+            }
+            // Low Power Mode already down-clocks CPU/GPU — never run full-fat.
+            if pi.isLowPowerModeEnabled, level == .nominal { level = .fair }
+            setThermalLevel(level: level)
+            DispatchQueue.main.async {
+                self?.thermalLabel = level == .nominal ? nil : "thermal: \(level)"
+            }
+        }
+        push() // read-before-register is REQUIRED for the notification to fire
+        NotificationCenter.default.addObserver(
+            forName: ProcessInfo.thermalStateDidChangeNotification,
+            object: nil, queue: nil
+        ) { _ in push() } // arbitrary thread — the engine setter is an atomic store
+        NotificationCenter.default.addObserver(
+            forName: .NSProcessInfoPowerStateDidChange,
+            object: nil, queue: nil
+        ) { _ in DispatchQueue.global(qos: .utility).async { push() } }
     }
 
     public var isBusy: Bool {

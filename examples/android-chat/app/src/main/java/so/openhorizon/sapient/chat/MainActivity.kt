@@ -1,6 +1,8 @@
 package so.openhorizon.sapient.chat
 
+import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.system.Os
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -15,6 +17,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import java.io.File
+import uniffi.sapient_ffi.ThermalLevel
+import uniffi.sapient_ffi.setThermalLevel
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -23,7 +27,30 @@ class MainActivity : ComponentActivity() {
         // them and uninstall removes them (docs/MOBILE.md §5.4). Must happen
         // before the first LlmSession.load().
         Os.setenv("HF_HOME", File(cacheDir, "sapient").absolutePath, true)
+        observeThermalStatus()
         setContent { MaterialTheme { ChatScreen() } }
+    }
+
+    // Feed the OS thermal signal into the engine (docs/MOBILE.md §Thermal):
+    // the decode thread target shrinks under pressure, restores on cool.
+    // Push the current status once — the device can already be warm.
+    // Mapping follows Google's ADPF guidance: SEVERE and above means "drop
+    // below the sustainable level", which is the engine's critical (¼) cap.
+    private fun observeThermalStatus() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        val pm = getSystemService(PowerManager::class.java) ?: return
+        val push = { status: Int ->
+            setThermalLevel(
+                when {
+                    status >= PowerManager.THERMAL_STATUS_SEVERE -> ThermalLevel.CRITICAL
+                    status >= PowerManager.THERMAL_STATUS_MODERATE -> ThermalLevel.SERIOUS
+                    status >= PowerManager.THERMAL_STATUS_LIGHT -> ThermalLevel.FAIR
+                    else -> ThermalLevel.NOMINAL
+                }
+            )
+        }
+        push(pm.currentThermalStatus)
+        pm.addThermalStatusListener { push(it) }
     }
 }
 

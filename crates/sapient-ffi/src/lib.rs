@@ -146,6 +146,49 @@ pub fn resolve_alias(name: String) -> Result<String, SapientError> {
     })
 }
 
+// ── Thermal (roadmap 11.3) ───────────────────────────────────────────────────
+
+/// Host-OS thermal pressure. iOS `ProcessInfo.thermalState` maps 1:1;
+/// Android `PowerManager` thermal status maps NONE/LIGHT→NOMINAL,
+/// MODERATE→FAIR, SEVERE→SERIOUS, CRITICAL+→CRITICAL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ThermalLevel {
+    Nominal,
+    Fair,
+    Serious,
+    Critical,
+}
+
+/// Feed the host OS's thermal state into the engine. The decode thread target
+/// shrinks as pressure rises (fair → ¾ of cores, serious → ½, critical → ¼)
+/// and restores when the device cools — same mechanism as the Linux sysfs
+/// governor, fed by the platform's callback instead of a sensor file. Cheap
+/// and thread-safe: call it directly from the OS notification/listener
+/// (register at startup AND push the current state once — apps can already be
+/// warm when launched). See `docs/MOBILE.md` §"Thermal" for the per-platform
+/// wiring recipe.
+#[uniffi::export]
+pub fn set_thermal_level(level: ThermalLevel) {
+    sapient_generate::set_external_thermal_level(match level {
+        ThermalLevel::Nominal => 0,
+        ThermalLevel::Fair => 1,
+        ThermalLevel::Serious => 2,
+        ThermalLevel::Critical => 3,
+    });
+}
+
+/// The thermal level most recently fed to [`set_thermal_level`]
+/// (`Nominal` when never called). For app diagnostics/UI.
+#[uniffi::export]
+pub fn thermal_level() -> ThermalLevel {
+    match sapient_generate::external_thermal_level() {
+        0 => ThermalLevel::Nominal,
+        1 => ThermalLevel::Fair,
+        2 => ThermalLevel::Serious,
+        _ => ThermalLevel::Critical,
+    }
+}
+
 // ── Generation options ────────────────────────────────────────────────────────
 
 /// Options for creating an [`LlmSession`]. All fields have defaults, so
@@ -482,6 +525,20 @@ mod tests {
             }
             other => panic!("expected Combined, got {other:?}"),
         }
+    }
+
+    /// One test owns the process-global thermal level (parallel tests must
+    /// not interleave with it) — set, read back, and always release to
+    /// Nominal so the level can't leak into the e2e generation test.
+    #[test]
+    fn thermal_level_roundtrips_and_releases() {
+        assert_eq!(thermal_level(), ThermalLevel::Nominal);
+        set_thermal_level(ThermalLevel::Serious);
+        assert_eq!(thermal_level(), ThermalLevel::Serious);
+        set_thermal_level(ThermalLevel::Critical);
+        assert_eq!(thermal_level(), ThermalLevel::Critical);
+        set_thermal_level(ThermalLevel::Nominal);
+        assert_eq!(thermal_level(), ThermalLevel::Nominal);
     }
 
     #[test]
