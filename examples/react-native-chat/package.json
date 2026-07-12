@@ -25,5 +25,10 @@
   "devDependencies": {
     "@types/react": "~18.3.12",
     "typescript": "~5.3.3"
+  },
+  "overrides": {
+    "postcss": "^8.5.16",
+    "@xmldom/xmldom": "^0.8.13",
+    "uuid": "^11.1.1"
   }
 }

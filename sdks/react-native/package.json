@@ -50,7 +50,7 @@
     "url": "git+https://github.com/SkidGod4444/sapient.git"
   },
   "author": "Saidev Dhal <saidev1974dhal@gmail.com> (https://github.com/SkidGod4444)",
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "bugs": {
     "url": "https://github.com/SkidGod4444/sapient/issues"
   },

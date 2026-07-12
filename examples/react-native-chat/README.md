@@ -37,6 +37,14 @@ Server mode only (no native build needed — works in Expo Go):
 Checks (no device needed): `npm run typecheck` and `npm run bundle:check`
 (headless Metro bundle — CI runs both).
 
+Dependency security: `package.json` carries npm `overrides` pinning patched
+versions of Expo 52's vulnerable transitive dev-deps (`@xmldom/xmldom`,
+`postcss`, `uuid`). The remaining `tar` advisories have **no fix on the 6.x
+line** Expo 52 requires (tar 7 breaks `expo prebuild`'s template extraction —
+tested); exposure is dev-time-only (extracting Expo's own template tarball),
+and the real fix is the deliberate Expo 57 migration tracked alongside the
+ubrn 0.31 upgrade in ROADMAP Phase 5.
+
 Integration notes baked into this example:
 - `metro.config.js`: the SDK and the native package are `file:` deps outside
   the app root → both need `watchFolders` + the app's `node_modules` in
