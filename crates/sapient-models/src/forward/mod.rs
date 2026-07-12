@@ -97,7 +97,20 @@ fn use_mlx_engine(backend: LlmBackendKind) -> bool {
 fn use_wgpu_engine(backend: LlmBackendKind) -> bool {
     #[cfg(feature = "wgpu")]
     {
-        matches!(backend, LlmBackendKind::Wgpu | LlmBackendKind::Auto)
+        match backend {
+            // An explicit request always routes to wgpu (and the engine build
+            // then errors clearly if no adapter exists — an explicit request
+            // must not silently degrade).
+            LlmBackendKind::Wgpu => true,
+            // Auto routes to the GPU only when an adapter actually exists, so
+            // a wgpu-featured build on a device with a missing/broken driver
+            // (or an emulator without Vulkan) loads on the CPU instead of
+            // failing — the same probe-first rule as `whisper_wants_wgpu`.
+            // Matters on mobile: the packaged iOS/Android libraries compile
+            // this feature in unconditionally.
+            LlmBackendKind::Auto => sapient_backends_wgpu::WgpuContext::adapter_available(),
+            _ => false,
+        }
     }
     #[cfg(not(feature = "wgpu"))]
     {

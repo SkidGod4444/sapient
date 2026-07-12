@@ -39,7 +39,11 @@ appear — `xcrun simctl launch <sim> so.openhorizon.sapient.chat -autosend
 "Hi"` drives a real end-to-end turn on a simulator with no UI scripting
 (this is how the in-app inference gate was verified).
 
-Three integration notes baked into this example:
+Four integration notes baked into this example:
+- After re-running `package-swift.sh`, **delete DerivedData** (and `.build`
+  for the macOS build) — Xcode does not re-link an updated xcframework at
+  the same path, and you silently keep the old engine. The header's backend
+  label is the tell.
 - The SwiftPM package is named `SapientChatKit`, NOT `SapientChat` — a name
   collision with the Xcode project binds the app scheme to the package and
   destination resolution fails with "supported platforms is empty".

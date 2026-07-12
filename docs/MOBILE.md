@@ -66,7 +66,9 @@ Key design decisions (why it looks like this):
 | Node.js | `@openhorizon/sapient` → `sapient serve` HTTP | ✅ shipped; 12 tests + live-serve verified |
 | React Native | same TS SDK (`fetch` injectable; `expo/fetch` for streaming) | ✅ non-streamed + streamed via expo/fetch; on-device native module = later rung |
 | Sample apps | SwiftUI (macOS + iOS) · Jetpack Compose · React Native/Expo — `examples/` | ✅ shipped; all three CI-built (APK/simulator/Metro-bundle) |
-| On-device thermal/battery-aware scheduling | iOS/Android governor (the CPU `ThermalGovernor` reads Linux sysfs only) | ⬜ later rung |
+| GPU inference on-device | wgpu — **Metal on iOS, Vulkan on Android** — packaged in by default | ✅ in the packages (`--cpu-only` opts out); `auto` probes the adapter and falls back to CPU. See §6. |
+| On-device thermal governance | `set_thermal_level()` FFI ← `ProcessInfo.thermalState` / `PowerManager` thermal status | ✅ shipped — engine sheds decode threads under OS thermal pressure. See §7. |
+| Battery-aware model admission / cloud fallback | app-layer policy (RunAnywhere-style "no big models below 20%") | ⬜ app/SDK layer — §7 has the pattern |
 
 **Size expectations:** the Swift package zip is ~180 MB (three *static*
 slices — archives carry the whole engine pre-dead-strip); an app that links
@@ -86,7 +88,11 @@ Generated names are idiomatic per language (`chat_stream` → `chatStream`).
 - `LlmSession.load(model, options)` — download (first time) + load, blocking.
   `GenerationOptions`: `maxTokens` (512), `temperature`/`topP`/`topK`/
   `repetitionPenalty` (all unset → greedy), `systemPrompt`, `backend`
-  (`auto`|`cpu`|`metal`|`wgpu`; mobile static libs are CPU-only, `auto` = CPU).
+  (`auto`|`cpu`|`metal`|`wgpu`; the packaged mobile libs compile wgpu in, so
+  `auto` = GPU when an adapter exists, CPU otherwise — see §6).
+- `set_thermal_level(level)` / `thermal_level()` — feed the OS thermal signal
+  into the engine (`nominal`/`fair`/`serious`/`critical`); decode threads
+  shed as pressure rises. Wiring recipes in §7.
 - `session.chat(userMessage) -> String` — one blocking turn, history-managed.
 - `session.chatStream(userMessage, listener) -> String` — streamed turn;
   `listener.onToken(token) -> Bool`, return `false` to cancel. Returns the
@@ -315,7 +321,100 @@ and Android today**, so during development *you* are the governor:
   stop testing on it, let it cool, and move that day's work back down the
   ladder.
 
-## 6. Troubleshooting
+## 6. GPU on-device (wgpu: Metal on iOS, Vulkan on Android)
+
+The packaged mobile libraries compile the `wgpu` backend in by default
+(`package-swift.sh` / `package-android.sh`; `--cpu-only` opts out). With
+`backend: "auto"` (the default) the engine **probes for a usable GPU adapter
+at load** and silently falls back to the CPU NEON path when none exists — a
+missing Vulkan driver, an emulator without GPU passthrough, or a broken
+device never fails a load. An explicit `backend: "wgpu"` errors clearly
+instead of degrading. `session.backendLabel()` tells you which path actually
+loaded — surface it in your UI like the sample apps do.
+
+Facts to build against (researched + verified July 2026):
+
+- **iOS forbids background GPU work.** A backgrounded app's Metal command
+  buffers fail (`MTLCommandBufferError` code 7). **Stop generation when the
+  app leaves the foreground** — the sample app wires `scenePhase != .active`
+  → `stop()` (the `TokenListener` return-`false` cancel). Background CPU time
+  is ~30 s before the watchdog, so don't move generation to the CPU on
+  backgrounding either; stop it.
+- **GPU memory counts against jetsam.** On unified memory, `MTLBuffer`
+  allocations are part of the app footprint — the §5.2 model-size math is
+  unchanged by the GPU. A 1B Q4 (~0.7 GB weights + ~0.3 GB KV) fits any
+  modern iPhone; 3B wants the `increased-memory-limit` entitlement.
+- **The iOS simulator is build-verification only.** It exposes Apple2-family
+  Metal caps via the host GPU; behavior and performance say nothing about a
+  real iPhone. If the GPU path misbehaves in the simulator, set
+  `backend: "cpu"` there and move on — device testing is what counts.
+- **Honest performance expectation:** SAPIENT's WGSL kernels are
+  GEMV-shaped; on-device decode initially lands near CPU parity
+  (~10–20 tok/s for 1B Q4 on an A16–A18 iPhone) — the tuned ceiling
+  (llama.cpp-Metal/MLX) is ~55–70 tok/s, and closing that is the same
+  multi-row/cooperative-matrix kernel work tracked for the wgpu backend
+  generally. The day-one GPU wins are **prefill speed and power draw**
+  (GPU decode at iso-throughput draws less than six saturated CPU cores —
+  directly visible in §9's thermal behavior).
+- **Android GPU is Vulkan** — most devices ship it; the adapter probe
+  handles the ones that don't. The x86_64 emulator's Vulkan (gfxstream) is
+  hit-or-miss: expect the CPU fallback there; test GPU on a physical device.
+
+## 7. Thermal governance (phones are fanless — the engine backs off)
+
+Both mobile OSes broadcast thermal pressure; the engine turns that signal
+into fewer decode threads (same mechanism as the Linux sysfs governor used
+on the Pi), which cuts package power nearly for free — decode is
+memory-bound, so shedding cores costs little throughput and keeps clocks up.
+
+Feed the signal via the FFI: `set_thermal_level(level)` with
+`nominal → full threads · fair → ¾ · serious → ½ · critical → ¼`. The
+stricter of this and the sysfs governor wins; `SAPIENT_THERMAL=off` disables
+both. The GPU path is not thread-governed — at `serious`+ prefer pausing new
+generations (app layer); no shipped SDK does better (verified: MLC, llama.cpp
+wrappers, and MediaPipe do nothing engine-side; RunAnywhere only uses thermal
+to route to cloud).
+
+**Swift** (the sample app's `ChatViewModel` is the reference; two verified
+traps are load-bearing):
+
+```swift
+// 1. thermalState MUST be read once BEFORE registering, or the
+//    notification never fires (documented Apple requirement).
+// 2. Never read isLowPowerModeEnabled synchronously inside the power-state
+//    callback — iOS 15 deadlock (FB9741207); hop queues first.
+push() // reads thermalState + isLowPowerModeEnabled, calls setThermalLevel
+NotificationCenter.default.addObserver(
+    forName: ProcessInfo.thermalStateDidChangeNotification,
+    object: nil, queue: nil) { _ in push() }          // any thread is fine
+NotificationCenter.default.addObserver(
+    forName: .NSProcessInfoPowerStateDidChange,
+    object: nil, queue: nil) { _ in
+    DispatchQueue.global(qos: .utility).async { push() }  // deadlock guard
+}
+```
+
+Mapping: `.nominal/.fair/.serious/.critical` → the four levels 1:1
+(`@unknown default` → serious); Low Power Mode clamps to at least `fair`
+(the OS is already down-clocking).
+
+**Kotlin** (API 29+; the sample app's `MainActivity` is the reference):
+
+```kotlin
+val pm = getSystemService(PowerManager::class.java)
+push(pm.currentThermalStatus)              // device can already be warm
+pm.addThermalStatusListener { push(it) }
+// Mapping per Google's ADPF guidance ("SEVERE+ = drop below sustainable"):
+// NONE→nominal, LIGHT→fair, MODERATE→serious, SEVERE and above→critical.
+```
+
+App-layer policy that belongs on top (not in the engine): refuse to START a
+new generation at `critical`; battery admission ("no multi-GB model below
+20% unless charging" — RunAnywhere-precedented); and lifecycle handling
+(§8's stop-on-background). Xcode's Device Conditions can simulate
+fair/serious/critical on a physical iPhone to test all of this.
+
+## 8. Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
@@ -326,8 +425,9 @@ and Android today**, so during development *you* are the governor:
 | `chatStream()` throws "not streamable" in React Native | RN's fetch can't stream — pass `expo/fetch` in `ClientOptions.fetch`, or use `chat()`. |
 | UI freezes during generation | You called the blocking API on the main thread. Background queue / `Dispatchers.IO` / worker. |
 | Kotlin bindgen warning "ktlint not found" | Cosmetic — the generated `.kt` is valid, just unformatted. |
+| App still runs the OLD engine after re-running `package-swift.sh` | Xcode caches the binaryTarget: an updated `SapientFFI.xcframework` at the same path is NOT re-linked. Delete the app's DerivedData (and `.build` for SwiftPM CLI builds) and rebuild. Verify with `session.backendLabel()`. |
 
-## 7. Remaining rungs (tracked in ROADMAP.md Phase 5 / Notion Phase 11)
+## 9. Remaining rungs (tracked in ROADMAP.md Phase 5 / Notion Phase 11)
 
 1. ~~**Packaging + CI**~~ ✅ shipped: `scripts/package-swift.sh` (XCFramework
    + Swift Package + CI-run macOS smoke binary) and

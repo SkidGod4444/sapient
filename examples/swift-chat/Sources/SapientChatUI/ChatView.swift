@@ -5,6 +5,7 @@ import SwiftUI
 public struct ChatView: View {
     @StateObject private var model = ChatViewModel()
     @State private var draft = ""
+    @Environment(\.scenePhase) private var scenePhase
 
     public init() {}
 
@@ -20,6 +21,15 @@ public struct ChatView: View {
         .frame(minWidth: 480, minHeight: 560)
         #endif
         .onAppear(perform: autosendIfRequested)
+        #if os(iOS)
+        // iOS forbids background GPU work (a backgrounded app's Metal command
+        // buffers fail with MTLCommandBufferError code 7), and background CPU
+        // time is ~30 s before the watchdog. Stop generation when leaving the
+        // foreground; the partial reply stays in the transcript.
+        .onChange(of: scenePhase) { phase in
+            if phase != .active { model.stop() }
+        }
+        #endif
     }
 
     /// Test/demo hook: `-autosend "<prompt>"` in the launch arguments sends
@@ -50,14 +60,15 @@ public struct ChatView: View {
     }
 
     private var statusLine: String {
+        let thermal = model.thermalLabel.map { " · \($0)" } ?? ""
         switch model.status {
         case .idle:
             let backend = model.backendLabel.map { " · \($0)" } ?? ""
-            return "on-device\(backend)"
+            return "on-device\(backend)\(thermal)"
         case .loading(let alias):
             return "loading \(alias) — first run downloads the model…"
         case .generating:
-            return "generating…"
+            return "generating…\(thermal)"
         case .failed(let message):
             return "error: \(message)"
         }

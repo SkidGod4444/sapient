@@ -317,7 +317,12 @@ If you change `sapient-ffi`'s exported API, regenerate and eyeball the bindings
 (they are not committed): see `docs/MOBILE.md` §4. The packaging scripts double
 as integration tests — `./scripts/package-swift.sh --smoke` compiles and runs a
 real macOS binary against the packaged XCFramework (CI runs this too), and
-`./scripts/package-android.sh` verifies the `.so`'s uniffi exports. **Before
+`./scripts/package-android.sh` verifies the `.so`'s uniffi exports. Both build
+with the `wgpu` GPU feature by default (`--cpu-only` opts out); if the smoke
+link fails on a new undefined symbol after a dependency change, add the
+framework to BOTH the Package.swift template and the smoke `swiftc` line in
+`package-swift.sh`. After repackaging, delete the consuming app's DerivedData —
+Xcode does not re-link a changed xcframework at the same path. **Before
 testing on a phone, read `docs/MOBILE.md` §5** — the safe-testing ladder for
 personal hardware is a project rule, not a suggestion.
 

@@ -31,11 +31,16 @@ cd "$REPO_ROOT"
 OUT_DIR="dist/mobile"
 API=24
 EMULATOR=0
+# GPU (wgpu→Vulkan) is ON by default: `Auto` probes for an adapter at load and
+# falls back to CPU, so the GPU-featured library is safe on Vulkan-less
+# devices and emulators.
+FEATURES="--features wgpu"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --emulator) EMULATOR=1; shift ;;
     --api) API="$2"; shift 2 ;;
     --out) OUT_DIR="$2"; shift 2 ;;
+    --cpu-only) FEATURES=""; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -78,7 +83,7 @@ build_abi() { # rust-target abi-dir clang-prefix
       "CXX_${tu}=$NDK_BIN/${prefix}${API}-clang++" \
       "AR_${tu}=$NDK_BIN/llvm-ar" \
       "CARGO_TARGET_$(echo "$tu" | tr '[:lower:]' '[:upper:]')_LINKER=$NDK_BIN/${prefix}${API}-clang" \
-      cargo build -p sapient-ffi --release --target "$target"
+      cargo build -p sapient-ffi --release --target "$target" $FEATURES
   JNILIBS_SRC+=("target/$target/release/libsapient_ffi.so:$abi")
 }
 JNILIBS_SRC=()
@@ -88,8 +93,10 @@ if [[ "$EMULATOR" == "1" ]]; then
 fi
 
 # ── Generate Kotlin bindings from the host library ───────────────────────────
+# ($FEATURES adds no FFI surface — kept here only so back-to-back runs of the
+# two packaging scripts don't churn a host rebuild over feature unification.)
 echo "==> Generating Kotlin bindings"
-cargo build -p sapient-ffi --release
+cargo build -p sapient-ffi --release $FEATURES
 HOST_LIB="target/release/libsapient_ffi.dylib"
 [[ -f "$HOST_LIB" ]] || HOST_LIB="target/release/libsapient_ffi.so"
 GEN_DIR="$OUT_DIR/generated-kotlin"

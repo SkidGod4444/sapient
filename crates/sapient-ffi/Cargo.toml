@@ -29,6 +29,10 @@ default = []
 # Enables the `uniffi-bindgen` CLI used to generate Swift/Kotlin sources:
 #   cargo run -p sapient-ffi --features bindgen --bin uniffi-bindgen -- generate ...
 bindgen = ["uniffi/cli"]
+# Cross-platform GPU inference: Metal on iOS/macOS, Vulkan on Android — the
+# mobile packaging scripts build with this ON. Adds no FFI surface; `Auto`
+# probes for a usable adapter at load and falls back to CPU when none exists.
+wgpu = ["sapient-generate/wgpu"]
 
 [dependencies]
 sapient-generate.workspace = true

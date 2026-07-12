@@ -66,6 +66,7 @@ pub use sapient_audio::{
     SpeakerPlayback,
 };
 pub use sapient_audio::{write_wav, EnergyVad, VadConfig};
+pub use sapient_backends_cpu::thermal::{external_thermal_level, set_external_thermal_level};
 pub use sapient_models::DecoderStreamInputs;
 pub use sapient_models::{mac_gpu_support, LlmBackendKind as GenerationBackend, MacGpuSupport};
 pub use sentence::SentenceChunker;
