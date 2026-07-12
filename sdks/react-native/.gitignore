@@ -1,0 +1,6 @@
+node_modules/
+lib/
+*.xcframework/
+android/build/
+ios/build/
+android/src/main/jniLibs/

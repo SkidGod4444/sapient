@@ -1,0 +1,34 @@
+# uniffi-bindgen-react-native configuration — generates the TypeScript API,
+# JSI C++ bindings, and TurboModule glue straight from crates/sapient-ffi's
+# UniFFI proc-macros. ubrn's npm version is PINNED in lockstep with the
+# crate's uniffi version (0.29.3 ↔ ubrn 0.29.3-x) — bump both together.
+rust:
+  directory: ../..
+  manifestPath: crates/sapient-ffi/Cargo.toml
+
+bindings:
+  cpp: cpp/generated
+  ts: src/generated
+
+ios:
+  directory: ios
+  # GPU on-device (wgpu → Metal), same default as the packaged XCFramework;
+  # `auto` probes the adapter and falls back to CPU.
+  cargoExtras: ["--features", "wgpu"]
+  targets:
+    - aarch64-apple-ios
+    - aarch64-apple-ios-sim
+
+android:
+  directory: android
+  # wgpu → Vulkan; adapter probe falls back to CPU (emulators often lack it).
+  cargoExtras: ["--features", "wgpu"]
+  targets:
+    - arm64-v8a
+  apiLevel: 24
+
+# ubrn regenerates index.tsx by default; ours carries the NativeTransport
+# re-export on top of the generated installer glue. After a ubrn version
+# bump, regenerate once WITHOUT this guard and re-apply the export.
+noOverwrite:
+  - src/index.tsx

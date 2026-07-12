@@ -463,6 +463,120 @@ impl LlmSession {
     }
 }
 
+// ── Async variants (async-native hosts: React Native/JSI, Node) ─────────────
+//
+// The blocking API is correct for Swift/Kotlin (callers own their threads),
+// but a JS host has ONE thread: a sync `chat` would freeze the UI for the
+// whole generation, and a sync `chat_stream` would DEADLOCK — `on_token`
+// needs the very JS thread the sync call is blocking. These variants run the
+// same blocking logic on the runtime's blocking pool and return a future the
+// foreign side awaits (uniffi-bindgen-react-native maps them to Promises).
+// `JoinHandle` is executor-agnostic to poll, so no `async_runtime` attribute
+// is needed.
+
+/// Run a blocking FFI entry on the blocking pool; never blocks the caller.
+async fn unblock<T, F>(f: F) -> Result<T, SapientError>
+where
+    F: FnOnce() -> Result<T, SapientError> + Send + 'static,
+    T: Send + 'static,
+{
+    runtime().spawn_blocking(f).await.map_err(|e| SapientError::Internal {
+        reason: format!("sapient-ffi worker join error: {e}"),
+    })?
+}
+
+/// Async version of [`LlmSession::load`] (a free function — uniffi
+/// constructors are synchronous). Same semantics: downloads on first use,
+/// holds the model resident, prefix cache on.
+#[uniffi::export]
+pub async fn load_session(
+    model: String,
+    options: GenerationOptions,
+) -> Result<Arc<LlmSession>, SapientError> {
+    unblock(move || LlmSession::load(model, options)).await
+}
+
+impl LlmSession {
+    /// Shared body for the stateless message-array turns: format + stream,
+    /// WITHOUT touching the session history.
+    fn stream_messages(
+        &self,
+        messages: Vec<ChatMessage>,
+        listener: Arc<dyn TokenListener>,
+    ) -> Result<String, SapientError> {
+        let pipeline = Arc::clone(&self.pipeline);
+        let config = self.config.clone();
+        let stream =
+            run_async(
+                async move { Ok(pipeline.chat_stream_with_config(&messages, &config).await) },
+            )
+            .map_err(|e| SapientError::Generation {
+                reason: format!("{e:#}"),
+            })?;
+        let mut rx = stream.into_inner();
+        let mut reply = String::new();
+        while let Some(token) = rx.blocking_recv() {
+            reply.push_str(&token);
+            if !listener.on_token(token) {
+                break;
+            }
+        }
+        drop(rx);
+        Ok(reply)
+    }
+}
+
+fn to_chat_messages(messages: Vec<Message>) -> Result<Vec<ChatMessage>, SapientError> {
+    messages
+        .into_iter()
+        .map(|m| match m.role.as_str() {
+            "system" => Ok(ChatMessage::system(m.content)),
+            "user" => Ok(ChatMessage::user(m.content)),
+            "assistant" => Ok(ChatMessage::assistant(m.content)),
+            other => Err(SapientError::InvalidArgument {
+                reason: format!("unknown message role '{other}' (expected system|user|assistant)"),
+            }),
+        })
+        .collect()
+}
+
+#[uniffi::export]
+impl LlmSession {
+    /// Async version of [`Self::chat`].
+    pub async fn chat_async(
+        self: Arc<Self>,
+        user_message: String,
+    ) -> Result<String, SapientError> {
+        unblock(move || self.chat(user_message)).await
+    }
+
+    /// Async version of [`Self::chat_stream`] — `on_token` fires from an
+    /// engine worker thread (never the caller's), so a JS host stays live to
+    /// receive tokens while the turn runs. Same cancel/error semantics.
+    pub async fn chat_stream_async(
+        self: Arc<Self>,
+        user_message: String,
+        listener: Arc<dyn TokenListener>,
+    ) -> Result<String, SapientError> {
+        unblock(move || self.chat_stream(user_message, listener)).await
+    }
+
+    /// Stateless streamed turn over a full message array: the CALLER owns
+    /// the conversation (exactly `sapient serve`'s contract — the TS SDK's
+    /// `NativeTransport` is built on this), and the session history is
+    /// neither read nor written. Re-sent history stays cheap: the prefix
+    /// cache reuses the KV for the shared token prefix, so only the new
+    /// turn is prefilled. Cancel/error semantics match `chat_stream`.
+    pub async fn chat_messages_stream(
+        self: Arc<Self>,
+        messages: Vec<Message>,
+        listener: Arc<dyn TokenListener>,
+    ) -> Result<String, SapientError> {
+        let messages = to_chat_messages(messages)?;
+        unblock(move || self.stream_messages(messages, listener)).await
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

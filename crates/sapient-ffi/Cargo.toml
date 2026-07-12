@@ -38,7 +38,11 @@ wgpu = ["sapient-generate/wgpu"]
 sapient-generate.workspace = true
 sapient-hub.workspace = true
 sapient-tokenizers.workspace = true
-uniffi = { version = "0.29" }
+# Pinned EXACTLY: uniffi-bindgen-react-native releases pair with specific
+# uniffi-rs versions (ubrn 0.29.3-x ↔ uniffi 0.29.3) and a mismatch fails the
+# uniffi contract check at runtime. Bump BOTH together (next stop: 0.31 line,
+# which also carries ubrn's Android 16KB-page-alignment fix).
+uniffi = { version = "=0.29.3" }
 thiserror.workspace = true
 anyhow.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }

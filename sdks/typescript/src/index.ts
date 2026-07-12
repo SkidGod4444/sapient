@@ -1,5 +1,6 @@
-export { SapientClient } from './client.js';
+export { HttpTransport, SapientClient } from './client.js';
 export { SseDecoder } from './sse.js';
+export { type Transport } from './transport.js';
 export {
   SapientHttpError,
   type ChatMessage,

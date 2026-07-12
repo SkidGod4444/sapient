@@ -1,4 +1,5 @@
 import { SseDecoder } from './sse.js';
+import { Transport } from './transport.js';
 import {
   ChatMessage,
   ChatOptions,
@@ -11,13 +12,60 @@ import {
 const DEFAULT_BASE_URL = 'http://127.0.0.1:11435';
 
 /**
- * Client for a running `sapient serve` instance (OpenAI-compatible HTTP).
+ * Client for the SAPIENT engine, over a pluggable {@link Transport}.
  *
- * Works anywhere `fetch` exists: Node.js ≥ 18, browsers, and React Native.
- * The first request for a model triggers its download + load on the server
+ * Default transport is HTTP to a running `sapient serve` (OpenAI-compatible)
+ * — works anywhere `fetch` exists: Node.js ≥ 18, browsers, and React Native.
+ * The first request for a model triggers its download + load
  * (Ollama-style lazy loading), so expect the first call to take a while.
+ * Pass a `NativeTransport` (React Native on-device package) to run the
+ * engine in-process instead — same API.
  */
 export class SapientClient {
+  private readonly transport: Transport;
+
+  constructor(options: ClientOptions = {}) {
+    this.transport = options.transport ?? new HttpTransport(options);
+  }
+
+  /** One chat turn, returned whole. */
+  chat(messages: ChatMessage[], model: string, options: ChatOptions = {}): Promise<ChatResult> {
+    return this.transport.chat(messages, model, options);
+  }
+
+  /**
+   * One chat turn, streamed token-by-token as an async generator of text
+   * fragments. Break out of the loop (or abort via `options.signal`) to
+   * cancel generation.
+   *
+   * React Native's built-in fetch cannot stream response bodies — pass
+   * `fetch` from `expo/fetch` in {@link ClientOptions}, or use `chat()`.
+   */
+  chatStream(
+    messages: ChatMessage[],
+    model: string,
+    options: ChatOptions = {},
+  ): AsyncGenerator<string, void, undefined> {
+    return this.transport.chatStream(messages, model, options);
+  }
+
+  /** The models currently known to the engine. */
+  models(signal?: AbortSignal): Promise<ModelInfo[]> {
+    return this.transport.models(signal);
+  }
+
+  /** Liveness + resident-model report. */
+  health(signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return this.transport.health(signal);
+  }
+}
+
+/**
+ * The default transport: OpenAI-compatible HTTP to `sapient serve`.
+ * (This is the exact client behavior from before the Transport seam —
+ * constructing `SapientClient` without a transport is unchanged.)
+ */
+export class HttpTransport implements Transport {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly headers: Record<string, string>;
