@@ -149,8 +149,9 @@ pub fn resolve_alias(name: String) -> Result<String, SapientError> {
 // ── Thermal (roadmap 11.3) ───────────────────────────────────────────────────
 
 /// Host-OS thermal pressure. iOS `ProcessInfo.thermalState` maps 1:1;
-/// Android `PowerManager` thermal status maps NONE/LIGHT→NOMINAL,
-/// MODERATE→FAIR, SEVERE→SERIOUS, CRITICAL+→CRITICAL.
+/// Android `PowerManager` thermal status maps per Google's ADPF guidance:
+/// NONE→NOMINAL, LIGHT→FAIR, MODERATE→SERIOUS, SEVERE and above→CRITICAL
+/// ("SEVERE+ = drop below the sustainable level").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum ThermalLevel {
     Nominal,
