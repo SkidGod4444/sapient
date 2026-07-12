@@ -78,7 +78,9 @@ class ChatViewModel : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val active = if (needsLoad) {
-                    LlmSession.load(alias, GenerationOptions(maxTokens = 512u, temperature = 0.7f))
+                    // Greedy decoding: deterministic, least drift for tiny dev models
+                    // (docs/MOBILE.md §5.2); add temperature only with 0.5B+ models.
+                    LlmSession.load(alias, GenerationOptions(maxTokens = 512u))
                         .also {
                             session = it
                             loadedAlias = alias

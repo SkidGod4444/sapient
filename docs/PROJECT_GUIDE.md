@@ -483,11 +483,16 @@ returning `false` from it cancels generation. Internally a private tokio runtime
 same `Pipeline` the CLI uses (prefix cache on, so multi-turn chats skip re-prefilling
 history). Cross-compiles are validated for iOS device/simulator and Android arm64.
 
-Node.js and React Native use the **TypeScript SDK** instead (`sdks/typescript`, npm name
-`@openhorizon/sapient`): a zero-dependency client that talks to `sapient serve` over its
-OpenAI-compatible API with streaming (`chatStream` async generator); a native on-device
-transport over `sapient-ffi` is the next rung. **Read `docs/MOBILE.md` before testing on a
-phone** — it has the build recipes and the safe-testing ladder for personal hardware.
+Node.js and React Native use the **TypeScript SDK** (`sdks/typescript`, npm name
+`@openhorizon/sapient`): a zero-dependency, transport-pluggable client. The default
+transport talks to `sapient serve` over its OpenAI-compatible API with streaming
+(`chatStream` async generator). **React Native also runs fully on-device**: the
+`sdks/react-native` package (`@openhorizon/sapient-react-native`) is generated from
+`sapient-ffi` by uniffi-bindgen-react-native (TypeScript + JSI C++ + a TurboModule) and
+ships a `NativeTransport` that plugs into the same `SapientClient` — verified by a real
+in-app inference turn on the iOS simulator running on the wgpu→Metal GPU. **Read
+`docs/MOBILE.md` before testing on a phone** — it has the build recipes and the
+safe-testing ladder for personal hardware.
 
 Packaging is one command per platform: `scripts/package-swift.sh --smoke` assembles
 `SapientFFI.xcframework` + a local Swift Package (and proves it by compiling and running a

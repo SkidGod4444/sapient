@@ -378,15 +378,30 @@ napi/JSI over the FFI crate next). Full build/use/testing guide (including the
   kernel project. iOS forbids background GPU — the sample app stops
   generation on `scenePhase != .active`. Physical-device measurements are
   the user-driven ladder-rung-4 step.
-- [ ] **Native TS transport** — napi module (Node) and RN JSI/TurboModule
-  over `sapient-ffi`; same `SapientClient` API, no server process. Research
-  settled the design (2026-07-12): **uniffi-bindgen-react-native** (ubrn,
-  Mozilla/Filament) generating TS + JSI C++ + a TurboModule from the
-  existing proc-macro crate; requires async FFI exports (blocking calls
-  would freeze/deadlock Hermes) and a Transport seam in the TS SDK
-  (HttpTransport = today's code, NativeTransport in the RN package); Expo
-  Go is permanently out — `expo prebuild` + dev builds; uniffi must be
-  pinned in lockstep with ubrn (=0.29.3 ↔ ubrn 0.29.3-1, or both to 0.31).
+- [x] **React Native on-device** (2026-07-12) — `sdks/react-native`
+  (`@openhorizon/sapient-react-native`): **uniffi-bindgen-react-native**
+  (ubrn 0.29.3-1, pinned in lockstep with `uniffi = "=0.29.3"` — a mismatch
+  fails the contract check) generates TS + JSI C++ + the TurboModule straight
+  from the sapient-ffi proc-macros; GPU (wgpu) feature on. New FFI surface it
+  rides on: **async exports** (`load_session`, `chat_async`,
+  `chat_stream_async` — sync calls would freeze Hermes and `chat_stream`
+  would deadlock: `on_token` needs the JS thread a sync call blocks),
+  **`chat_messages_stream`** (stateless serve-parity turn — caller owns
+  history, prefix cache keeps re-sent history cheap), and **`set_cache_dir`**
+  (JS hosts have no setenv). TS SDK gained a **Transport seam**
+  (`HttpTransport` = the old client, byte-identical default;
+  `NativeTransport` ships in the RN package: callback→AsyncGenerator queue
+  bridge, abort + return-`false` cancel). The example app defaults to
+  on-device with a runtime server-mode toggle; Expo Go can't load it —
+  `expo prebuild` + dev build. Traps recorded: ubrn 0.29.3 emits
+  `async public` (postgen script reorders); the create-react-native-library
+  scaffold's demo impl/OnLoad.mm must be deleted (collide with ubrn's
+  codegen); the library's own `node_modules/react-native` must be
+  Metro-block-listed in consuming apps (newer RN, Flow `match` syntax);
+  `noOverwrite: [src/index.tsx]` protects the transport re-export.
+  Remaining: napi transport for Node, Android app-level validation
+  (library `.so` + CMake wired; emulator Vulkan is unreliable — physical
+  device is the honest gate), ubrn→0.31 line upgrade (Android 16KB pages).
 - [x] **On-device thermal hooks** (rung 11.3, 2026-07-12) — the CPU
   `ThermalGovernor` gained an external 4-level override
   (`set_external_thermal_level`; stricter-of sysfs/external wins; one

@@ -1,3 +1,5 @@
-node_modules/
-.expo/
 .expo-export/
+.expo/
+android/
+ios/
+node_modules/

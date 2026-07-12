@@ -63,6 +63,13 @@ export interface ClientOptions {
   fetch?: typeof fetch;
   /** Extra headers sent with every request (e.g. auth in front of a proxy). */
   headers?: Record<string, string>;
+  /**
+   * Backend override. Default: HTTP to `sapient serve` (built from the
+   * options above). Pass the React Native package's `NativeTransport` to run
+   * the engine on-device instead — the client API is identical, so UI code
+   * doesn't change when an app graduates off the serve-backed dev loop.
+   */
+  transport?: import('./transport.js').Transport;
 }
 
 /** Error thrown for non-2xx responses, carrying the response body. */

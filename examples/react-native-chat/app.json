@@ -17,6 +17,8 @@
     },
     "plugins": [
       "expo-asset"
-    ]
+    ],
+    "newArchEnabled": true,
+    "scheme": "sapientchat"
   }
 }

@@ -194,6 +194,14 @@ jobs:
           cache-dependency-path: sdks/typescript/package-lock.json
       - run: npm ci
       - run: npm test
+      - name: React Native on-device library — build + typecheck
+        working-directory: sdks/react-native
+        # npm ci's prepare runs builder-bob (pure JS — no Rust needed here;
+        # the committed generated bindings stand in for codegen) and produces
+        # lib/, which the example app's file: dep resolves against below.
+        run: |
+          npm ci
+          npx tsc --noEmit -p tsconfig.json
       - name: React Native example — typecheck + headless bundle
         working-directory: examples/react-native-chat
         run: |

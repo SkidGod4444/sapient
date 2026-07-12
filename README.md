@@ -265,9 +265,12 @@ the **safe-testing guide for personal devices**):
   ```
 
 - **TypeScript (Node.js / React Native)** —
-  [`@openhorizon/sapient`](sdks/typescript): a zero-dependency client for
-  `sapient serve` with streaming chat (native on-device transport is the next
-  rung; the API won't change).
+  [`@openhorizon/sapient`](sdks/typescript): a zero-dependency,
+  transport-pluggable client. Default: HTTP to `sapient serve` with streaming
+  chat. **React Native runs fully on-device** via
+  [`@openhorizon/sapient-react-native`](sdks/react-native)
+  (UniFFI → JSI TurboModule over `sapient-ffi`, GPU included) — pass its
+  `NativeTransport` to the same `SapientClient` and nothing else changes.
 
   ```ts
   import { SapientClient } from '@openhorizon/sapient';
