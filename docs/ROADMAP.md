@@ -8,7 +8,7 @@
 > portability, curated registry, modern CLI, and edge-specific automation
 > (auto-pick quantization for available RAM, auto CPU/GPU offload, single static binary).
 
-## Where we are (v0.5.3)
+## Where we are (v0.6.0)
 - ✅ **Sparse MoE (Mixtral-class first cut)** — the credible "big models on edge"
   path: a 47B-A13B (Mixtral-8x7B) decodes at ~13B bandwidth cost on 32 GB+ devices
   (big Mac / Jetson Thor). Implemented as a per-layer `Ffn::{Dense, Moe}` branch
@@ -61,15 +61,19 @@
   **Server (12.3) done:** `/v1/chat/completions` accepts OpenAI image parts as
   base64 data URIs, routed through `VlmPipeline` in a third LRU cache;
   remote image URLs are refused by design.
-- 🚧 **Mobile & embedding SDKs (Phase 5 / Notion Phase 11 — first cut)** — the
-  `sapient-ffi` crate (UniFFI): `LlmSession` chat + streaming-with-cancel over the
-  existing `Pipeline`, generating idiomatic **Swift** and **Kotlin** bindings;
-  cross-compiles validated for iOS device/simulator + Android arm64. Plus the
-  first-party **TypeScript SDK** (`sdks/typescript`, `@openhorizon/sapient`) for
-  Node.js / React Native — speaks to `sapient serve` today (streaming SSE,
-  verified against a live server), binds `sapient-ffi` natively next. Dev-safety
-  + build guide: [MOBILE.md](MOBILE.md). Remaining: packaging (XCFramework/AAR),
-  sample apps, native TS transport.
+- ✅ **Mobile & embedding SDKs (Phase 5 / Notion Phase 11 — shipped in v0.6.0)** —
+  the `sapient-ffi` crate (UniFFI, sync + async exports) with idiomatic **Swift**
+  and **Kotlin** bindings; one-command packaging (`SapientFFI.xcframework` +
+  Swift Package, drop-in Android Gradle module — both attached to every release);
+  the **TypeScript SDK** (`@openhorizon/sapient`, transport-pluggable) and
+  **React Native on-device** (`@openhorizon/sapient-react-native`, JSI
+  TurboModule via uniffi-bindgen-react-native); three streaming sample chat
+  apps (SwiftUI / Compose / Expo) all running the engine **on-device with GPU
+  by default** (wgpu: Metal on iOS/macOS, Vulkan on Android; adapter-probe CPU
+  fallback) and **engine-level thermal governance** (`set_thermal_level`).
+  Dev-safety + build guide: [MOBILE.md](MOBILE.md). Remaining slivers: typed
+  mid-stream errors (11.6), Node napi transport, store publishing
+  (SwiftPM-registry/Maven), physical-device 1B success-metric run.
 - 🚧 **Streaming voice loop (Phase 10 first cut)** — incremental STT during speech
   (`LiveStt`, transcript ready at end-of-utterance), early-first-clause TTS handoff,
   barge-in (`SpeakerPlayback::clear` + mic monitor), per-turn latency breakdown.

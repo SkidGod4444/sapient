@@ -3,11 +3,76 @@
 Release notes for SAPIENT. The release workflow publishes each version's
 section below as the GitHub release body.
 
-## [Unreleased]
+## [0.6.0] - 2026-07-13
 
-Model beta-test sweep (every downloaded model, long-form prompts) — four user-facing bugs found and fixed, plus new MLX debug tooling.
+SAPIENT goes mobile: the engine runs **on-device** in Swift, Kotlin, and React
+Native apps — **GPU by default** (Metal on iOS/macOS, Vulkan on Android) with
+**engine-level thermal governance**. The CPU-parity ladder closes with the
+Q8_K activation format (**Jetson Thor dense decode +46% cumulative since
+v0.5.0**), and a model beta-test sweep fixes four user-facing bugs.
 
-### 🐛 Correctness
+### 📱 Mobile & embedding SDKs — Phase 11 (#38, #39, #40, #43, #44, #46)
+
+- **`sapient-ffi` (UniFFI)** — `LlmSession` chat + streaming-with-cancel over
+  the existing `Pipeline` (prefix cache on), generating idiomatic **Swift**
+  and **Kotlin**. Async exports (`load_session`, `chat_async`,
+  `chat_stream_async`, `chat_messages_stream`) keep JS/Hermes hosts unblocked;
+  `set_cache_dir` and `set_thermal_level` round out the embedding surface.
+- **Packaging — one command per platform**: `scripts/package-swift.sh` →
+  `SapientFFI.xcframework` (iOS device + simulator + macOS slices) inside a
+  local Swift Package, gated by a compile-and-run smoke link;
+  `scripts/package-android.sh` → a drop-in `com.android.library` Gradle
+  module. **This is the first release to attach `sapient-swift.zip` and
+  `sapient-android.zip`** (+ sha256) alongside the CLI binaries.
+- **GPU on-device by default** — the mobile packages compile the wgpu backend
+  in (**Metal on iOS/macOS, Vulkan on Android**; `--cpu-only` opts out).
+  `Auto` probes for a usable adapter before routing to the GPU, so a broken
+  driver or GPU-less emulator falls back to CPU instead of failing. Gate
+  passed: a real inference turn inside the iOS-simulator app on wgpu→Metal,
+  quantized-resident Q4_K/Q6_K weights + f16 KV cache.
+- **Engine-level thermal governance** —
+  `set_thermal_level(nominal|fair|serious|critical)` caps decode threads at
+  full/¾/½/¼ of cores (the stricter of this and the sysfs governor wins). The
+  sample apps carry the verified reference wiring: iOS
+  `thermalStateDidChangeNotification` (+ Low Power Mode clamp) with its two
+  documented traps handled, Android `PowerManager.addThermalStatusListener`
+  with Google's ADPF mapping. MLC, llama.cpp-mobile, and MediaPipe ship no
+  engine-side thermal response.
+- **React Native on-device** — `@openhorizon/sapient-react-native`:
+  uniffi-bindgen-react-native generates the TS + JSI TurboModule straight
+  from the FFI crate; the TypeScript SDK gained a `Transport` seam
+  (`HttpTransport` unchanged default, `NativeTransport` runs the engine
+  in-process). Example app defaults to on-device with a server-mode toggle.
+- **TypeScript SDK** (`sdks/typescript`, `@openhorizon/sapient`) —
+  zero-dependency client for `sapient serve`: `chat`, SSE `chatStream` with
+  cancel-on-break, `models`, `health`; injectable `fetch` (React Native
+  streams via `expo/fetch`).
+- **Three sample chat apps** (`examples/`) — SwiftUI (macOS + iOS), Jetpack
+  Compose, and Expo/React-Native, all streaming with engine-side Stop and
+  greedy sampling defaults; CI builds all three on every PR. Full build +
+  personal-hardware safe-testing guide: `docs/MOBILE.md`.
+
+### ⚡ CPU parity round 2 (#32, #33, #35, #36, #37)
+
+- **Q8_K activation format, default ON** for the Q4_K and Q6_K int8 decode
+  paths (one f32 scale per 256-element super-block; weight sub-scales
+  combined in the integer domain — llama.cpp-precedented accuracy class):
+  Jetson Thor 14-core dense decode **+44.5%** / prefill TTFT −16.3%
+  (combined off→on), M4 qwen-1.5B +12.5%, Pi 5 +6.8%. `SAPIENT_Q8K_ACT=0`
+  reverts. Every kernel bit-identity-gated against a scalar oracle.
+- **Guided spin/park decode threadpool** replacing ~230 per-token rayon
+  fork/joins: M4 llama-1B **+7.7%**, Thor 14-core +5.3%; topology-aware
+  block claiming (block=1 on P/E-heterogeneous macOS, ~3 blocks/participant
+  on homogeneous server ARM). Default ON for macOS and Linux/aarch64 ≥ 8
+  threads; `SAPIENT_SPINPOOL=0` reverts.
+- Precomputed per-row activation block-sums for Q4_K's `dmin·mn` term
+  (bit-identical, ~+1% decode).
+- **Cumulative since v0.5.0: Thor dense decode 22.4 → 32.8 tok/s (+46%);
+  llama.cpp CPU decode gap 3.16× → ~2.6×.** The ladder's final rung
+  (vectorized SMMLA combine) measured neutral and was reverted with the
+  record; every falsified design is documented in `docs/BENCHMARKS.md`.
+
+### 🐛 Correctness (model beta-test sweep)
 
 - **Q5_K dequantization fixed in `sapient-core` `Tensor::to_f32_vec`**: the 5th
   bit was read from one `qh[is/8]` byte per 32-element sub-block instead of
