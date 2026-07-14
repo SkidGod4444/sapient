@@ -3,12 +3,22 @@
 Release notes for SAPIENT. The release workflow publishes each version's
 section below as the GitHub release body.
 
-## [Unreleased]
+## [0.6.0] - 2026-07-14
 
-**SAPIENT becomes an agent backend.** `sapient serve` now speaks OpenAI **tool
-calling**, so the Vercel AI SDK, LangChain or the OpenAI SDK can drive it
-unmodified — closing the last gap that forced users to keep a second engine
-around for the action-selecting model. Speech gains an HTTP surface too.
+**SAPIENT becomes an agent backend, and goes mobile.**
+
+`sapient serve` now speaks OpenAI **tool calling**, so the Vercel AI SDK,
+LangChain or the OpenAI SDK can drive it unmodified — closing the last gap that
+forced users to keep a second engine around just for the action-selecting model.
+Speech gains an HTTP surface too (`POST /v1/audio/speech`).
+
+The engine also runs **on-device** in Swift, Kotlin and React Native apps —
+**GPU by default** (Metal on iOS/macOS, Vulkan on Android) with **engine-level
+thermal governance** — and the SDKs install the idiomatic way per ecosystem:
+**SwiftPM by URL, Maven for Android, npm for TypeScript**. The CPU-parity ladder
+closes with the Q8_K activation format (**Jetson Thor dense decode +46%
+cumulative since v0.5.0**), and a model beta-test sweep fixes four user-facing
+bugs.
 
 ### 🔧 Tool calling — `tools` / `tool_choice` on `/v1/chat/completions`
 
@@ -53,16 +63,6 @@ Prefer 3B+ for agent work, or force the call with `tool_choice`.
 Verified end-to-end against `ai@7.0.26` + `@ai-sdk/openai-compatible@3.0.9`: a
 `ToolLoopAgent` drives multi-step tool use on both the streaming and
 non-streaming paths.
-
-## [0.6.0] - 2026-07-13
-
-SAPIENT goes mobile: the engine runs **on-device** in Swift, Kotlin, and React
-Native apps — **GPU by default** (Metal on iOS/macOS, Vulkan on Android) with
-**engine-level thermal governance** — and the SDKs install the idiomatic way
-per ecosystem: **SwiftPM by URL, Maven for Android, npm for TypeScript**. The
-CPU-parity ladder closes with the Q8_K activation format (**Jetson Thor dense
-decode +46% cumulative since v0.5.0**), and a model beta-test sweep fixes
-four user-facing bugs.
 
 ### 📦 SDK distribution — how you get the SDKs
 
