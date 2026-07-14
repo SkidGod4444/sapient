@@ -11,6 +11,6 @@ pub mod chat;
 pub mod tokenizer;
 pub mod whisper;
 
-pub use chat::{ChatMessage, ChatRole, ChatTemplate};
+pub use chat::{ChatMessage, ChatRole, ChatTemplate, ToolCall};
 pub use tokenizer::{SapientTokenizer, TokenizerOptions};
 pub use whisper::WhisperTokenizer;

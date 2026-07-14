@@ -35,6 +35,13 @@ pub struct GenerationConfig {
     pub strategy: SamplingStrategy,
     /// Stop strings — generation ends if any of these appear in output.
     pub stop_sequences: Vec<String>,
+    /// Tool definitions, OpenAI-shaped, exposed to the chat template so a
+    /// tool-trained model can call them. `None` for plain chat.
+    ///
+    /// This rides on the generation config because it is per-request and every
+    /// `chat_*` entry point already threads one through — it changes the
+    /// rendered prompt, not the sampler.
+    pub tools: Option<Vec<serde_json::Value>>,
 }
 
 impl Default for GenerationConfig {
@@ -44,6 +51,7 @@ impl Default for GenerationConfig {
             eos_token_id: None,
             strategy: SamplingStrategy::default(),
             stop_sequences: vec![],
+            tools: None,
         }
     }
 }
@@ -440,8 +448,20 @@ impl Pipeline {
 
     /// Render the chat prompt string for a message history.
     pub fn format_chat_prompt(&self, messages: &[ChatMessage]) -> Result<String> {
+        self.format_chat_prompt_with_tools(messages, None)
+    }
+
+    /// Render the chat prompt with tool definitions available to the template.
+    ///
+    /// Models whose template has no tools branch simply ignore them, so this is
+    /// safe to call unconditionally.
+    pub fn format_chat_prompt_with_tools(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[serde_json::Value]>,
+    ) -> Result<String> {
         if let Some(tmpl) = &self.chat_template {
-            tmpl.render(messages, true)
+            tmpl.render_with_tools(messages, tools, true)
                 .context("Failed to render chat template")
         } else {
             Ok(messages
@@ -464,7 +484,7 @@ impl Pipeline {
         messages: &[ChatMessage],
         config: &GenerationConfig,
     ) -> Result<String> {
-        let prompt = self.format_chat_prompt(messages)?;
+        let prompt = self.format_chat_prompt_with_tools(messages, config.tools.as_deref())?;
         self.generate_with_config(&prompt, config).await
     }
 
@@ -474,7 +494,7 @@ impl Pipeline {
         messages: &[ChatMessage],
         config: &GenerationConfig,
     ) -> ReceiverStream<String> {
-        match self.format_chat_prompt(messages) {
+        match self.format_chat_prompt_with_tools(messages, config.tools.as_deref()) {
             Ok(prompt) => self.generate_stream_with_config(&prompt, config).await,
             Err(e) => {
                 let (tx, rx) = mpsc::channel(1);

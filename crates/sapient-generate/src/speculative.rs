@@ -172,7 +172,9 @@ impl SpeculativePipeline {
         messages: &[ChatMessage],
         config: &GenerationConfig,
     ) -> Result<String> {
-        let prompt = self.target.format_chat_prompt(messages)?;
+        let prompt = self
+            .target
+            .format_chat_prompt_with_tools(messages, config.tools.as_deref())?;
         self.generate_with_config(&prompt, config).await
     }
 
@@ -328,7 +330,10 @@ impl SpeculativePipeline {
         messages: &[ChatMessage],
         config: &GenerationConfig,
     ) -> ReceiverStream<String> {
-        match self.target.format_chat_prompt(messages) {
+        match self
+            .target
+            .format_chat_prompt_with_tools(messages, config.tools.as_deref())
+        {
             Ok(prompt) => self.generate_stream_with_config(&prompt, config).await,
             Err(e) => {
                 let (tx, rx) = mpsc::channel(1);
@@ -363,6 +368,15 @@ impl SpeculativePipeline {
     /// Render a chat prompt string for a message history (target template).
     pub fn format_chat_prompt(&self, messages: &[ChatMessage]) -> Result<String> {
         self.target.format_chat_prompt(messages)
+    }
+
+    /// Render a chat prompt with tool definitions (target template).
+    pub fn format_chat_prompt_with_tools(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[serde_json::Value]>,
+    ) -> Result<String> {
+        self.target.format_chat_prompt_with_tools(messages, tools)
     }
 
     // ── Core speculative loop (blocking) ──────────────────────────────────────
