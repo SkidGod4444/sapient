@@ -566,8 +566,12 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
+          # An EMPTY secret is the trap: `gh secret set` in a non-interactive
+          # shell reads stdin, gets EOF, and silently stores "" — the job then
+          # skips and still reports success. Annotate loudly so a missing
+          # publish can't hide behind a green check.
           if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "NPM_TOKEN not configured — skipping npm publish"
+            echo "::warning title=npm publish skipped::NPM_TOKEN is unset or empty — @openhorizon-labs/sapient was NOT published for this tag. Set the secret (GitHub UI) and re-run this job."
             exit 0
           fi
           PKG_VERSION=$(node -p "require('./package.json').version")
