@@ -11,8 +11,8 @@ const nativePath = path.resolve(__dirname, '../../sdks/react-native');
 config.watchFolders = [...(config.watchFolders ?? []), sdkPath, nativePath];
 config.resolver.extraNodeModules = {
   ...(config.resolver.extraNodeModules ?? {}),
-  '@openhorizon/sapient': sdkPath,
-  '@openhorizon/sapient-react-native': nativePath,
+  '@openhorizon-labs/sapient': sdkPath,
+  '@openhorizon-labs/sapient-react-native': nativePath,
 };
 // Modules imported from the watched SDK folder (e.g. injected @babel/runtime
 // helpers) must resolve against this app's node_modules.

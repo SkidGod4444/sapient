@@ -20,7 +20,7 @@ ecosystem:
                    Swift ───┘   Kotlin┘           └─ TypeScript
               (iOS/macOS)   (Android/JVM)      (Node.js / React Native)
                     │             │                   │
-              UniFFI-generated bindings         @openhorizon/sapient
+              UniFFI-generated bindings         @openhorizon-labs/sapient
                     │             │                   │
                     ▼             ▼                   ▼
               ┌──────────────────────────┐   ┌──────────────────────────┐
@@ -59,13 +59,14 @@ Key design decisions (why it looks like this):
 |---|---|---|
 | Rust host apps | `sapient-ffi` crate (or `sapient-generate` directly) | ✅ shipped, unit + e2e tested |
 | Swift (iOS/macOS) | `scripts/package-swift.sh` → `SapientFFI.xcframework` + Swift Package | ✅ shipped — packaged, and a compiled macOS smoke binary runs against it in CI |
-| Kotlin (Android/JVM) | `scripts/package-android.sh` → drop-in Gradle module (`.so` + Kotlin + JNA dep) | ✅ shipped — uniffi exports verified; Maven-published AAR = later rung |
+| Kotlin (Android/JVM) | `scripts/package-android.sh` → drop-in Gradle module (`.so` + Kotlin + JNA dep) | ✅ shipped — uniffi exports verified; self-contained `.so` (static C++ runtime, readelf-gated); emulator-validated end-to-end |
 | iOS device build | `aarch64-apple-ios` staticlib | ✅ in the XCFramework (needs `IPHONEOS_DEPLOYMENT_TARGET=14.0` — the script sets it) |
 | iOS simulator build | `aarch64-apple-ios-sim` staticlib | ✅ in the XCFramework |
 | macOS build | `aarch64-apple-darwin` staticlib | ✅ in the XCFramework (Mac apps + the CI smoke test) |
 | Android build | `aarch64-linux-android` cdylib via NDK ≥ 26 | ✅ in the module (~11 MB `.so`, API 24+; `--emulator` adds x86_64) |
 | CI / release artifacts | `package-swift` + `package-android` jobs; zips attach to GitHub releases | ✅ shipped (CI + release.yml) |
-| Node.js | `@openhorizon/sapient` → `sapient serve` HTTP | ✅ shipped; 12 tests + live-serve verified |
+| Distribution channels | SwiftPM by URL ([openhorizon-labs/sapient-swift](https://github.com/openhorizon-labs/sapient-swift)) · git-hosted Maven ([openhorizon-labs/sapient-android](https://github.com/openhorizon-labs/sapient-android)) · npm (`@openhorizon-labs/sapient`) — all refreshed per release by release.yml | ✅ shipped; SwiftPM-registry / Maven Central = later rungs |
+| Node.js | `@openhorizon-labs/sapient` → `sapient serve` HTTP | ✅ shipped; 12 tests + live-serve verified |
 | React Native (server mode) | same TS SDK (`fetch` injectable; `expo/fetch` for streaming) | ✅ non-streamed + streamed via expo/fetch |
 | React Native **on-device** | `sdks/react-native` — uniffi-bindgen-react-native → JSI TurboModule; `NativeTransport` plugs into `SapientClient` | ✅ shipped — needs a dev build (`expo prebuild`), Expo Go can't load it |
 | Sample apps | SwiftUI (macOS + iOS) · Jetpack Compose · React Native/Expo — `examples/` | ✅ shipped; all three CI-built (APK/simulator/Metro-bundle) |
@@ -105,9 +106,28 @@ Generated names are idiomatic per language (`chat_stream` → `chatStream`).
 
 ## 4. Build & packaging
 
+### Get the SDKs — no Rust toolchain needed
+
+Consumers don't build anything; each ecosystem has an idiomatic channel,
+refreshed automatically by every release:
+
+| Platform | One-liner |
+|---|---|
+| **Swift (iOS/macOS)** | Xcode → *Add Package Dependencies* → `https://github.com/openhorizon-labs/sapient-swift` (remote binaryTarget — the XCFramework downloads itself) |
+| **Kotlin (Android)** | `maven { url = uri("https://raw.githubusercontent.com/openhorizon-labs/sapient-android/main") }` + `implementation("so.openhorizon:sapient:<version>")` (JNA + coroutines come as transitive deps) |
+| **Node.js / RN (HTTP)** | `npm install @openhorizon-labs/sapient` |
+| **Manual / offline** | `sapient-swift.zip` / `sapient-android.zip` on every [release](https://github.com/SkidGod4444/sapient/releases) — the same artifacts, as a local Swift Package / drop-in Gradle module |
+
+> **License:** SAPIENT is **GPL-3.0-only** — an app that embeds these SDKs
+> (statically or as a bundled library) is subject to the GPL's terms. If
+> that doesn't fit your product, talk to us before shipping. See
+> [LICENSE](../LICENSE).
+
 **Working sample apps for all three stacks live in [`examples/`](../examples)**
 (SwiftUI macOS+iOS, Jetpack Compose, React Native/Expo) — start there; the
 sections below are the underlying pieces.
+
+### Building the artifacts yourself (engine developers)
 
 **One command per platform** (repo root). Each script builds the Rust
 targets, generates the bindings, assembles the consumable artifact, and
@@ -143,12 +163,18 @@ default and the link fails on `___chkstk_darwin`), and Android needs
 
 ### iOS / macOS — consuming the Swift Package
 
-`dist/mobile/sapient-swift/` is a complete local Swift Package: the
-generated `sapient_ffi.swift` + the XCFramework as a `binaryTarget`, with
-the required link flags (`c++`, `iconv`, `SystemConfiguration`,
-`CoreFoundation`) already declared. In Xcode: *File → Add Package
-Dependencies → Add Local…* and select the directory; or in a
-`Package.swift`: `.package(path: "../sapient-swift")`.
+**By URL (the normal path):** Xcode → *File → Add Package Dependencies* →
+`https://github.com/openhorizon-labs/sapient-swift`, pick a version. That repo's
+`Package.swift` points a remote `binaryTarget` at the release's
+`SapientFFI.xcframework.zip` (checksum-pinned), so SwiftPM downloads and
+verifies the binary itself; the release workflow re-points it on every tag.
+
+**Locally:** `dist/mobile/sapient-swift/` (from the script, or unzipped from
+a release's `sapient-swift.zip`) is the same package with the XCFramework as
+a *local* `binaryTarget` — *Add Package Dependencies → Add Local…*, or
+`.package(path: "../sapient-swift")`. Both carry the required link flags
+(`c++`, `iconv`, `SystemConfiguration`, `CoreFoundation`, `Metal`,
+`QuartzCore`) already declared.
 
 ```swift
 // Call from a background queue — load() blocks (and downloads on first run).
@@ -167,14 +193,33 @@ let reply = try session.chatStream(userMessage: "Hi!", listener: Printer())
 
 ### Android — consuming the Gradle module
 
-`dist/mobile/sapient-android/` is a complete `com.android.library` module:
-`build.gradle.kts` (JNA dependency wired), the `.so` under
-`src/main/jniLibs/arm64-v8a/`, and the generated Kotlin. Copy it next to
-your app module, add `include(":sapient-android")` to `settings.gradle.kts`
-and `implementation(project(":sapient-android"))` to the app. (The script
-auto-locates the NDK from `ANDROID_NDK_HOME` / `ANDROID_NDK_LATEST_HOME` /
-the SDK dir; [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk) remains a
-fine manual alternative.)
+**Via Maven (the normal path):** add the git-hosted Maven repo and one
+dependency —
+
+```kotlin
+// settings.gradle.kts (dependencyResolutionManagement) or build.gradle.kts
+repositories {
+    maven { url = uri("https://raw.githubusercontent.com/openhorizon-labs/sapient-android/main") }
+}
+// app/build.gradle.kts
+dependencies { implementation("so.openhorizon:sapient:0.6.0") }
+```
+
+The AAR's POM carries JNA and kotlinx-coroutines as transitive deps, so
+that's the whole integration. (The repo is a plain Maven layout published by
+the release workflow; Maven Central is a later rung.)
+
+**As a local module:** `dist/mobile/sapient-android/` (from the script, or
+unzipped from a release's `sapient-android.zip`) is a complete
+`com.android.library` module: `build.gradle.kts` (JNA + coroutines wired),
+the `.so` under `src/main/jniLibs/arm64-v8a/`, and the generated Kotlin.
+Copy it next to your app module, add `include(":sapient-android")` to
+`settings.gradle.kts` and `implementation(project(":sapient-android"))` to
+the app. (The script auto-locates the NDK from `ANDROID_NDK_HOME` /
+`ANDROID_NDK_LATEST_HOME` / the SDK dir;
+[`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk) remains a fine manual
+alternative — if you build by hand, link the C++ runtime statically:
+`-C link-arg=-static-libstdc++`, see §8.)
 
 ```kotlin
 // Call from Dispatchers.IO — load() blocks (and downloads on first run).
@@ -201,11 +246,11 @@ See [`sdks/typescript/README.md`](../sdks/typescript/README.md). Short version:
 
 ```bash
 sapient serve                       # on your Mac / server / Pi
-npm install @openhorizon/sapient    # in your app
+npm install @openhorizon-labs/sapient    # in your app
 ```
 
 ```ts
-import { SapientClient } from '@openhorizon/sapient';
+import { SapientClient } from '@openhorizon-labs/sapient';
 const client = new SapientClient();            // http://127.0.0.1:11435
 for await (const tok of client.chatStream(
   [{ role: 'user', content: 'Tell me a haiku.' }], 'qwen2.5-0.5b'))
@@ -220,8 +265,8 @@ React Native has BOTH transports behind the same client:
 - **On-device** (`sdks/react-native`, needs an `expo prebuild` dev build):
 
 ```ts
-import { SapientClient } from '@openhorizon/sapient';
-import { NativeTransport } from '@openhorizon/sapient-react-native';
+import { SapientClient } from '@openhorizon-labs/sapient';
+import { NativeTransport } from '@openhorizon-labs/sapient-react-native';
 const client = new SapientClient({
   transport: new NativeTransport({ cacheDir: /* app caches dir */ }),
 });
@@ -396,7 +441,11 @@ Facts to build against (researched + verified July 2026):
   directly visible in §9's thermal behavior).
 - **Android GPU is Vulkan** — most devices ship it; the adapter probe
   handles the ones that don't. The x86_64 emulator's Vulkan (gfxstream) is
-  hit-or-miss: expect the CPU fallback there; test GPU on a physical device.
+  hit-or-miss; the arm64 emulator exposes **SwiftShader** (software Vulkan),
+  which the probe accepts — the Kotlin sample app's first end-to-end run
+  decoded coherently on `wgpu (SwiftShader Device … (Vulkan))`. That proves
+  the WGSL stack on Android, not performance: software Vulkan is
+  correctness-only; test real GPU speed on a physical device.
 
 ## 7. Thermal governance (phones are fanless — the engine backs off)
 
@@ -464,29 +513,37 @@ fair/serious/critical on a physical iPhone to test all of this.
 | UI freezes during generation | You called the blocking API on the main thread. Background queue / `Dispatchers.IO` / worker. |
 | Kotlin bindgen warning "ktlint not found" | Cosmetic — the generated `.kt` is valid, just unformatted. |
 | App still runs the OLD engine after re-running `package-swift.sh` | Xcode caches the binaryTarget: an updated `SapientFFI.xcframework` at the same path is NOT re-linked. Delete the app's DerivedData (and `.build` for SwiftPM CLI builds) and rebuild. Verify with `session.backendLabel()`. |
+| Android app dies at first FFI call: `UnsatisfiedLinkError … libc++_shared.so` (or `__gxx_personality_v0`) | The `.so` was built against the NDK's *shared* C++ runtime, which nothing ships to consumers. Build with `CXXSTDLIB_aarch64_linux_android=c++_static` **plus** `-C link-arg=-lc++abi` (the NDK splits libc++abi out). `package-android.sh` does both and readelf/nm-gates the result; the trap only bites hand-rolled builds. Invisible to `assembleDebug` — only a real dlopen catches it. |
 
 ## 9. Remaining rungs (tracked in ROADMAP.md Phase 5 / Notion Phase 11)
 
 1. ~~**Packaging + CI**~~ ✅ shipped: `scripts/package-swift.sh` (XCFramework
    + Swift Package + CI-run macOS smoke binary) and
-   `scripts/package-android.sh` (Gradle module, exports verified); CI jobs
-   `package-swift`/`package-android` and release-attached zips. Still open
-   from this rung: **registry publishing** (SwiftPM registry / Maven AAR —
-   needs a Gradle build in CI) and versioned checksummed URLs in the
-   install-docs.
+   `scripts/package-android.sh` (Gradle module, exports + static-C++-runtime
+   verified); CI jobs `package-swift`/`package-android` and
+   release-attached zips.
 2. ~~**Sample apps**~~ ✅ shipped: `examples/swift-chat` (shared SwiftUI over
    the packaged Swift Package — macOS app via `swift run`, iOS app via
    XcodeGen), `examples/android-chat` (Compose over the packaged Gradle
-   module), `examples/react-native-chat` (Expo + TS SDK, the rung-0 loop).
-   All CI-built. **Still open: the success-metric run itself** — a 1B Q4
-   model on a physical device, which is a user-driven ladder-rung-4 step
-   (see §5); the apps default to `smollm2-135m-q4` for exactly that reason.
-3. **Native TS transport:** napi module for Node, JSI/TurboModule for React
-   Native over `sapient-ffi` — same `SapientClient` API, no server.
-4. **On-device niceties:** iOS/Android thermal governor hooks
-   (`ProcessInfo.thermalState` / `PowerManager` → the existing
-   effective-threads mechanism), download progress callbacks, background-safe
-   model eviction.
-5. **Typed mid-stream errors:** promote the engine's in-band `Error: …`
+   module), `examples/react-native-chat` (Expo + TS SDK + on-device
+   `NativeTransport`). All CI-built. **Still open: the success-metric run
+   itself** — a 1B Q4 model on a physical device, which is a user-driven
+   ladder-rung-4 step (see §5); the apps default to `smollm2-135m-q4` for
+   exactly that reason.
+3. ~~**Distribution channels**~~ ✅ shipped: SwiftPM by URL
+   (`openhorizon-labs/sapient-swift`, remote checksum-pinned binaryTarget),
+   git-hosted Maven (`openhorizon-labs/sapient-android`,
+   `so.openhorizon:sapient`), npm (`@openhorizon-labs/sapient`) — all
+   updated per release by release.yml. Still open: SwiftPM-registry / Maven
+   Central publishing, and npm for the RN on-device package (its native
+   libs are monorepo build outputs — prebuilt-binary packaging is its own
+   rung).
+4. **Native Node transport:** napi module for Node over `sapient-ffi` —
+   same `SapientClient` API, no server (React Native's JSI transport ✅
+   shipped as `@openhorizon-labs/sapient-react-native`).
+5. **On-device niceties:** ~~thermal governor hooks~~ ✅ shipped
+   (`set_thermal_level`, §7); still open — download progress callbacks,
+   background-safe model eviction.
+6. **Typed mid-stream errors:** promote the engine's in-band `Error: …`
    stream fragment to a typed error (`Result`-carrying stream in
    `sapient-generate` — shared with serve; flagged in the PR #38 review).

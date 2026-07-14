@@ -12,6 +12,11 @@
 #                                 as a binaryTarget. Drag into Xcode or
 #                                 depend on it with a path dependency.
 #   sapient-swift.zip           — the same package, zipped for distribution
+#   SapientFFI.xcframework.zip  — the bare XCFramework (framework at zip root,
+#                                 as SwiftPM requires) + .sha256 — the release
+#                                 asset that openhorizon-labs/sapient-swift's
+#                                 remote `.binaryTarget(url:checksum:)` points
+#                                 at, so consumers add the package by URL.
 #
 # --smoke additionally compiles and RUNS a small macOS executable against
 # the packaged static lib (version + catalog + alias resolution) — the
@@ -161,6 +166,24 @@ EOF
 
 (cd "$OUT_DIR" && rm -f sapient-swift.zip && zip -qry sapient-swift.zip sapient-swift)
 
+# Bare-XCFramework zip for SwiftPM's remote binaryTarget (framework must sit
+# at the zip root). Its SHA-256 doubles as the SwiftPM checksum — verified
+# against `swift package compute-checksum` so the Package.swift the dist-swift
+# release job writes can never carry a mismatched value.
+echo "==> Zipping bare XCFramework for the SwiftPM binaryTarget"
+(cd "$OUT_DIR" && rm -f SapientFFI.xcframework.zip \
+  && zip -qry SapientFFI.xcframework.zip SapientFFI.xcframework \
+  && shasum -a 256 SapientFFI.xcframework.zip > SapientFFI.xcframework.zip.sha256)
+# (run inside the generated package — the subcommand needs a Package.swift cwd
+# on some toolchains; the zip path is absolutized first)
+XCF_ZIP_ABS="$(cd "$OUT_DIR" && pwd)/SapientFFI.xcframework.zip"
+SPM_CHECKSUM=$(cd "$PKG" && swift package compute-checksum "$XCF_ZIP_ABS")
+SHA_CHECKSUM=$(cut -d' ' -f1 "$OUT_DIR/SapientFFI.xcframework.zip.sha256")
+if [[ "$SPM_CHECKSUM" != "$SHA_CHECKSUM" ]]; then
+  echo "error: SwiftPM checksum ($SPM_CHECKSUM) != sha256 ($SHA_CHECKSUM)" >&2
+  exit 1
+fi
+
 if [[ "$SMOKE" == "1" ]]; then
   echo "==> Smoke test: compile & run a macOS binary against the package"
   SMOKE_DIR="$OUT_DIR/smoke-swift"
@@ -187,4 +210,5 @@ EOF
 fi
 
 echo "==> Done:"
-du -sh "$XCF" "$PKG" "$OUT_DIR/sapient-swift.zip" 2>/dev/null || true
+du -sh "$XCF" "$PKG" "$OUT_DIR/sapient-swift.zip" \
+  "$OUT_DIR/SapientFFI.xcframework.zip" 2>/dev/null || true

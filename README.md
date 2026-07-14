@@ -241,48 +241,94 @@ let text = p.generate_with_config("Write a haiku about Rust", &cfg).await?;
 
 ## SDKs — Swift · Kotlin · TypeScript (mobile & embedding)
 
-Embed the same engine outside Rust (first cut — see
-[`docs/MOBILE.md`](docs/MOBILE.md) for build recipes, packaging status, and
-the **safe-testing guide for personal devices**):
+The same engine, on-device in your app — **GPU by default** (wgpu: Metal on
+iOS/macOS, Vulkan on Android; probed at load, CPU fallback) and
+**engine-level thermal governance** (`setThermalLevel(...)` sheds decode
+threads as the phone heats — MOBILE.md §6–7). One object API, generated from
+the [`sapient-ffi`](crates/sapient-ffi) crate via UniFFI:
+`LlmSession.load(model, options)` → `chat(...)` / `chatStream(..., listener)`
+(token callback; return `false` to cancel) / `reset()`. Full guide, including
+the **safe-testing ladder for personal devices**:
+[`docs/MOBILE.md`](docs/MOBILE.md).
 
-- **Swift (iOS/macOS) & Kotlin (Android/JVM)** — generated from the
-  [`sapient-ffi`](crates/sapient-ffi) crate via UniFFI. One object API:
-  `LlmSession.load(model, options)` → `chat(...)` /
-  `chatStream(..., listener)` (token callback; return `false` to cancel) /
-  `reset()`. Ready-made packages ship with every release
-  (`sapient-swift.zip` — XCFramework + Swift Package for iOS/simulator/macOS;
-  `sapient-android.zip` — drop-in Gradle module), or build them locally with
-  `scripts/package-swift.sh` / `scripts/package-android.sh`. The packages
-  include **GPU inference (wgpu: Metal on iOS, Vulkan on Android)** — `auto`
-  probes for a GPU at load and falls back to CPU — and **thermal governance**:
-  forward the OS thermal signal via `setThermalLevel(...)` and the engine
-  sheds decode threads as the phone heats (MOBILE.md §6–7).
+<table>
+  <tr>
+    <td align="center"><img src="docs/assets/mobile/swift-ios-gpu-turn.png" width="260" alt="SwiftUI sample app — on-device turn on the iOS-simulator GPU"/><br/><sub>SwiftUI (iOS) — on-device, wgpu→Metal</sub></td>
+    <td align="center"><img src="docs/assets/mobile/android-ondevice-turn.png" width="260" alt="Jetpack Compose sample app — on-device turn on the Android emulator via wgpu/Vulkan"/><br/><sub>Jetpack Compose (Android) — on-device, wgpu→Vulkan</sub></td>
+    <td align="center"><img src="docs/assets/mobile/rn-ios-ondevice-gpu-turn.png" width="260" alt="React Native sample app — on-device turn on the iOS-simulator GPU"/><br/><sub>React Native — on-device, wgpu→Metal</sub></td>
+  </tr>
+</table>
 
-  ```swift
-  let session = try LlmSession.load(model: "qwen2.5-0.5b",
-                                    options: GenerationOptions(maxTokens: 256))
-  let reply = try session.chat(userMessage: "Hi!")
-  ```
+### Swift (iOS / macOS)
 
-- **TypeScript (Node.js / React Native)** —
-  [`@openhorizon/sapient`](sdks/typescript): a zero-dependency,
-  transport-pluggable client. Default: HTTP to `sapient serve` with streaming
-  chat. **React Native runs fully on-device** via
-  [`@openhorizon/sapient-react-native`](sdks/react-native)
-  (UniFFI → JSI TurboModule over `sapient-ffi`, GPU included) — pass its
-  `NativeTransport` to the same `SapientClient` and nothing else changes.
+Xcode → *File → Add Package Dependencies* → paste
+`https://github.com/openhorizon-labs/sapient-swift` and pick a version — the
+XCFramework downloads automatically. (The same package ships as
+`sapient-swift.zip` on every
+[release](https://github.com/SkidGod4444/sapient/releases) for
+local/offline use.)
 
-  ```ts
-  import { SapientClient } from '@openhorizon/sapient';
-  const client = new SapientClient(); // http://127.0.0.1:11435
-  for await (const tok of client.chatStream(
-    [{ role: 'user', content: 'Tell me a haiku.' }], 'qwen2.5-0.5b'))
-    process.stdout.write(tok);
-  ```
+```swift
+import Sapient
+
+// Call off the main thread — load() blocks and downloads on first run.
+let session = try LlmSession.load(model: "qwen2.5-0.5b",
+                                  options: GenerationOptions(maxTokens: 256))
+let reply = try session.chat(userMessage: "Hi!")
+```
+
+### Kotlin (Android)
+
+```kotlin
+// settings.gradle.kts (dependencyResolutionManagement) — or build.gradle.kts:
+repositories {
+    maven { url = uri("https://raw.githubusercontent.com/openhorizon-labs/sapient-android/main") }
+}
+// app/build.gradle.kts — JNA + kotlinx-coroutines arrive as transitive deps:
+dependencies {
+    implementation("so.openhorizon:sapient:0.6.0")
+}
+```
+
+```kotlin
+import uniffi.sapient_ffi.*
+
+// From Dispatchers.IO; point HF_HOME at app storage first (MOBILE.md §4).
+val session = LlmSession.load("qwen2.5-0.5b", GenerationOptions(maxTokens = 256u))
+val reply = session.chat("Hi!")
+```
+
+(Also available as `sapient-android.zip` — a drop-in Gradle module — on every
+release.)
+
+### TypeScript (Node.js / React Native → `sapient serve`)
+
+```bash
+npm install @openhorizon-labs/sapient
+```
+
+```ts
+import { SapientClient } from '@openhorizon-labs/sapient';
+const client = new SapientClient(); // http://127.0.0.1:11435
+for await (const tok of client.chatStream(
+  [{ role: 'user', content: 'Tell me a haiku.' }], 'qwen2.5-0.5b'))
+  process.stdout.write(tok);
+```
+
+Zero-dependency and transport-pluggable: HTTP to `sapient serve` by default.
+**React Native runs fully on-device** via
+[`@openhorizon-labs/sapient-react-native`](sdks/react-native)
+(UniFFI → JSI TurboModule over `sapient-ffi`, GPU included) — pass its
+`NativeTransport` to the same `SapientClient` and nothing else changes. Its
+native libraries build from this repo (not on npm yet — prebuilt-binary
+packaging is a tracked rung): see [`docs/MOBILE.md`](docs/MOBILE.md).
 
 - **Sample apps** — [`examples/`](examples): streaming chat apps for all
   three stacks (SwiftUI macOS+iOS, Jetpack Compose, React Native/Expo),
   CI-built.
+
+> **License note:** SAPIENT is GPL-3.0 — an app that embeds these SDKs is
+> subject to the GPL's terms. See [LICENSE](LICENSE).
 
 ---
 

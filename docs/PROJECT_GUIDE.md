@@ -55,12 +55,16 @@ summary before we dive into the internals.
 Intel/AMD/Nvidia — and Intel Macs ship a `-gpu` (wgpu→Metal) build. There's also a live
 `sapient stats` resource monitor.
 
-**Mobile & embedding SDKs (Phase 11 first cut).** SAPIENT can now be embedded outside Rust:
-the `sapient-ffi` crate generates **Swift** (iOS/macOS) and **Kotlin** (Android/JVM) bindings
-via UniFFI (chat + streaming with cancel, model catalog), with iOS and Android cross-compiles
-validated; Node.js / React Native get the first-party **TypeScript SDK**
-(`@openhorizon/sapient`) that talks to `sapient serve` with streaming. Build recipes and the
-personal-device safe-testing ladder live in `docs/MOBILE.md`.
+**Mobile & embedding SDKs (Phase 11).** SAPIENT embeds outside Rust, with idiomatic
+distribution per ecosystem (all under the `openhorizon-labs` org, refreshed per release):
+**Swift** — add `https://github.com/openhorizon-labs/sapient-swift` by URL in Xcode
+(checksum-pinned binary XCFramework); **Kotlin** — the git-hosted Maven repo
+`openhorizon-labs/sapient-android` (`so.openhorizon:sapient`, JNA + coroutines transitive);
+**TypeScript** — `npm install @openhorizon-labs/sapient` (HTTP to `sapient serve`,
+streaming); **React Native on-device** — `@openhorizon-labs/sapient-react-native`
+(JSI TurboModule, built from the repo). GPU by default (Metal on iOS, Vulkan on Android)
+with engine-level thermal governance. Build recipes and the personal-device
+safe-testing ladder live in `docs/MOBILE.md`.
 
 **Performance leap (Sprint 1–3 engine overhaul):**
 - Flash-Edge attention: online-softmax tiled algorithm — O(head_dim) working memory, NEON `vfmaq_f32`.
@@ -484,10 +488,10 @@ same `Pipeline` the CLI uses (prefix cache on, so multi-turn chats skip re-prefi
 history). Cross-compiles are validated for iOS device/simulator and Android arm64.
 
 Node.js and React Native use the **TypeScript SDK** (`sdks/typescript`, npm name
-`@openhorizon/sapient`): a zero-dependency, transport-pluggable client. The default
+`@openhorizon-labs/sapient`): a zero-dependency, transport-pluggable client. The default
 transport talks to `sapient serve` over its OpenAI-compatible API with streaming
 (`chatStream` async generator). **React Native also runs fully on-device**: the
-`sdks/react-native` package (`@openhorizon/sapient-react-native`) is generated from
+`sdks/react-native` package (`@openhorizon-labs/sapient-react-native`) is generated from
 `sapient-ffi` by uniffi-bindgen-react-native (TypeScript + JSI C++ + a TurboModule) and
 ships a `NativeTransport` that plugs into the same `SapientClient` — verified by a real
 in-app inference turn on the iOS simulator running on the wgpu→Metal GPU. **Read

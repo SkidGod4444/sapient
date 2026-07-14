@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-const REPO: &str = "openstackhq/sapient";
+const REPO: &str = "openhorizon-labs/sapient";
 const BINARY: &str = "sapient";
 /// MLX's compiled Metal shader library. The Metal build ships it next to the
 /// binary because MLX loads it from the executable's directory at runtime.

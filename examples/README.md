@@ -8,7 +8,7 @@ safe-testing ladder for personal hardware.
 |---|---|---|---|
 | [`swift-chat`](swift-chat) | SwiftUI — macOS app + iOS app (XcodeGen) | **on-device** via `sapient-ffi` | `./scripts/package-swift.sh` |
 | [`android-chat`](android-chat) | Jetpack Compose | **on-device** via `sapient-ffi` | `./scripts/package-android.sh` |
-| [`react-native-chat`](react-native-chat) | Expo / React Native + TypeScript SDK | **on-device** via `@openhorizon/sapient-react-native` (UniFFI→JSI), or `sapient serve` — runtime toggle | `sdks/react-native` built (`npm run ubrn:ios`) |
+| [`react-native-chat`](react-native-chat) | Expo / React Native + TypeScript SDK | **on-device** via `@openhorizon-labs/sapient-react-native` (UniFFI→JSI), or `sapient serve` — runtime toggle | `sdks/react-native` built (`npm run ubrn:ios`) |
 
 All three share the same shape: streaming token-by-token chat, Stop
 (cancels generation engine/server-side), a model field defaulting to

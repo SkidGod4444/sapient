@@ -7,9 +7,51 @@ section below as the GitHub release body.
 
 SAPIENT goes mobile: the engine runs **on-device** in Swift, Kotlin, and React
 Native apps — **GPU by default** (Metal on iOS/macOS, Vulkan on Android) with
-**engine-level thermal governance**. The CPU-parity ladder closes with the
-Q8_K activation format (**Jetson Thor dense decode +46% cumulative since
-v0.5.0**), and a model beta-test sweep fixes four user-facing bugs.
+**engine-level thermal governance** — and the SDKs install the idiomatic way
+per ecosystem: **SwiftPM by URL, Maven for Android, npm for TypeScript**. The
+CPU-parity ladder closes with the Q8_K activation format (**Jetson Thor dense
+decode +46% cumulative since v0.5.0**), and a model beta-test sweep fixes
+four user-facing bugs.
+
+### 📦 SDK distribution — how you get the SDKs
+
+- **Swift**: add `https://github.com/openhorizon-labs/sapient-swift` in Xcode —
+  its `Package.swift` points a checksum-pinned remote `binaryTarget` at the
+  release's `SapientFFI.xcframework.zip` asset, re-pointed by the release
+  workflow on every tag.
+- **Android**: a git-hosted Maven repository at
+  `openhorizon-labs/sapient-android` —
+  `implementation("so.openhorizon:sapient:0.6.0")` (+ one `maven { url }`
+  line); the AAR's POM carries JNA and kotlinx-coroutines as transitive
+  deps. Maven Central is a later rung.
+- **npm**: the TypeScript SDK publishes as **`@openhorizon-labs/sapient`**
+  (the React Native on-device package shares the scope but stays
+  repo-distributed for now: its native libs are monorepo build outputs).
+- **release.yml**: `dist-swift`, `dist-android-maven`, and token-gated
+  `publish-npm` jobs; the `openhorizon-labs/sapient` binary mirror waits for the
+  mobile packaging jobs, so the SDK zips reliably reach it.
+- **README**: mobile section rebuilt — per-platform install snippets +
+  on-device screenshots (all three stacks) + a GPL-3.0 embedding note;
+  `docs/MOBILE.md` gained a consumption-first quickstart.
+
+### 🐛 Android on-device fixes (found by the first real emulator run)
+
+- **`libsapient_ffi.so` linked the NDK's *shared* C++ runtime**
+  (`libc++_shared.so`) — which nothing ships to consumer apps, so every app
+  died at first load with `UnsatisfiedLinkError`. The C++ runtime is now
+  static (`CXXSTDLIB=c++_static` + `-lc++abi`), and `package-android.sh`
+  gates on it (readelf NEEDED + undefined-C++-symbol checks). Invisible to
+  `assembleDebug`; only a real dlopen catches it.
+- **`HF_HOME` was silently ignored by the model downloader** — `HubClient`
+  used hf-hub's `ApiBuilder::new()`, which hard-codes the home-dir cache and
+  panics (`Cache directory cannot be found`) on Android, where app processes
+  have no home. Now `ApiBuilder::from_env()`: `set_cache_dir` / `HF_HOME`
+  is honored on **every** platform (macOS/iOS previously worked only because
+  a home dir happened to exist).
+- Kotlin sample app **emulator-validated end-to-end** for the first time —
+  a real streamed turn on `smollm2-135m-q4`, and it ran on
+  **wgpu→Vulkan** (the emulator's SwiftShader software Vulkan), proving the
+  quantized WGSL stack on Android. Screenshot in the README.
 
 ### 📱 Mobile & embedding SDKs — Phase 11 (#38, #39, #40, #43, #44, #46)
 
@@ -38,12 +80,12 @@ v0.5.0**), and a model beta-test sweep fixes four user-facing bugs.
   documented traps handled, Android `PowerManager.addThermalStatusListener`
   with Google's ADPF mapping. MLC, llama.cpp-mobile, and MediaPipe ship no
   engine-side thermal response.
-- **React Native on-device** — `@openhorizon/sapient-react-native`:
+- **React Native on-device** — `@openhorizon-labs/sapient-react-native`:
   uniffi-bindgen-react-native generates the TS + JSI TurboModule straight
   from the FFI crate; the TypeScript SDK gained a `Transport` seam
   (`HttpTransport` unchanged default, `NativeTransport` runs the engine
   in-process). Example app defaults to on-device with a server-mode toggle.
-- **TypeScript SDK** (`sdks/typescript`, `@openhorizon/sapient`) —
+- **TypeScript SDK** (`sdks/typescript`, `@openhorizon-labs/sapient`) —
   zero-dependency client for `sapient serve`: `chat`, SSE `chatStream` with
   cancel-on-break, `models`, `health`; injectable `fetch` (React Native
   streams via `expo/fetch`).

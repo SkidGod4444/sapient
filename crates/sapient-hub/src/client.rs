@@ -81,7 +81,13 @@ impl HubClient {
             .or_else(|| std::env::var("HF_TOKEN").ok())
             .or_else(Self::read_cached_token);
 
-        let builder = ApiBuilder::new();
+        // from_env, NOT new: `new()` hard-codes `Cache::default()`, which
+        // ignores HF_HOME and panics ("Cache directory cannot be found") on
+        // platforms with no home dir — Android app processes. from_env()
+        // honors HF_HOME, which is what `sapient-ffi`'s set_cache_dir and the
+        // mobile docs promise. (iOS/desktop only worked because a home dir
+        // exists there — HF_HOME was silently ignored.)
+        let builder = ApiBuilder::from_env();
         let builder = if let Some(t) = token {
             builder.with_token(Some(t))
         } else {

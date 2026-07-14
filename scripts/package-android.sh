@@ -79,10 +79,21 @@ build_abi() { # rust-target abi-dir clang-prefix
   rustup target list --installed | grep -q "^$target\$" || rustup target add "$target"
   local tu; tu=$(echo "$target" | tr '-' '_')
   echo "==> Building $target"
+  # CXXSTDLIB=c++_static folds the NDK C++ runtime (esaxx is C++) into the
+  # .so — cc-rs defaults to emitting `-lc++_shared` on Android, and nothing
+  # ships libc++_shared.so to consumers, so every app died at first load with
+  # UnsatisfiedLinkError (found by the first real emulator run — invisible to
+  # assembleDebug, which never dlopens). A driver-level -static-libstdc++
+  # alone does NOT fix it: the cc crate's explicit -l wins. libc++abi must be
+  # appended too (the NDK splits it out of libc++_static.a — without it the
+  # dlopen fails on __gxx_personality_v0); trailing link-args resolve the
+  # earlier archive's undefined symbols.
   env "CC_${tu}=$NDK_BIN/${prefix}${API}-clang" \
       "CXX_${tu}=$NDK_BIN/${prefix}${API}-clang++" \
       "AR_${tu}=$NDK_BIN/llvm-ar" \
+      "CXXSTDLIB_${tu}=c++_static" \
       "CARGO_TARGET_$(echo "$tu" | tr '[:lower:]' '[:upper:]')_LINKER=$NDK_BIN/${prefix}${API}-clang" \
+      "CARGO_TARGET_$(echo "$tu" | tr '[:lower:]' '[:upper:]')_RUSTFLAGS=-C link-arg=-lc++abi" \
       cargo build -p sapient-ffi --release --target "$target" $FEATURES
   JNILIBS_SRC+=("target/$target/release/libsapient_ffi.so:$abi")
 }
@@ -110,6 +121,29 @@ SYMS=$("$NDK_BIN/llvm-nm" -D --defined-only "target/aarch64-linux-android/releas
 [[ "$SYMS" -gt 0 ]] || { echo "error: no uniffi exports in the .so" >&2; exit 1; }
 echo "    $SYMS uniffi entry points exported"
 
+# ── Verify the .so is self-contained (no libc++_shared.so dependency) ────────
+# Nothing ships libc++_shared.so to consumers — a NEEDED entry for it means
+# every app using the module crashes at first load.
+if "$NDK_BIN/llvm-readelf" -d "target/aarch64-linux-android/release/libsapient_ffi.so" \
+    | grep -q 'libc++_shared'; then
+  echo "error: libsapient_ffi.so depends on libc++_shared.so — the C++ runtime" >&2
+  echo "       must be linked statically (CXXSTDLIB=c++_static)" >&2
+  exit 1
+fi
+# NEEDED alone isn't enough: undefined C++ runtime symbols (e.g.
+# __gxx_personality_v0 when libc++abi is missing) also kill dlopen while
+# passing the NEEDED check. bionic provides __cxa_atexit/finalize, so only
+# match the personality routine and std:: symbols.
+UNDEF_CXX=$("$NDK_BIN/llvm-nm" -D --undefined-only \
+    "target/aarch64-linux-android/release/libsapient_ffi.so" \
+  | grep -cE '__gxx_personality|_ZNSt|_ZSt' || true)
+if [[ "$UNDEF_CXX" -gt 0 ]]; then
+  echo "error: $UNDEF_CXX undefined C++ runtime symbols in the .so — dlopen" >&2
+  echo "       will fail on-device (is -lc++abi on the link line?)" >&2
+  exit 1
+fi
+echo "    C++ runtime fully static (no libc++_shared NEEDED, no undefined C++ symbols)"
+
 # ── Assemble the Gradle module ────────────────────────────────────────────────
 MOD="$OUT_DIR/sapient-android"
 rm -rf "$MOD"
@@ -125,6 +159,7 @@ cat > "$MOD/build.gradle.kts" <<EOF
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
+    id("maven-publish")
 }
 
 android {
@@ -136,6 +171,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+    publishing { singleVariant("release") }
 }
 
 dependencies {
@@ -145,6 +181,39 @@ dependencies {
     // chat_messages_stream) generate suspend functions —
     // suspendCancellableCoroutine needs kotlinx-coroutines.
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+}
+
+// Maven publication — used by scripts/android-maven (locally) and the
+// release workflow's dist-android-maven job to publish the AAR + POM into
+// the git-hosted Maven repo at openhorizon-labs/sapient-android. Inert for
+// plain project(":sapient-android") consumers.
+publishing {
+    publications {
+        register<MavenPublication>("release") {
+            groupId = "so.openhorizon"
+            artifactId = "sapient"
+            version = (project.findProperty("sapientVersion") as String?) ?: "0.0.0-local"
+            afterEvaluate { from(components["release"]) }
+            pom {
+                name.set("SAPIENT Android")
+                description.set("On-device LLM inference for Android — UniFFI Kotlin bindings over the pure-Rust SAPIENT engine (GPU via wgpu/Vulkan, engine-level thermal governance).")
+                url.set("https://github.com/SkidGod4444/sapient")
+                licenses {
+                    license {
+                        name.set("GPL-3.0-only")
+                        url.set("https://www.gnu.org/licenses/gpl-3.0.html")
+                    }
+                }
+                scm { url.set("https://github.com/SkidGod4444/sapient") }
+            }
+        }
+    }
+    repositories {
+        maven {
+            name = "dist"
+            url = uri((project.findProperty("sapientMavenDir") as String?) ?: "\${rootDir}/maven-out")
+        }
+    }
 }
 EOF
 cat > "$MOD/README.md" <<'EOF'

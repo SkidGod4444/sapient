@@ -1,4 +1,4 @@
-# @openhorizon/sapient-react-native
+# @openhorizon-labs/sapient-react-native
 
 **On-device SAPIENT inference for React Native** — the engine runs inside
 your app (UniFFI → JSI TurboModule over
@@ -14,8 +14,8 @@ since Expo SDK 52 / RN 0.76. Hermes only.
 ## Use with the TypeScript SDK (recommended)
 
 ```ts
-import { SapientClient } from '@openhorizon/sapient';
-import { NativeTransport } from '@openhorizon/sapient-react-native';
+import { SapientClient } from '@openhorizon-labs/sapient';
+import { NativeTransport } from '@openhorizon-labs/sapient-react-native';
 
 const client = new SapientClient({
   transport: new NativeTransport({ cacheDir: appCachesDir }),

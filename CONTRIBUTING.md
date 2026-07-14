@@ -117,7 +117,7 @@ crates/
 └── sapient-cli/            # `sapient` binary (chat REPL uses a rustyline line
                             #   editor + markdown.rs live Markdown/code rendering)
 
-sdks/typescript/            # @openhorizon/sapient — TS SDK for Node.js/React Native
+sdks/typescript/            # @openhorizon-labs/sapient — TS SDK for Node.js/React Native
                             #   (talks to `sapient serve`; npm test = tsc + node --test)
 examples/                   # Sample chat apps: swift-chat (SwiftUI macOS+iOS),
                             #   android-chat (Compose), react-native-chat (Expo)
@@ -516,7 +516,21 @@ The [release workflow](.github/workflows/release.yml) builds binaries for:
 - Linux (x86_64 + aarch64)
 - Windows (x86_64 + ARM64)
 
-and attaches `install.sh` / `install.ps1` to the GitHub Release.
+and attaches `install.sh` / `install.ps1` to the GitHub Release, plus the
+mobile SDK artifacts (`sapient-swift.zip`, `sapient-android.zip`,
+`SapientFFI.xcframework.zip` + sha256s). Post-release jobs then update the
+**distribution channels** under the `openhorizon-labs` org (pushed with the
+`GH_TOKEN_DIST` secret — its token must cover that org):
+
+- `release-dist` mirrors all archives to `openhorizon-labs/sapient` (the repo
+  `sapient update` reads).
+- `dist-swift` re-points `openhorizon-labs/sapient-swift`'s `Package.swift`
+  at the new `SapientFFI.xcframework.zip` (checksum-pinned) and tags it.
+- `dist-android-maven` builds the AAR and publishes
+  `so.openhorizon:sapient:<version>` into the git-hosted Maven repo
+  `openhorizon-labs/sapient-android`.
+- `publish-npm` publishes `@openhorizon-labs/sapient` (skips without an
+  `NPM_TOKEN` secret or when the version already exists).
 
 Install URLs in docs should point to release assets:
 
