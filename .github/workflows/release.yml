@@ -555,9 +555,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Node 22 (matching ci.yml's sdk-ts job): the SDK's test script passes a
+      # glob to `node --test`, which only Node ≥ 22 expands — on Node 20 the
+      # prepublishOnly gate dies with "Could not find test/*.test.mjs".
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           registry-url: https://registry.npmjs.org
 
       - name: Publish TypeScript SDK
