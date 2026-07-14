@@ -416,6 +416,10 @@ napi/JSI over the FFI crate next). Full build/use/testing guide (including the
   codegen); the library's own `node_modules/react-native` must be
   Metro-block-listed in consuming apps (newer RN, Flow `match` syntax);
   `noOverwrite: [src/index.tsx]` protects the transport re-export.
+  The example app runs on **Expo SDK 54 / RN 0.81** (upgraded 2026-07-14 to
+  clear seven unfixable `tar` advisories — `@expo/cli` only moved to tar 7 in
+  SDK 53+, and SDK 53/RN 0.79 can't compile its vendored `fmt` under Xcode 26;
+  re-gated by a real on-device simulator turn, still wgpu→Metal).
   Remaining: napi transport for Node, Android app-level validation
   (library `.so` + CMake wired; emulator Vulkan is unreliable — physical
   device is the honest gate), ubrn→0.31 line upgrade (Android 16KB pages).

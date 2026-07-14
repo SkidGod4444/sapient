@@ -13,7 +13,7 @@
 import { SapientClient, type ChatMessage } from '@openhorizon-labs/sapient';
 import { NativeTransport } from '@openhorizon-labs/sapient-react-native';
 import { fetch as expoFetch } from 'expo/fetch';
-import * as FileSystem from 'expo-file-system';
+import { Paths } from 'expo-file-system';
 import { StatusBar } from 'expo-status-bar';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -44,8 +44,11 @@ type Mode = 'device' | 'server';
 
 // Keep model downloads inside the app sandbox's Caches so the OS can
 // reclaim them and uninstall removes them (docs/MOBILE.md §5.4).
-const cacheDir = FileSystem.cacheDirectory
-  ? FileSystem.cacheDirectory.replace(/^file:\/\//, '') + 'sapient'
+// The engine wants a plain filesystem path, so strip expo-file-system's
+// `file://` URI scheme. (SDK 54 replaced `FileSystem.cacheDirectory` with
+// the `Paths` API.)
+const cacheDir = Paths.cache?.uri
+  ? Paths.cache.uri.replace(/^file:\/\//, '').replace(/\/?$/, '/') + 'sapient'
   : undefined;
 
 export default function App() {
