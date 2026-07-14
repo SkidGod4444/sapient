@@ -28,7 +28,12 @@ config.resolver.nodeModulesPaths = [
 // anyway. Resolve those two only from THIS app's node_modules; everything
 // else in the library's node_modules (e.g. uniffi-bindgen-react-native's
 // runtime) stays resolvable.
-const exclusionList = require('metro-config/src/defaults/exclusionList');
+// metro-config only exports `./private/*` now — the old
+// `metro-config/src/defaults/exclusionList` deep import throws
+// ERR_PACKAGE_PATH_NOT_EXPORTED on the Metro that ships with Expo SDK 54 —
+// and the module is ESM-interop, so the function hangs off `.default`.
+const exclusionListModule = require('metro-config/private/defaults/exclusionList');
+const exclusionList = exclusionListModule.default ?? exclusionListModule;
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 config.resolver.blockList = exclusionList([
   new RegExp(`${escapeRe(nativePath)}/node_modules/react-native/.*`),
