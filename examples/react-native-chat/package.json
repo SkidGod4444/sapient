@@ -13,8 +13,8 @@
     "ios": "expo run:ios"
   },
   "dependencies": {
-    "@openhorizon/sapient": "file:../../sdks/typescript",
-    "@openhorizon/sapient-react-native": "file:../../sdks/react-native",
+    "@openhorizon-labs/sapient": "file:../../sdks/typescript",
+    "@openhorizon-labs/sapient-react-native": "file:../../sdks/react-native",
     "expo": "~52.0.0",
     "expo-asset": "~11.0.5",
     "expo-file-system": "~18.0.12",

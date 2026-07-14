@@ -1,5 +1,5 @@
 {
-  "name": "@openhorizon/sapient-react-native",
+  "name": "@openhorizon-labs/sapient-react-native",
   "version": "0.1.0",
   "description": "On-device SAPIENT inference for React Native (UniFFI JSI TurboModule)",
   "main": "./lib/module/index.js",

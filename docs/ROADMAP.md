@@ -65,15 +65,24 @@
   the `sapient-ffi` crate (UniFFI, sync + async exports) with idiomatic **Swift**
   and **Kotlin** bindings; one-command packaging (`SapientFFI.xcframework` +
   Swift Package, drop-in Android Gradle module — both attached to every release);
-  the **TypeScript SDK** (`@openhorizon/sapient`, transport-pluggable) and
-  **React Native on-device** (`@openhorizon/sapient-react-native`, JSI
+  the **TypeScript SDK** (`@openhorizon-labs/sapient`, transport-pluggable) and
+  **React Native on-device** (`@openhorizon-labs/sapient-react-native`, JSI
   TurboModule via uniffi-bindgen-react-native); three streaming sample chat
   apps (SwiftUI / Compose / Expo) all running the engine **on-device with GPU
   by default** (wgpu: Metal on iOS/macOS, Vulkan on Android; adapter-probe CPU
   fallback) and **engine-level thermal governance** (`set_thermal_level`).
+  **Distribution channels shipped (2026-07-14, org `openhorizon-labs`):**
+  SwiftPM by URL (`openhorizon-labs/sapient-swift`, checksum-pinned remote
+  binaryTarget), git-hosted Maven (`openhorizon-labs/sapient-android`,
+  `so.openhorizon:sapient`), npm (`@openhorizon-labs/sapient`) — all
+  refreshed per release; binary mirror moved to `openhorizon-labs/sapient`.
+  Two Android-blocking bugs found by the first real emulator run: the `.so`
+  needed the never-shipped `libc++_shared.so` (now static, script-gated) and
+  `HF_HOME` was silently ignored (`ApiBuilder::from_env`).
   Dev-safety + build guide: [MOBILE.md](MOBILE.md). Remaining slivers: typed
-  mid-stream errors (11.6), Node napi transport, store publishing
-  (SwiftPM-registry/Maven), physical-device 1B success-metric run.
+  mid-stream errors (11.6), Node napi transport, SwiftPM-registry/Maven
+  Central, npm for the RN on-device package (prebuilt-binary rung),
+  physical-device 1B success-metric run.
 - 🚧 **Streaming voice loop (Phase 10 first cut)** — incremental STT during speech
   (`LiveStt`, transcript ready at end-of-utterance), early-first-clause TTS handoff,
   barge-in (`SpeakerPlayback::clear` + mic monitor), per-turn latency breakdown.
@@ -326,7 +335,7 @@ napi/JSI over the FFI crate next). Full build/use/testing guide (including the
   cdylib via NDK 26 (~11 MB `.so`; `CXX_aarch64_linux_android` required —
   esaxx-rs is C++). Audio-device deps (cpal) stay out of this dependency chain
   (feature-gated off).
-- [x] **TypeScript SDK first cut** (`sdks/typescript`, `@openhorizon/sapient`) —
+- [x] **TypeScript SDK first cut** (`sdks/typescript`, `@openhorizon-labs/sapient`) —
   `SapientClient` with injectable `fetch` (Node ≥ 18 / RN / expo-fetch):
   `chat`, `chatStream` (SSE, break/abort cancels server-side), `models`,
   `health`. Zero runtime deps; 11 tests (SSE decoder units + mock-serve
@@ -345,8 +354,12 @@ napi/JSI over the FFI crate next). Full build/use/testing guide (including the
   (ubuntu); release.yml builds both and attaches
   `sapient-swift.zip`/`sapient-android.zip` (+ sha256) to every release via
   the existing artifact globs. Sizes: Swift zip ~180 MB (static slices;
-  a linked app pays ~53 MB), Android zip ~4 MB. Still open: SwiftPM-registry
-  / Maven publishing (needs Gradle-in-CI; the module bundle stands in).
+  a linked app pays ~53 MB), Android zip ~4 MB. **Distribution channels
+  shipped 2026-07-14** (see the 11.4b/11.5 follow-up below): SwiftPM by URL,
+  git-hosted Maven, npm — release.yml jobs `dist-swift` /
+  `dist-android-maven` / `publish-npm` update `openhorizon-labs/{sapient-swift,
+  sapient-android}` + npm per tag. Still open: SwiftPM-registry / Maven
+  Central (the git-hosted channels stand in).
 - [x] **Sample apps** (2026-07-11) — three chat apps in `examples/`, all
   streaming with engine-side cancel and `smollm2-135m-q4` dev defaults per the
   MOBILE.md ladder: `swift-chat` (shared SwiftUI view; macOS app runs via
@@ -383,7 +396,7 @@ napi/JSI over the FFI crate next). Full build/use/testing guide (including the
   generation on `scenePhase != .active`. Physical-device measurements are
   the user-driven ladder-rung-4 step.
 - [x] **React Native on-device** (2026-07-12) — `sdks/react-native`
-  (`@openhorizon/sapient-react-native`): **uniffi-bindgen-react-native**
+  (`@openhorizon-labs/sapient-react-native`): **uniffi-bindgen-react-native**
   (ubrn 0.29.3-1, pinned in lockstep with `uniffi = "=0.29.3"` — a mismatch
   fails the contract check) generates TS + JSI C++ + the TurboModule straight
   from the sapient-ffi proc-macros; GPU (wgpu) feature on. New FFI surface it

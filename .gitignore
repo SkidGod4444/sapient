@@ -8,3 +8,7 @@ results/
 # Mobile packaging output (scripts/package-{swift,android}.sh)
 dist/
 .DS_Store
+
+# Gradle state from the android-maven publishing scaffold
+scripts/android-maven/.gradle/
+scripts/android-maven/build/

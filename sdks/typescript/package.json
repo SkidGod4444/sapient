@@ -1,6 +1,6 @@
 {
-  "name": "@openhorizon/sapient",
-  "version": "0.1.0",
+  "name": "@openhorizon-labs/sapient",
+  "version": "0.6.0",
   "description": "TypeScript SDK for SAPIENT — talk to a local `sapient serve` from Node.js or React Native, with streaming chat",
   "license": "GPL-3.0-only",
   "repository": {
@@ -21,12 +21,17 @@
     "dist",
     "README.md"
   ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "engines": {
     "node": ">=18"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test \"test/*.test.mjs\""
+    "test": "npm run build && node --test \"test/*.test.mjs\"",
+    "prepublishOnly": "npm run build && npm test"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

@@ -1,4 +1,4 @@
-// On-device Transport for the SAPIENT TypeScript SDK (`@openhorizon/sapient`).
+// On-device Transport for the SAPIENT TypeScript SDK (`@openhorizon-labs/sapient`).
 //
 // Structurally implements the SDK's `Transport` interface — pass it via
 // `new SapientClient({ transport: new NativeTransport() })` and existing UI

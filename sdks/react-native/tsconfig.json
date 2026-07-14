@@ -2,7 +2,7 @@
   "compilerOptions": {
     "rootDir": ".",
     "paths": {
-      "@openhorizon/sapient-react-native": [
+      "@openhorizon-labs/sapient-react-native": [
         "./src/index"
       ]
     },

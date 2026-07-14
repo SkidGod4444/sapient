@@ -1,7 +1,7 @@
 // SAPIENT chat over the TypeScript SDK — now with BOTH transports:
 //
 //   • on-device (default): the engine runs inside the app over
-//     @openhorizon/sapient-react-native (sapient-ffi → UniFFI → JSI).
+//     @openhorizon-labs/sapient-react-native (sapient-ffi → UniFFI → JSI).
 //     Needs a development build (`npx expo prebuild` + run) — Expo Go
 //     cannot load native code.
 //   • server: HTTP to `sapient serve` (the rung-0 dev loop from
@@ -10,8 +10,8 @@
 //
 // The SapientClient API is identical over both — only the transport
 // changes. Toggle at runtime in the header.
-import { SapientClient, type ChatMessage } from '@openhorizon/sapient';
-import { NativeTransport } from '@openhorizon/sapient-react-native';
+import { SapientClient, type ChatMessage } from '@openhorizon-labs/sapient';
+import { NativeTransport } from '@openhorizon-labs/sapient-react-native';
 import { fetch as expoFetch } from 'expo/fetch';
 import * as FileSystem from 'expo-file-system';
 import { StatusBar } from 'expo-status-bar';

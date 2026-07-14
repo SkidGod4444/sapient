@@ -1,4 +1,4 @@
-# @openhorizon/sapient
+# @openhorizon-labs/sapient
 
 TypeScript SDK for [SAPIENT](https://github.com/SkidGod4444/sapient) — run
 LLMs on your own hardware and talk to them from Node.js or React Native.
@@ -16,11 +16,11 @@ same API, no server process. See
 sapient serve            # listens on 127.0.0.1:11435
 
 # 2. In your app
-npm install @openhorizon/sapient
+npm install @openhorizon-labs/sapient
 ```
 
 ```ts
-import { SapientClient } from '@openhorizon/sapient';
+import { SapientClient } from '@openhorizon-labs/sapient';
 
 const client = new SapientClient(); // http://127.0.0.1:11435
 

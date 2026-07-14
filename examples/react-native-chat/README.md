@@ -4,7 +4,7 @@ Streaming chat UI over the [TypeScript SDK](../../sdks/typescript) with **two
 transports**, toggled at runtime in the header:
 
 - **on-device (default)** — the engine runs inside the app via
-  [`@openhorizon/sapient-react-native`](../../sdks/react-native)
+  [`@openhorizon-labs/sapient-react-native`](../../sdks/react-native)
   (`sapient-ffi` → UniFFI → JSI TurboModule). GPU (wgpu→Metal/Vulkan) with
   automatic CPU fallback; model downloads land in the app's Caches.
 - **server** — HTTP to `sapient serve` (the rung-0 dev loop from
