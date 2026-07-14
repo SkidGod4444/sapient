@@ -225,6 +225,22 @@ pub const CATALOG: &[SupportedModel] = &[
         gated: false,
         extra_aliases: &["qwen2.5-1.5b-q4", "qwen1.5b-q4"],
     },
+    // The smallest Qwen that is dependable at *agentic* tool use, quantized.
+    //
+    // 0.5B and 1.5B will call a trivial tool and then answer a question about
+    // their surroundings from imagination rather than calling the tool that
+    // would actually tell them — which, on a robot, is a fabricated sensor
+    // reading. 3B calls the tool. Quantized because the edge devices that most
+    // need an agent brain are exactly the ones that cannot spare 6 GB of
+    // safetensors for it: this is ~2 GB.
+    SupportedModel {
+        alias: "openhorizon/qwen2.5-3b-q4",
+        repo_id: "Qwen/Qwen2.5-3B-Instruct-GGUF",
+        family: "Qwen2.5",
+        params: "3B Q4_K_M",
+        gated: false,
+        extra_aliases: &["qwen2.5-3b-q4", "qwen3b-q4"],
+    },
     SupportedModel {
         alias: "openhorizon/smollm2-360m-q4",
         repo_id: "HuggingFaceTB/SmolLM2-360M-Instruct-GGUF",
