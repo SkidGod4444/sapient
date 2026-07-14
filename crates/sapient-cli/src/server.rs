@@ -473,12 +473,48 @@ struct ChatCompletionRequest {
 
 impl ChatCompletionRequest {
     /// The tools to expose, after applying `tool_choice: "none"`.
-    fn active_tools(&self) -> Option<&[serde_json::Value]> {
+    fn active_tools(&self) -> Option<Vec<serde_json::Value>> {
         if self.tool_choice.as_ref().and_then(|c| c.as_str()) == Some("none") {
             return None;
         }
-        self.tools.as_deref().filter(|t| !t.is_empty())
+        let tools = self.tools.as_deref().filter(|t| !t.is_empty())?;
+        Some(tools.iter().map(sanitize_tool).collect())
     }
+}
+
+/// Strip JSON-Schema *dialect* metadata from a tool definition.
+///
+/// Chat templates serialize each tool verbatim (`{{- tool | tojson }}`) straight
+/// into the model's tools preamble, so whatever the client sends is what the
+/// model reads. Zod v4's JSON-Schema emitter — which the Vercel AI SDK uses —
+/// tags every schema with `"$schema": "http://json-schema.org/draft-07/schema#"`.
+///
+/// That key is a declaration *about the schema language*; it says nothing about
+/// the function's arguments, and tool-trained models never saw it in training.
+/// Left in, a small model reads the preamble, drifts off-distribution, and
+/// answers in prose instead of calling the tool — verified on Qwen2.5-1.5B,
+/// where its presence alone is the difference between a `walk` call and the
+/// model merely *claiming* to have walked. On a robot, that distinction is the
+/// whole game.
+///
+/// Only dialect metadata is removed. Constraints the model should actually see
+/// (`enum`, `required`, `additionalProperties`, `minimum`, …) are preserved.
+fn sanitize_tool(tool: &serde_json::Value) -> serde_json::Value {
+    fn strip(v: &serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(map) => serde_json::Value::Object(
+                map.iter()
+                    .filter(|(k, _)| k.as_str() != "$schema")
+                    .map(|(k, v)| (k.clone(), strip(v)))
+                    .collect(),
+            ),
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(strip).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    strip(tool)
 }
 
 /// `POST /v1/audio/speech` body (OpenAI shape).
@@ -1177,7 +1213,7 @@ async fn handle_chat_completions(
     };
 
     let messages: Vec<ChatMessage> = to_chat_messages(&req.messages);
-    let tools: Option<Vec<serde_json::Value>> = req.active_tools().map(<[_]>::to_vec);
+    let tools: Option<Vec<serde_json::Value>> = req.active_tools();
     let cfg = build_config(
         req.max_tokens,
         req.temperature,
@@ -1995,6 +2031,40 @@ mod tests {
 
         assert_eq!(msgs[2].role, sapient_tokenizers::ChatRole::Tool);
         assert_eq!(msgs[2].content, "ok, moved 2m");
+    }
+
+    /// `$schema` must never reach the model.
+    ///
+    /// Templates dump each tool verbatim into the tools preamble, and a draft-07
+    /// dialect URL sitting in there is enough to knock a small tool-trained model
+    /// off-distribution: Qwen2.5-1.5B stops emitting `<tool_call>` and answers in
+    /// prose instead — it *claims* to have walked without walking. Zod v4 (and so
+    /// the Vercel AI SDK) tags every schema with it, making this the default
+    /// payload rather than an edge case.
+    #[test]
+    fn schema_dialect_key_is_stripped_from_tools() {
+        let req: ChatCompletionRequest = serde_json::from_str(
+            r#"{"messages":[],"tools":[{"type":"function","function":{
+                "name":"walk",
+                "parameters":{
+                    "$schema":"http://json-schema.org/draft-07/schema#",
+                    "type":"object",
+                    "properties":{"meters":{"type":"number","exclusiveMinimum":0}},
+                    "required":["meters"],
+                    "additionalProperties":false
+                }}}]}"#,
+        )
+        .unwrap();
+
+        let tools = req.active_tools().expect("tools active");
+        let rendered = serde_json::to_string(&tools).unwrap();
+
+        assert!(!rendered.contains("$schema"), "dialect key leaked: {rendered}");
+        // Everything the model genuinely needs must survive the strip.
+        assert!(rendered.contains(r#""name":"walk""#));
+        assert!(rendered.contains(r#""required":["meters"]"#));
+        assert!(rendered.contains(r#""exclusiveMinimum":0"#));
+        assert!(rendered.contains(r#""additionalProperties":false"#));
     }
 
     /// `tool_choice: "none"` means "answer in prose" — the tools preamble must
