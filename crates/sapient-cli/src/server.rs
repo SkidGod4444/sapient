@@ -496,9 +496,7 @@ impl ChatCompletionRequest {
     fn tool_prefill(&self) -> Option<String> {
         self.active_tools()?; // nothing to force if no tools are on offer
         match self.tool_choice.as_ref()? {
-            serde_json::Value::String(s) if s == "required" => {
-                Some("<tool_call>\n".to_owned())
-            }
+            serde_json::Value::String(s) if s == "required" => Some("<tool_call>\n".to_owned()),
             // {"type":"function","function":{"name":"look"}} — force that one.
             //
             // The trailing `{` matters: stop at `"arguments": ` and the model is
@@ -506,7 +504,9 @@ impl ChatCompletionRequest {
             // write `0`. Opening the object commits it to writing arguments.
             serde_json::Value::Object(o) => {
                 let name = o.get("function")?.get("name")?.as_str()?;
-                Some(format!("<tool_call>\n{{\"name\": \"{name}\", \"arguments\": {{"))
+                Some(format!(
+                    "<tool_call>\n{{\"name\": \"{name}\", \"arguments\": {{"
+                ))
             }
             _ => None, // "auto" | "none"
         }
@@ -596,7 +596,10 @@ pub struct OAIMessage {
 impl OAIMessage {
     /// The message's text, or empty for a content-less tool-call turn.
     fn text(&self) -> String {
-        self.content.as_ref().map(OAIContent::text).unwrap_or_default()
+        self.content
+            .as_ref()
+            .map(OAIContent::text)
+            .unwrap_or_default()
     }
 
     fn image_urls(&self) -> Vec<&str> {
@@ -1187,7 +1190,10 @@ async fn handle_audio_speech(
     State(state): State<ServeState>,
     Json(req): Json<SpeechRequest>,
 ) -> Response {
-    let model_id = req.model.filter(|m| !m.is_empty()).unwrap_or_else(|| "kokoro-82m".into());
+    let model_id = req
+        .model
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| "kokoro-82m".into());
 
     if let Some(fmt) = req.response_format.as_deref() {
         if !matches!(fmt, "wav" | "pcm") {
@@ -1985,15 +1991,19 @@ mod tests {
     /// to get a hand-rolled tool-calling server wrong.
     #[test]
     fn tool_call_arguments_are_a_json_string() {
-        let (text, calls) =
-            extract_tool_calls(r#"<tool_call>{"name":"walk","arguments":{"meters":2}}</tool_call>"#);
+        let (text, calls) = extract_tool_calls(
+            r#"<tool_call>{"name":"walk","arguments":{"meters":2}}</tool_call>"#,
+        );
 
         assert_eq!(text, "");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "walk");
         assert_eq!(calls[0].function.arguments, r#"{"meters":2}"#);
         assert_eq!(calls[0].kind, "function");
-        assert!(!calls[0].id.is_empty(), "clients require an id when streaming");
+        assert!(
+            !calls[0].id.is_empty(),
+            "clients require an id when streaming"
+        );
     }
 
     /// A no-argument call must produce `"{}"`. `"null"` is silently treated as
@@ -2057,8 +2067,7 @@ mod tests {
     /// forcing was meant to prevent.
     #[test]
     fn complete_call_without_closing_tag_is_honored() {
-        let (text, calls) =
-            extract_tool_calls("<tool_call>\n{\"name\":\"look\",\"arguments\":{}}");
+        let (text, calls) = extract_tool_calls("<tool_call>\n{\"name\":\"look\",\"arguments\":{}}");
 
         assert_eq!(calls.len(), 1, "complete JSON must be honored: {text:?}");
         assert_eq!(calls[0].function.name, "look");
@@ -2145,7 +2154,10 @@ mod tests {
         let tools = req.active_tools().expect("tools active");
         let rendered = serde_json::to_string(&tools).unwrap();
 
-        assert!(!rendered.contains("$schema"), "dialect key leaked: {rendered}");
+        assert!(
+            !rendered.contains("$schema"),
+            "dialect key leaked: {rendered}"
+        );
         // Everything the model genuinely needs must survive the strip.
         assert!(rendered.contains(r#""name":"walk""#));
         assert!(rendered.contains(r#""required":["meters"]"#));
@@ -2172,7 +2184,10 @@ mod tests {
                 .tool_prefill()
         };
 
-        assert_eq!(prefill_for(r#""required""#).as_deref(), Some("<tool_call>\n"));
+        assert_eq!(
+            prefill_for(r#""required""#).as_deref(),
+            Some("<tool_call>\n")
+        );
         // A named function pins the name too, so the model cannot call another.
         assert_eq!(
             prefill_for(r#"{"type":"function","function":{"name":"look"}}"#).as_deref(),
@@ -2191,7 +2206,10 @@ mod tests {
         let generated = r#"{"name":"look","arguments":{}}</tool_call>"#;
 
         let (_, unstitched) = extract_tool_calls(generated);
-        assert!(unstitched.is_empty(), "a bare fragment must not parse alone");
+        assert!(
+            unstitched.is_empty(),
+            "a bare fragment must not parse alone"
+        );
 
         let (_, calls) = extract_tool_calls(&stitch(Some("<tool_call>\n"), generated));
         assert_eq!(calls.len(), 1);

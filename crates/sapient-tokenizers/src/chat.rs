@@ -381,11 +381,16 @@ mod tests {
         let messages = vec![ChatMessage::user("Walk two meters.")];
         let tools = [walk_tool()];
 
-        let out = tmpl.render_with_tools(&messages, Some(&tools), true).unwrap();
+        let out = tmpl
+            .render_with_tools(&messages, Some(&tools), true)
+            .unwrap();
 
         // The tools preamble is what teaches the model the call syntax.
         assert!(out.contains("<tools>"), "missing tools block:\n{out}");
-        assert!(out.contains(r#""name":"walk""#), "tool not rendered:\n{out}");
+        assert!(
+            out.contains(r#""name":"walk""#),
+            "tool not rendered:\n{out}"
+        );
         assert!(out.contains("<tool_call>"), "missing call syntax:\n{out}");
         assert!(out.trim_end().ends_with("<|im_start|>assistant"));
     }
@@ -424,7 +429,9 @@ mod tests {
         ];
         let tools = [walk_tool()];
 
-        let out = tmpl.render_with_tools(&messages, Some(&tools), true).unwrap();
+        let out = tmpl
+            .render_with_tools(&messages, Some(&tools), true)
+            .unwrap();
 
         // arguments must be a bare JSON object, NOT a quoted string.
         assert!(
