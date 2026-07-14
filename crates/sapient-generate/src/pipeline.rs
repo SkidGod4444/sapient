@@ -461,7 +461,9 @@ impl Pipeline {
     /// would never learn the tools exist and would answer in prose. Callers must
     /// refuse the request rather than serve a confident non-answer.
     pub fn supports_tools(&self) -> bool {
-        self.chat_template.as_ref().is_some_and(|t| t.supports_tools())
+        self.chat_template
+            .as_ref()
+            .is_some_and(|t| t.supports_tools())
     }
 
     /// Render the chat prompt string for a message history.

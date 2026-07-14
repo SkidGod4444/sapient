@@ -343,7 +343,10 @@ mod tests {
     #[test]
     fn builtin_chatml_renders_tools() {
         let tmpl = ChatTemplate::from_template(builtin::CHATML);
-        assert!(tmpl.supports_tools(), "the GGUF fallback must support tools");
+        assert!(
+            tmpl.supports_tools(),
+            "the GGUF fallback must support tools"
+        );
 
         let messages = vec![ChatMessage::user("Walk two meters.")];
         let out = tmpl
@@ -351,7 +354,10 @@ mod tests {
             .unwrap();
 
         assert!(out.contains("<tools>"), "no tools preamble:\n{out}");
-        assert!(out.contains(r#""name":"walk""#), "tool not rendered:\n{out}");
+        assert!(
+            out.contains(r#""name":"walk""#),
+            "tool not rendered:\n{out}"
+        );
         assert!(out.contains("<tool_call>"), "no call syntax:\n{out}");
     }
 
