@@ -455,6 +455,15 @@ impl Pipeline {
         }
     }
 
+    /// Whether this model's chat template can render tool definitions.
+    ///
+    /// `false` means a `tools` array would be silently discarded — the model
+    /// would never learn the tools exist and would answer in prose. Callers must
+    /// refuse the request rather than serve a confident non-answer.
+    pub fn supports_tools(&self) -> bool {
+        self.chat_template.as_ref().is_some_and(|t| t.supports_tools())
+    }
+
     /// Render the chat prompt string for a message history.
     pub fn format_chat_prompt(&self, messages: &[ChatMessage]) -> Result<String> {
         self.format_chat_prompt_with_tools(messages, None)

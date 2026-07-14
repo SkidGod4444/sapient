@@ -373,6 +373,11 @@ impl SpeculativePipeline {
         self.target.config()
     }
 
+    /// Whether the target model's chat template can render tool definitions.
+    pub fn supports_tools(&self) -> bool {
+        self.target.supports_tools()
+    }
+
     /// Render a chat prompt string for a message history (target template).
     pub fn format_chat_prompt(&self, messages: &[ChatMessage]) -> Result<String> {
         self.target.format_chat_prompt(messages)

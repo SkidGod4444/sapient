@@ -118,6 +118,14 @@ impl ServedModel {
         encoded.map(|t| t.len()).unwrap_or(0)
     }
 
+    /// Whether this model's chat template can render tool definitions.
+    fn supports_tools(&self) -> bool {
+        match self {
+            ServedModel::Plain(p) => p.supports_tools(),
+            ServedModel::Speculative(p) => p.supports_tools(),
+        }
+    }
+
     /// Render the chat prompt string (used to count prompt tokens for `usage`).
     /// Takes `tools` because the tools preamble is part of the prompt the model
     /// actually sees — omitting it would under-report `prompt_tokens`.
@@ -1276,6 +1284,19 @@ async fn handle_chat_completions(
 
     let messages: Vec<ChatMessage> = to_chat_messages(&req.messages);
     let tools: Option<Vec<serde_json::Value>> = req.active_tools();
+
+    // Refuse tools this model's template cannot render, rather than dropping
+    // them. A silently-discarded tools array returns a confident 200 of prose —
+    // the agent loop never actuates, and nothing anywhere says why. Models
+    // without a tools branch (Gemma, Phi, Llama-2, plain-ChatML GGUFs) must say
+    // so out loud.
+    if tools.is_some() && !model.payload.supports_tools() {
+        return model_err(format!(
+            "model '{model_id}' cannot use tools: its chat template has no tool support, \
+             so the tools would be silently ignored and the model would answer in prose. \
+             Use a tool-trained model whose template renders tools (e.g. qwen2.5-3b)."
+        ));
+    }
     // Forced tool use: we open the assistant's `<tool_call>` ourselves, so the
     // model resumes *inside* a call. Whatever it generates must be stitched back
     // onto this prefix before parsing — the opening tag is in the prompt, not in

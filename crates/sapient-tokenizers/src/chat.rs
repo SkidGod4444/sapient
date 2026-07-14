@@ -134,6 +134,17 @@ impl ChatTemplate {
         }
     }
 
+    /// Whether this template does anything with `tools`.
+    ///
+    /// A template that never references the variable does not *fail* when handed
+    /// tools — it silently discards them, and the model, never told the tools
+    /// exist, answers in prose. The caller gets a 200 and a robot that narrates
+    /// actions it never took. So callers must be able to ask *before* generating,
+    /// and refuse rather than pretend.
+    pub fn supports_tools(&self) -> bool {
+        self.template_src.contains("tools")
+    }
+
     /// Render a list of chat messages to a prompt string.
     ///
     /// Set `add_generation_prompt = true` to append the assistant turn header
@@ -205,12 +216,57 @@ impl ChatTemplate {
 /// Built-in templates for common models (fallback when tokenizer_config.json
 /// doesn't contain a chat_template field).
 pub mod builtin {
-    /// ChatML format — used by Phi-3, Qwen, Mistral-Instruct variants.
+    /// ChatML — used by Qwen and Hermes-style models, and the fallback whenever a
+    /// model ships no `chat_template` of its own (GGUF repos routinely don't).
+    ///
+    /// **It must carry the tools branch.** GGUF models reach this template, and a
+    /// ChatML template *without* tool support does not fail — it silently drops
+    /// the `tools` array, and the model, never having been told the tools exist,
+    /// answers in prose. Every `-q4` alias would accept a tool call, return 200,
+    /// and never call anything.
+    ///
+    /// The tool syntax below is the Hermes/Qwen convention the models are
+    /// actually trained on (`<tools>` preamble, `<tool_call>` replies), matching
+    /// Qwen2.5-Instruct's own template. With no `tools` in scope it renders as
+    /// plain ChatML, so nothing changes for ordinary chat.
     pub const CHATML: &str = concat!(
-        "{% for message in messages %}",
-        "<|im_start|>{{ message['role'] }}\n{{ message['content'] }}<|im_end|>\n",
-        "{% endfor %}",
-        "{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}",
+        "{%- if tools %}",
+        "{{- '<|im_start|>system\n' }}",
+        "{%- if messages[0]['role'] == 'system' %}{{- messages[0]['content'] }}",
+        "{%- else %}{{- 'You are a helpful assistant.' }}{%- endif %}",
+        "{{- \"\n\n# Tools\n\nYou may call one or more functions to assist with the user query.",
+        "\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\" }}",
+        "{%- for tool in tools %}{{- \"\n\" }}{{- tool | tojson }}{%- endfor %}",
+        "{{- \"\n</tools>\n\nFor each function call, return a json object with function name and ",
+        "arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n",
+        "{\\\"name\\\": <function-name>, \\\"arguments\\\": <args-json-object>}\n</tool_call>",
+        "<|im_end|>\n\" }}",
+        "{%- else %}",
+        "{%- if messages[0]['role'] == 'system' %}",
+        "{{- '<|im_start|>system\n' + messages[0]['content'] + '<|im_end|>\n' }}",
+        "{%- endif %}",
+        "{%- endif %}",
+        "{%- for message in messages %}",
+        "{%- if (message.role == 'user') or (message.role == 'system' and not loop.first) ",
+        "or (message.role == 'assistant' and not message.tool_calls) %}",
+        "{{- '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>' + '\n' }}",
+        "{%- elif message.role == 'assistant' %}",
+        "{{- '<|im_start|>' + message.role }}",
+        "{%- if message.content %}{{- '\n' + message.content }}{%- endif %}",
+        "{%- for tool_call in message.tool_calls %}",
+        "{%- if tool_call.function is defined %}{%- set tool_call = tool_call.function %}{%- endif %}",
+        "{{- '\n<tool_call>\n{\"name\": \"' }}{{- tool_call.name }}{{- '\", \"arguments\": ' }}",
+        "{{- tool_call.arguments | tojson }}{{- '}\n</tool_call>' }}",
+        "{%- endfor %}",
+        "{{- '<|im_end|>\n' }}",
+        "{%- elif message.role == 'tool' %}",
+        "{%- if (loop.index0 == 0) or (messages[loop.index0 - 1].role != 'tool') %}",
+        "{{- '<|im_start|>user' }}{%- endif %}",
+        "{{- '\n<tool_response>\n' }}{{- message.content }}{{- '\n</tool_response>' }}",
+        "{%- if loop.last or (messages[loop.index0 + 1].role != 'tool') %}{{- '<|im_end|>\n' }}{%- endif %}",
+        "{%- endif %}",
+        "{%- endfor %}",
+        "{%- if add_generation_prompt %}{{- '<|im_start|>assistant\n' }}{%- endif %}",
     );
 
     /// Phi-3 / Phi-4 instruct format: `<|role|>\n{content}<|end|>\n` per turn,
@@ -275,6 +331,56 @@ pub mod builtin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The builtin ChatML fallback MUST render tools.
+    ///
+    /// GGUF repos routinely ship no `chat_template`, so every `-q4` model lands
+    /// on this template. When it lacked a tools branch the `tools` array was
+    /// silently discarded: the server returned 200, the model answered in prose,
+    /// and a robot driven by it narrated actions it never performed. Caught on a
+    /// Jetson Thor running `qwen2.5-1.5b-q4`, which replied "I don't have a
+    /// physical body to walk" to a request carrying a perfectly good `walk` tool.
+    #[test]
+    fn builtin_chatml_renders_tools() {
+        let tmpl = ChatTemplate::from_template(builtin::CHATML);
+        assert!(tmpl.supports_tools(), "the GGUF fallback must support tools");
+
+        let messages = vec![ChatMessage::user("Walk two meters.")];
+        let out = tmpl
+            .render_with_tools(&messages, Some(&[walk_tool()]), true)
+            .unwrap();
+
+        assert!(out.contains("<tools>"), "no tools preamble:\n{out}");
+        assert!(out.contains(r#""name":"walk""#), "tool not rendered:\n{out}");
+        assert!(out.contains("<tool_call>"), "no call syntax:\n{out}");
+    }
+
+    /// …and must still be plain ChatML when no tools are offered.
+    #[test]
+    fn builtin_chatml_without_tools_is_unchanged() {
+        let tmpl = ChatTemplate::from_template(builtin::CHATML);
+        let messages = vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::user("Hello!"),
+        ];
+        let out = tmpl.render(&messages, true).unwrap();
+
+        assert!(!out.contains("<tools>"), "leaked a tools preamble:\n{out}");
+        assert!(out.contains("<|im_start|>system\nYou are a helpful assistant.<|im_end|>"));
+        assert!(out.contains("<|im_start|>user\nHello!<|im_end|>"));
+        assert!(out.trim_end().ends_with("<|im_start|>assistant"));
+    }
+
+    /// Templates with no tools branch must report that, so callers can refuse
+    /// instead of silently dropping the tools and answering in prose.
+    #[test]
+    fn templates_without_tool_support_say_so() {
+        assert!(!ChatTemplate::from_template(builtin::GEMMA).supports_tools());
+        assert!(!ChatTemplate::from_template(builtin::LLAMA2).supports_tools());
+        assert!(!ChatTemplate::from_template(builtin::PHI3).supports_tools());
+        assert!(!ChatTemplate::from_template(builtin::ZEPHYR).supports_tools());
+        assert!(ChatTemplate::from_template(QWEN25).supports_tools());
+    }
 
     #[test]
     fn chatml_render() {
