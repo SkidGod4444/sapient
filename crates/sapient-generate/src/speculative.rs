@@ -172,9 +172,12 @@ impl SpeculativePipeline {
         messages: &[ChatMessage],
         config: &GenerationConfig,
     ) -> Result<String> {
-        let prompt = self
+        let mut prompt = self
             .target
             .format_chat_prompt_with_tools(messages, config.tools.as_deref())?;
+        if let Some(prefill) = &config.prefill {
+            prompt.push_str(prefill);
+        }
         self.generate_with_config(&prompt, config).await
     }
 
@@ -334,7 +337,12 @@ impl SpeculativePipeline {
             .target
             .format_chat_prompt_with_tools(messages, config.tools.as_deref())
         {
-            Ok(prompt) => self.generate_stream_with_config(&prompt, config).await,
+            Ok(mut prompt) => {
+                if let Some(prefill) = &config.prefill {
+                    prompt.push_str(prefill);
+                }
+                self.generate_stream_with_config(&prompt, config).await
+            }
             Err(e) => {
                 let (tx, rx) = mpsc::channel(1);
                 let _ = tx.try_send(format!("Error: {e}"));

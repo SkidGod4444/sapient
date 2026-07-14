@@ -42,6 +42,14 @@ pub struct GenerationConfig {
     /// `chat_*` entry point already threads one through — it changes the
     /// rendered prompt, not the sampler.
     pub tools: Option<Vec<serde_json::Value>>,
+    /// Text appended to the rendered prompt, so the model *continues* an
+    /// assistant turn that has already begun instead of starting a fresh one.
+    ///
+    /// This is how `tool_choice: "required"` is honored without a constrained
+    /// sampler: open the `<tool_call>` tag on the model's behalf and it has no
+    /// coherent continuation except to fill it in. The caller is responsible
+    /// for stitching the prefill back onto the generated text.
+    pub prefill: Option<String>,
 }
 
 impl Default for GenerationConfig {
@@ -52,6 +60,7 @@ impl Default for GenerationConfig {
             strategy: SamplingStrategy::default(),
             stop_sequences: vec![],
             tools: None,
+            prefill: None,
         }
     }
 }
@@ -484,7 +493,10 @@ impl Pipeline {
         messages: &[ChatMessage],
         config: &GenerationConfig,
     ) -> Result<String> {
-        let prompt = self.format_chat_prompt_with_tools(messages, config.tools.as_deref())?;
+        let mut prompt = self.format_chat_prompt_with_tools(messages, config.tools.as_deref())?;
+        if let Some(prefill) = &config.prefill {
+            prompt.push_str(prefill);
+        }
         self.generate_with_config(&prompt, config).await
     }
 
@@ -495,7 +507,12 @@ impl Pipeline {
         config: &GenerationConfig,
     ) -> ReceiverStream<String> {
         match self.format_chat_prompt_with_tools(messages, config.tools.as_deref()) {
-            Ok(prompt) => self.generate_stream_with_config(&prompt, config).await,
+            Ok(mut prompt) => {
+                if let Some(prefill) = &config.prefill {
+                    prompt.push_str(prefill);
+                }
+                self.generate_stream_with_config(&prompt, config).await
+            }
             Err(e) => {
                 let (tx, rx) = mpsc::channel(1);
                 let _ = tx.try_send(format!("Error: {e}"));

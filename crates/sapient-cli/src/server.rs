@@ -463,10 +463,9 @@ struct ChatCompletionRequest {
     /// whose template has no tools branch ignore them and answer in prose.
     #[serde(default)]
     tools: Option<Vec<serde_json::Value>>,
-    /// Accepted for wire compatibility. `"none"` suppresses the tool preamble;
-    /// `"auto"`/`"required"`/a named-function object are taken as "offer the
-    /// tools" — the model decides. Honoring `required` strictly would need
-    /// constrained decoding, which the sampler does not do yet.
+    /// `"none"` suppresses the tools preamble; `"auto"` (the default) lets the
+    /// model decide; `"required"` and a named-function object force a call —
+    /// see [`ChatCompletionRequest::tool_prefill`].
     #[serde(default)]
     tool_choice: Option<serde_json::Value>,
 }
@@ -479,6 +478,38 @@ impl ChatCompletionRequest {
         }
         let tools = self.tools.as_deref().filter(|t| !t.is_empty())?;
         Some(tools.iter().map(sanitize_tool).collect())
+    }
+
+    /// The assistant-turn prefix that makes `tool_choice` binding.
+    ///
+    /// `"auto"` is a request; `"required"` and `{"type":"function", …}` are
+    /// instructions — the model *must* call a tool, and OpenAI clients rely on
+    /// that. With no constrained sampler, the way to make it true is to write
+    /// the beginning of the answer ourselves: open the `<tool_call>` tag (and,
+    /// for a named function, the name too) and hand the model a continuation it
+    /// cannot escape into prose.
+    ///
+    /// This matters well beyond spec compliance. A caller that must not be
+    /// answered from imagination — "look before you tell me what you see" —
+    /// has no other lever, and a small model *will* otherwise describe a room
+    /// it never looked at.
+    fn tool_prefill(&self) -> Option<String> {
+        self.active_tools()?; // nothing to force if no tools are on offer
+        match self.tool_choice.as_ref()? {
+            serde_json::Value::String(s) if s == "required" => {
+                Some("<tool_call>\n".to_owned())
+            }
+            // {"type":"function","function":{"name":"look"}} — force that one.
+            //
+            // The trailing `{` matters: stop at `"arguments": ` and the model is
+            // free to continue with any JSON value, and a small one will happily
+            // write `0`. Opening the object commits it to writing arguments.
+            serde_json::Value::Object(o) => {
+                let name = o.get("function")?.get("name")?.as_str()?;
+                Some(format!("<tool_call>\n{{\"name\": \"{name}\", \"arguments\": {{"))
+            }
+            _ => None, // "auto" | "none"
+        }
     }
 }
 
@@ -864,11 +895,20 @@ fn extract_tool_calls(reply: &str) -> (String, Vec<OAIToolCall>) {
 
     while let Some(start) = rest.find(OPEN) {
         let body_start = start + OPEN.len();
-        let Some(rel_end) = rest[body_start..].find(CLOSE) else {
-            break; // unterminated — the remainder stays as text
+
+        let (body, block_end) = match rest[body_start..].find(CLOSE) {
+            Some(rel_end) => (
+                &rest[body_start..body_start + rel_end],
+                body_start + rel_end + CLOSE.len(),
+            ),
+            // No closing tag: either a call cut short by `max_tokens`, or a model
+            // that finished its JSON and forgot the tag — common when generation
+            // was prefilled *into* the call, since the model never saw itself
+            // open one. Let JSON validity decide rather than guessing: a complete
+            // call parses and is honored; a truncated one does not, and stays
+            // visible as text below.
+            None => (&rest[body_start..], rest.len()),
         };
-        let body = &rest[body_start..body_start + rel_end];
-        let block_end = body_start + rel_end + CLOSE.len();
 
         match parse_tool_call(body, calls.len()) {
             Some(call) => {
@@ -884,6 +924,17 @@ fn extract_tool_calls(reply: &str) -> (String, Vec<OAIToolCall>) {
     (text.trim().to_string(), calls)
 }
 
+/// Re-attach a forced-tool-call prefill to the model's completion.
+///
+/// The `<tool_call>` opener lives in the *prompt*, so the model never emits it —
+/// without this the reply looks like a bare JSON fragment and parses as prose.
+fn stitch(prefill: Option<&str>, reply: &str) -> String {
+    match prefill {
+        Some(p) => format!("{p}{reply}"),
+        None => reply.to_owned(),
+    }
+}
+
 fn parse_tool_call(body: &str, index: usize) -> Option<OAIToolCall> {
     let v: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
     let name = v.get("name")?.as_str()?.to_owned();
@@ -895,10 +946,15 @@ fn parse_tool_call(body: &str, index: usize) -> Option<OAIToolCall> {
     // this string to get the tool's input, and `null` is silently treated as
     // "no call to execute" — the tool never runs and the agent loop stalls with
     // no error to explain why.
+    // Anything that is not an object cannot be a valid argument set, so it
+    // becomes `"{}"` rather than being passed through. A model completing a
+    // forced call sometimes writes a bare scalar (`0`); stringifying that to
+    // `"0"` would hand the client something it cannot parse as arguments, and
+    // the tool would fail for a reason nothing in the response explains.
     let arguments = match v.get("arguments") {
         Some(serde_json::Value::String(s)) => s.clone(),
-        Some(serde_json::Value::Null) | None => "{}".to_owned(),
-        Some(other) => other.to_string(),
+        Some(obj @ serde_json::Value::Object(_)) => obj.to_string(),
+        _ => "{}".to_owned(),
     };
 
     Some(OAIToolCall {
@@ -1214,12 +1270,18 @@ async fn handle_chat_completions(
 
     let messages: Vec<ChatMessage> = to_chat_messages(&req.messages);
     let tools: Option<Vec<serde_json::Value>> = req.active_tools();
-    let cfg = build_config(
+    // Forced tool use: we open the assistant's `<tool_call>` ourselves, so the
+    // model resumes *inside* a call. Whatever it generates must be stitched back
+    // onto this prefix before parsing — the opening tag is in the prompt, not in
+    // the completion.
+    let prefill = req.tool_prefill();
+    let mut cfg = build_config(
         req.max_tokens,
         req.temperature,
         parse_stop(req.stop),
         tools.as_deref(),
     );
+    cfg.prefill = prefill.clone();
 
     // Prompt tokens for `usage` — the rendered chat prompt is what the model sees.
     let prompt_tokens = model
@@ -1254,6 +1316,7 @@ async fn handle_chat_completions(
 
         let tx2 = tx.clone();
         let tools_active = tools.is_some();
+        let prefill = prefill.clone();
         tokio::task::spawn(async move {
             // `model` (Arc) is moved in — no cache lock held during streaming, so
             // other models' requests run concurrently and the cache stays free.
@@ -1303,7 +1366,7 @@ async fn handle_chat_completions(
 
             // The buffered tool turn: emit the whole thing as one delta.
             if tools_active {
-                let (text, calls) = extract_tool_calls(&full);
+                let (text, calls) = extract_tool_calls(&stitch(prefill.as_deref(), &full));
                 let delta = if calls.is_empty() {
                     Delta {
                         content: Some(text),
@@ -1382,7 +1445,7 @@ async fn handle_chat_completions(
                 // offered — otherwise a model merely *quoting* `<tool_call>` in
                 // prose would be misread as calling one.
                 let (text, tool_calls) = if tools.is_some() {
-                    extract_tool_calls(&reply)
+                    extract_tool_calls(&stitch(prefill.as_deref(), &reply))
                 } else {
                     (reply, Vec::new())
                 };
@@ -1944,6 +2007,12 @@ mod tests {
         let (_, calls) =
             extract_tool_calls(r#"<tool_call>{"name":"sit","arguments":null}</tool_call>"#);
         assert_eq!(calls[0].function.arguments, "{}", "null must not survive");
+
+        // A model completing a forced call sometimes writes a bare scalar. It is
+        // not a valid argument set, and `"0"` is not something a client can parse.
+        let (_, calls) =
+            extract_tool_calls(r#"<tool_call>{"name":"sit","arguments":0}</tool_call>"#);
+        assert_eq!(calls[0].function.arguments, "{}", "scalar must not survive");
     }
 
     /// Models often narrate before calling. The prose becomes `content`, the
@@ -1977,6 +2046,23 @@ mod tests {
         let (text, calls) = extract_tool_calls(raw);
         assert!(calls.is_empty());
         assert_eq!(text, raw);
+    }
+
+    /// A complete call that merely forgot its closing tag is still a call.
+    ///
+    /// Models routinely drop `</tool_call>` when generation was prefilled *into*
+    /// the call — they never saw themselves open one, so they do not think to
+    /// close it. The JSON is whole; only the tag is missing. Refusing it would
+    /// turn a forced tool call into silent prose, which is the exact failure
+    /// forcing was meant to prevent.
+    #[test]
+    fn complete_call_without_closing_tag_is_honored() {
+        let (text, calls) =
+            extract_tool_calls("<tool_call>\n{\"name\":\"look\",\"arguments\":{}}");
+
+        assert_eq!(calls.len(), 1, "complete JSON must be honored: {text:?}");
+        assert_eq!(calls[0].function.name, "look");
+        assert_eq!(calls[0].function.arguments, "{}");
     }
 
     /// Same for a block whose body isn't valid JSON.
@@ -2065,6 +2151,51 @@ mod tests {
         assert!(rendered.contains(r#""required":["meters"]"#));
         assert!(rendered.contains(r#""exclusiveMinimum":0"#));
         assert!(rendered.contains(r#""additionalProperties":false"#));
+    }
+
+    /// `tool_choice` must be *binding*, not advisory.
+    ///
+    /// `auto` is a suggestion the model may decline. `required` and a named
+    /// function are not — and a small model left to decide will happily answer
+    /// "what do you see?" from imagination rather than calling the tool. The
+    /// prefill removes the choice: the assistant turn is already open inside a
+    /// `<tool_call>`, so prose is no longer a reachable continuation.
+    #[test]
+    fn tool_choice_required_forces_a_call() {
+        let prefill_for = |choice: &str| -> Option<String> {
+            let body = format!(
+                r#"{{"messages":[],"tools":[{{"type":"function","function":{{"name":"look"}}}}],
+                    "tool_choice":{choice}}}"#
+            );
+            serde_json::from_str::<ChatCompletionRequest>(&body)
+                .unwrap()
+                .tool_prefill()
+        };
+
+        assert_eq!(prefill_for(r#""required""#).as_deref(), Some("<tool_call>\n"));
+        // A named function pins the name too, so the model cannot call another.
+        assert_eq!(
+            prefill_for(r#"{"type":"function","function":{"name":"look"}}"#).as_deref(),
+            Some("<tool_call>\n{\"name\": \"look\", \"arguments\": {"),
+        );
+        // `auto` leaves the model free; `none` leaves it toolless. Neither forces.
+        assert_eq!(prefill_for(r#""auto""#), None);
+        assert_eq!(prefill_for(r#""none""#), None);
+    }
+
+    /// The forced-call prefill lives in the *prompt*, so the model never emits
+    /// the opening tag. Un-stitched, its reply is a bare JSON fragment that
+    /// parses as prose — the forced call would silently become no call at all.
+    #[test]
+    fn prefilled_reply_is_stitched_before_parsing() {
+        let generated = r#"{"name":"look","arguments":{}}</tool_call>"#;
+
+        let (_, unstitched) = extract_tool_calls(generated);
+        assert!(unstitched.is_empty(), "a bare fragment must not parse alone");
+
+        let (_, calls) = extract_tool_calls(&stitch(Some("<tool_call>\n"), generated));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "look");
     }
 
     /// `tool_choice: "none"` means "answer in prose" — the tools preamble must
