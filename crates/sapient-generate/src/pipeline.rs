@@ -35,6 +35,21 @@ pub struct GenerationConfig {
     pub strategy: SamplingStrategy,
     /// Stop strings — generation ends if any of these appear in output.
     pub stop_sequences: Vec<String>,
+    /// Tool definitions, OpenAI-shaped, exposed to the chat template so a
+    /// tool-trained model can call them. `None` for plain chat.
+    ///
+    /// This rides on the generation config because it is per-request and every
+    /// `chat_*` entry point already threads one through — it changes the
+    /// rendered prompt, not the sampler.
+    pub tools: Option<Vec<serde_json::Value>>,
+    /// Text appended to the rendered prompt, so the model *continues* an
+    /// assistant turn that has already begun instead of starting a fresh one.
+    ///
+    /// This is how `tool_choice: "required"` is honored without a constrained
+    /// sampler: open the `<tool_call>` tag on the model's behalf and it has no
+    /// coherent continuation except to fill it in. The caller is responsible
+    /// for stitching the prefill back onto the generated text.
+    pub prefill: Option<String>,
 }
 
 impl Default for GenerationConfig {
@@ -44,6 +59,8 @@ impl Default for GenerationConfig {
             eos_token_id: None,
             strategy: SamplingStrategy::default(),
             stop_sequences: vec![],
+            tools: None,
+            prefill: None,
         }
     }
 }
@@ -440,8 +457,20 @@ impl Pipeline {
 
     /// Render the chat prompt string for a message history.
     pub fn format_chat_prompt(&self, messages: &[ChatMessage]) -> Result<String> {
+        self.format_chat_prompt_with_tools(messages, None)
+    }
+
+    /// Render the chat prompt with tool definitions available to the template.
+    ///
+    /// Models whose template has no tools branch simply ignore them, so this is
+    /// safe to call unconditionally.
+    pub fn format_chat_prompt_with_tools(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[serde_json::Value]>,
+    ) -> Result<String> {
         if let Some(tmpl) = &self.chat_template {
-            tmpl.render(messages, true)
+            tmpl.render_with_tools(messages, tools, true)
                 .context("Failed to render chat template")
         } else {
             Ok(messages
@@ -464,7 +493,10 @@ impl Pipeline {
         messages: &[ChatMessage],
         config: &GenerationConfig,
     ) -> Result<String> {
-        let prompt = self.format_chat_prompt(messages)?;
+        let mut prompt = self.format_chat_prompt_with_tools(messages, config.tools.as_deref())?;
+        if let Some(prefill) = &config.prefill {
+            prompt.push_str(prefill);
+        }
         self.generate_with_config(&prompt, config).await
     }
 
@@ -474,8 +506,13 @@ impl Pipeline {
         messages: &[ChatMessage],
         config: &GenerationConfig,
     ) -> ReceiverStream<String> {
-        match self.format_chat_prompt(messages) {
-            Ok(prompt) => self.generate_stream_with_config(&prompt, config).await,
+        match self.format_chat_prompt_with_tools(messages, config.tools.as_deref()) {
+            Ok(mut prompt) => {
+                if let Some(prefill) = &config.prefill {
+                    prompt.push_str(prefill);
+                }
+                self.generate_stream_with_config(&prompt, config).await
+            }
             Err(e) => {
                 let (tx, rx) = mpsc::channel(1);
                 let _ = tx.try_send(format!("Error: {e}"));

@@ -32,10 +32,10 @@ use tower_http::cors::CorsLayer;
 use tracing::info;
 
 use sapient_generate::{
-    GenerationConfig, LoadOptions, Pipeline, SamplingStrategy, SpeculativePipeline,
-    TranscribeOptions, TranscribePipeline, VlmPipeline,
+    GenerationConfig, KokoroTts, LoadOptions, Pipeline, SamplingStrategy, SpeculativePipeline,
+    TranscribeOptions, TranscribePipeline, Tts, VlmPipeline, DEFAULT_KOKORO_VOICE,
 };
-use sapient_tokenizers::ChatMessage;
+use sapient_tokenizers::{ChatMessage, ToolCall};
 
 // ── ServedModel ────────────────────────────────────────────────────────────────
 //
@@ -119,10 +119,16 @@ impl ServedModel {
     }
 
     /// Render the chat prompt string (used to count prompt tokens for `usage`).
-    fn format_chat_prompt(&self, messages: &[ChatMessage]) -> anyhow::Result<String> {
+    /// Takes `tools` because the tools preamble is part of the prompt the model
+    /// actually sees — omitting it would under-report `prompt_tokens`.
+    fn format_chat_prompt(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[serde_json::Value]>,
+    ) -> anyhow::Result<String> {
         match self {
-            ServedModel::Plain(p) => p.format_chat_prompt(messages),
-            ServedModel::Speculative(p) => p.format_chat_prompt(messages),
+            ServedModel::Plain(p) => p.format_chat_prompt_with_tools(messages, tools),
+            ServedModel::Speculative(p) => p.format_chat_prompt_with_tools(messages, tools),
         }
     }
 }
@@ -215,6 +221,10 @@ struct ServeState {
     /// `VlmPipeline` inference is `&mut` + blocking, so each entry sits behind
     /// its own async Mutex whose owned guard moves into `spawn_blocking`.
     vlm_cache: Arc<Mutex<ModelCache<Arc<Mutex<VlmPipeline>>>>>,
+    /// Parallel LRU cache for Kokoro TTS (POST /v1/audio/speech), mirroring
+    /// `audio_cache`. A single entry serves every voice — all 54 embeddings are
+    /// resident in the loaded model.
+    tts_cache: Arc<Mutex<ModelCache<Arc<KokoroTts>>>>,
     /// Serializes model loads so two concurrent first-requests for the same model
     /// don't both download/load it, and loads don't thrash each other.
     load_lock: Arc<Mutex<()>>,
@@ -335,6 +345,33 @@ impl ServeState {
         Ok(entry)
     }
 
+    /// Like [`get_or_load_audio`](Self::get_or_load_audio), but for the Kokoro
+    /// TTS engine backing `POST /v1/audio/speech`.
+    async fn get_or_load_tts(&self, model_id: &str) -> Result<Arc<CachedModel<Arc<KokoroTts>>>> {
+        if let Some(m) = self.tts_cache.lock().await.touch(model_id) {
+            return Ok(m);
+        }
+        let _load = self.load_lock.lock().await;
+        if let Some(m) = self.tts_cache.lock().await.touch(model_id) {
+            return Ok(m);
+        }
+
+        info!("loading TTS model '{model_id}'…");
+        let tts = KokoroTts::from_default()
+            .await
+            .with_context(|| format!("failed to load TTS model '{model_id}'"))?;
+        let entry = Arc::new(CachedModel {
+            model_id: model_id.to_string(),
+            payload: Arc::new(tts),
+            bytes: estimate_model_bytes(model_id),
+        });
+        let evicted = self.tts_cache.lock().await.insert(entry.clone());
+        for id in &evicted {
+            info!("evicted TTS '{id}' from tts cache (LRU)");
+        }
+        Ok(entry)
+    }
+
     /// Like [`get_or_load`], but for vision-language models (`VlmPipeline`)
     /// serving image parts in POST /v1/chat/completions. Same fast-path /
     /// load-lock / LRU-insert structure as the audio cache.
@@ -422,6 +459,110 @@ struct ChatCompletionRequest {
     max_tokens: Option<usize>,
     temperature: Option<f32>,
     stop: Option<serde_json::Value>,
+    /// OpenAI tool definitions, passed to the chat template verbatim. Models
+    /// whose template has no tools branch ignore them and answer in prose.
+    #[serde(default)]
+    tools: Option<Vec<serde_json::Value>>,
+    /// `"none"` suppresses the tools preamble; `"auto"` (the default) lets the
+    /// model decide; `"required"` and a named-function object force a call —
+    /// see [`ChatCompletionRequest::tool_prefill`].
+    #[serde(default)]
+    tool_choice: Option<serde_json::Value>,
+}
+
+impl ChatCompletionRequest {
+    /// The tools to expose, after applying `tool_choice: "none"`.
+    fn active_tools(&self) -> Option<Vec<serde_json::Value>> {
+        if self.tool_choice.as_ref().and_then(|c| c.as_str()) == Some("none") {
+            return None;
+        }
+        let tools = self.tools.as_deref().filter(|t| !t.is_empty())?;
+        Some(tools.iter().map(sanitize_tool).collect())
+    }
+
+    /// The assistant-turn prefix that makes `tool_choice` binding.
+    ///
+    /// `"auto"` is a request; `"required"` and `{"type":"function", …}` are
+    /// instructions — the model *must* call a tool, and OpenAI clients rely on
+    /// that. With no constrained sampler, the way to make it true is to write
+    /// the beginning of the answer ourselves: open the `<tool_call>` tag (and,
+    /// for a named function, the name too) and hand the model a continuation it
+    /// cannot escape into prose.
+    ///
+    /// This matters well beyond spec compliance. A caller that must not be
+    /// answered from imagination — "look before you tell me what you see" —
+    /// has no other lever, and a small model *will* otherwise describe a room
+    /// it never looked at.
+    fn tool_prefill(&self) -> Option<String> {
+        self.active_tools()?; // nothing to force if no tools are on offer
+        match self.tool_choice.as_ref()? {
+            serde_json::Value::String(s) if s == "required" => Some("<tool_call>\n".to_owned()),
+            // {"type":"function","function":{"name":"look"}} — force that one.
+            //
+            // The trailing `{` matters: stop at `"arguments": ` and the model is
+            // free to continue with any JSON value, and a small one will happily
+            // write `0`. Opening the object commits it to writing arguments.
+            serde_json::Value::Object(o) => {
+                let name = o.get("function")?.get("name")?.as_str()?;
+                Some(format!(
+                    "<tool_call>\n{{\"name\": \"{name}\", \"arguments\": {{"
+                ))
+            }
+            _ => None, // "auto" | "none"
+        }
+    }
+}
+
+/// Strip JSON-Schema *dialect* metadata from a tool definition.
+///
+/// Chat templates serialize each tool verbatim (`{{- tool | tojson }}`) straight
+/// into the model's tools preamble, so whatever the client sends is what the
+/// model reads. Zod v4's JSON-Schema emitter — which the Vercel AI SDK uses —
+/// tags every schema with `"$schema": "http://json-schema.org/draft-07/schema#"`.
+///
+/// That key is a declaration *about the schema language*; it says nothing about
+/// the function's arguments, and tool-trained models never saw it in training.
+/// Left in, a small model reads the preamble, drifts off-distribution, and
+/// answers in prose instead of calling the tool — verified on Qwen2.5-1.5B,
+/// where its presence alone is the difference between a `walk` call and the
+/// model merely *claiming* to have walked. On a robot, that distinction is the
+/// whole game.
+///
+/// Only dialect metadata is removed. Constraints the model should actually see
+/// (`enum`, `required`, `additionalProperties`, `minimum`, …) are preserved.
+fn sanitize_tool(tool: &serde_json::Value) -> serde_json::Value {
+    fn strip(v: &serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(map) => serde_json::Value::Object(
+                map.iter()
+                    .filter(|(k, _)| k.as_str() != "$schema")
+                    .map(|(k, v)| (k.clone(), strip(v)))
+                    .collect(),
+            ),
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(strip).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    strip(tool)
+}
+
+/// `POST /v1/audio/speech` body (OpenAI shape).
+#[derive(Debug, Deserialize)]
+struct SpeechRequest {
+    #[serde(default)]
+    model: Option<String>,
+    /// The text to synthesize.
+    input: String,
+    /// One of Kokoro's 54 voices, e.g. `af_heart`. Defaults to `af_heart`.
+    #[serde(default)]
+    voice: Option<String>,
+    /// `wav` or `pcm`. MP3/Opus/AAC/FLAC are not supported.
+    #[serde(default)]
+    response_format: Option<String>,
+    #[serde(default)]
+    speed: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -438,7 +579,53 @@ struct CompletionRequest {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct OAIMessage {
     pub role: String,
-    pub content: OAIContent,
+    /// Optional because an assistant turn that *only* calls tools carries
+    /// `"content": null` — OpenAI clients send exactly that back on the next
+    /// turn of a tool loop, so a non-optional field would reject every
+    /// multi-step agent conversation at deserialization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<OAIContent>,
+    /// Tool calls the assistant asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<OAIToolCall>>,
+    /// On a `role: "tool"` turn: which call this result answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl OAIMessage {
+    /// The message's text, or empty for a content-less tool-call turn.
+    fn text(&self) -> String {
+        self.content
+            .as_ref()
+            .map(OAIContent::text)
+            .unwrap_or_default()
+    }
+
+    fn image_urls(&self) -> Vec<&str> {
+        self.content
+            .as_ref()
+            .map(OAIContent::image_urls)
+            .unwrap_or_default()
+    }
+}
+
+/// An OpenAI tool call. `function.arguments` is a JSON-encoded **string** on
+/// the wire (not an object) — that is OpenAI's format, and clients parse it as
+/// such, so it must be stringified on the way out and parsed on the way in.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct OAIToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: OAIFunctionCall,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct OAIFunctionCall {
+    pub name: String,
+    /// JSON-encoded arguments, e.g. `"{\"meters\":2}"`.
+    pub arguments: String,
 }
 
 /// OpenAI message `content`: a plain string, or an array of typed parts —
@@ -559,6 +746,21 @@ struct Delta {
     role: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<DeltaToolCall>>,
+}
+
+/// A tool call inside a streaming delta. OpenAI streams `arguments` as partial
+/// string fragments accumulated by `index`; we emit each call complete in a
+/// single delta, which clients accumulate identically (one fragment that
+/// happens to be the whole thing).
+#[derive(Serialize)]
+struct DeltaToolCall {
+    index: usize,
+    id: String,
+    #[serde(rename = "type")]
+    kind: String,
+    function: OAIFunctionCall,
 }
 
 #[derive(Serialize)]
@@ -619,6 +821,7 @@ fn build_config(
     max_tokens: Option<usize>,
     temperature: Option<f32>,
     stop: Vec<String>,
+    tools: Option<&[serde_json::Value]>,
 ) -> GenerationConfig {
     let mut cfg = GenerationConfig::default();
     if let Some(n) = max_tokens {
@@ -633,7 +836,141 @@ fn build_config(
         }
     }
     cfg.stop_sequences = stop;
+    cfg.tools = tools.map(<[serde_json::Value]>::to_vec);
     cfg
+}
+
+// ── Tool calls ────────────────────────────────────────────────────────────────
+
+/// Translate OpenAI messages into template messages.
+///
+/// The one subtlety is `arguments`: OpenAI carries it as a JSON-encoded
+/// *string*, while chat templates pipe it through `| tojson`. Handing the
+/// template the raw string would render it double-encoded, and the model
+/// faithfully imitates that broken shape on its next turn — so it is parsed
+/// back into a value here.
+fn to_chat_messages(messages: &[OAIMessage]) -> Vec<ChatMessage> {
+    messages
+        .iter()
+        .map(|m| match m.role.as_str() {
+            "assistant" => match m.tool_calls.as_deref() {
+                Some(calls) if !calls.is_empty() => ChatMessage::assistant_tool_calls(
+                    m.text(),
+                    calls
+                        .iter()
+                        .map(|c| ToolCall {
+                            name: c.function.name.clone(),
+                            arguments: serde_json::from_str(&c.function.arguments)
+                                .unwrap_or_else(|_| json!({})),
+                        })
+                        .collect(),
+                ),
+                _ => ChatMessage::assistant(m.text()),
+            },
+            "tool" => ChatMessage::tool(m.text()),
+            // A system prompt rendered as a user turn degrades the persona and
+            // reads as if the user said it — map it to the template's system role.
+            "system" | "developer" => ChatMessage::system(m.text()),
+            _ => ChatMessage::user(m.text()),
+        })
+        .collect()
+}
+
+/// Lift `<tool_call>{"name":…,"arguments":{…}}</tool_call>` blocks out of the
+/// model's text into structured OpenAI tool calls, returning the prose that sat
+/// outside them alongside.
+///
+/// Tool-trained models emit calls this way because their chat template
+/// explicitly instructs them to — the tags are the model's half of the
+/// contract, and this is the other half.
+///
+/// A block that is unterminated (generation hit `max_tokens` mid-call) or whose
+/// body will not parse is deliberately **left in the text** rather than
+/// dropped, so a broken call surfaces to the caller instead of vanishing into
+/// an empty assistant turn.
+fn extract_tool_calls(reply: &str) -> (String, Vec<OAIToolCall>) {
+    const OPEN: &str = "<tool_call>";
+    const CLOSE: &str = "</tool_call>";
+
+    let mut calls: Vec<OAIToolCall> = Vec::new();
+    let mut text = String::new();
+    let mut rest = reply;
+
+    while let Some(start) = rest.find(OPEN) {
+        let body_start = start + OPEN.len();
+
+        let (body, block_end) = match rest[body_start..].find(CLOSE) {
+            Some(rel_end) => (
+                &rest[body_start..body_start + rel_end],
+                body_start + rel_end + CLOSE.len(),
+            ),
+            // No closing tag: either a call cut short by `max_tokens`, or a model
+            // that finished its JSON and forgot the tag — common when generation
+            // was prefilled *into* the call, since the model never saw itself
+            // open one. Let JSON validity decide rather than guessing: a complete
+            // call parses and is honored; a truncated one does not, and stays
+            // visible as text below.
+            None => (&rest[body_start..], rest.len()),
+        };
+
+        match parse_tool_call(body, calls.len()) {
+            Some(call) => {
+                text.push_str(&rest[..start]);
+                calls.push(call);
+            }
+            None => text.push_str(&rest[..block_end]),
+        }
+        rest = &rest[block_end..];
+    }
+    text.push_str(rest);
+
+    (text.trim().to_string(), calls)
+}
+
+/// Re-attach a forced-tool-call prefill to the model's completion.
+///
+/// The `<tool_call>` opener lives in the *prompt*, so the model never emits it —
+/// without this the reply looks like a bare JSON fragment and parses as prose.
+fn stitch(prefill: Option<&str>, reply: &str) -> String {
+    match prefill {
+        Some(p) => format!("{p}{reply}"),
+        None => reply.to_owned(),
+    }
+}
+
+fn parse_tool_call(body: &str, index: usize) -> Option<OAIToolCall> {
+    let v: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    let name = v.get("name")?.as_str()?.to_owned();
+
+    // Back to OpenAI's stringified form. A model that already emitted a string
+    // passes through untouched rather than being double-encoded.
+    //
+    // A no-args call must serialize to `"{}"`, never `"null"`: clients parse
+    // this string to get the tool's input, and `null` is silently treated as
+    // "no call to execute" — the tool never runs and the agent loop stalls with
+    // no error to explain why.
+    // Anything that is not an object cannot be a valid argument set, so it
+    // becomes `"{}"` rather than being passed through. A model completing a
+    // forced call sometimes writes a bare scalar (`0`); stringifying that to
+    // `"0"` would hand the client something it cannot parse as arguments, and
+    // the tool would fail for a reason nothing in the response explains.
+    let arguments = match v.get("arguments") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(obj @ serde_json::Value::Object(_)) => obj.to_string(),
+        _ => "{}".to_owned(),
+    };
+
+    Some(OAIToolCall {
+        id: format!(
+            "call_{}_{index}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos()
+        ),
+        kind: "function".to_owned(),
+        function: OAIFunctionCall { name, arguments },
+    })
 }
 
 fn model_err(msg: impl std::fmt::Display) -> Response {
@@ -842,6 +1179,76 @@ fn audio_err(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": { "message": msg } }))).into_response()
 }
 
+/// `POST /v1/audio/speech` — OpenAI-compatible text-to-speech.
+///
+/// Returns the synthesized waveform as a 16-bit PCM WAV body. OpenAI defaults
+/// this endpoint to MP3; SAPIENT has no MP3 encoder (and pulling one in for a
+/// local endpoint isn't worth it), so `wav`/`pcm` are the supported formats and
+/// anything else is rejected loudly rather than silently returning WAV bytes
+/// under an `audio/mpeg` header.
+async fn handle_audio_speech(
+    State(state): State<ServeState>,
+    Json(req): Json<SpeechRequest>,
+) -> Response {
+    let model_id = req
+        .model
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| "kokoro-82m".into());
+
+    if let Some(fmt) = req.response_format.as_deref() {
+        if !matches!(fmt, "wav" | "pcm") {
+            return model_err(format!(
+                "response_format '{fmt}' is not supported — SAPIENT synthesizes WAV \
+                 (16-bit PCM). Use \"wav\", or omit the field."
+            ));
+        }
+    }
+    if req.input.trim().is_empty() {
+        return model_err("input must not be empty");
+    }
+
+    let tts = match state.get_or_load_tts(&model_id).await {
+        Ok(t) => t,
+        Err(e) => return server_err(format!("{e:#}")),
+    };
+
+    let permit = match state.inference_sem.clone().acquire_owned().await {
+        Ok(p) => p,
+        Err(_) => return server_err("server is shutting down"),
+    };
+
+    let voice = req
+        .voice
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_KOKORO_VOICE.to_string());
+    let speed = req.speed.unwrap_or(1.0);
+    let input = req.input;
+
+    // Synthesis is CPU-bound and blocking — keep it off the async runtime.
+    let engine = tts.payload.clone();
+    let synth = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let samples = engine.synthesize_as(&input, &voice, speed)?;
+        Ok::<_, anyhow::Error>(sapient_audio::encode_wav(&samples, engine.sample_rate()))
+    })
+    .await;
+
+    match synth {
+        Ok(Ok(wav)) => (
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_TYPE, "audio/wav"),
+                (axum::http::header::CACHE_CONTROL, "no-store"),
+            ],
+            wav,
+        )
+            .into_response(),
+        // An unknown voice lands here — a client error, not a server fault.
+        Ok(Err(e)) => model_err(format!("{e:#}")),
+        Err(e) => server_err(format!("speech synthesis task panicked: {e}")),
+    }
+}
+
 async fn handle_chat_completions(
     State(state): State<ServeState>,
     Json(req): Json<ChatCompletionRequest>,
@@ -852,11 +1259,7 @@ async fn handle_chat_completions(
     };
 
     // Image parts route to the vision pipeline (Phase 12.3).
-    if req
-        .messages
-        .iter()
-        .any(|m| !m.content.image_urls().is_empty())
-    {
+    if req.messages.iter().any(|m| !m.image_urls().is_empty()) {
         return handle_vision_chat(state, req, model_id).await;
     }
 
@@ -871,23 +1274,25 @@ async fn handle_chat_completions(
         Err(_) => return server_err("server is shutting down"),
     };
 
-    let messages: Vec<ChatMessage> = req
-        .messages
-        .iter()
-        .map(|m| match m.role.as_str() {
-            "assistant" => ChatMessage::assistant(m.content.text()),
-            // A system prompt rendered as a user turn degrades the persona and
-            // reads as if the user said it — map it to the template's system role.
-            "system" | "developer" => ChatMessage::system(m.content.text()),
-            _ => ChatMessage::user(m.content.text()),
-        })
-        .collect();
-    let cfg = build_config(req.max_tokens, req.temperature, parse_stop(req.stop));
+    let messages: Vec<ChatMessage> = to_chat_messages(&req.messages);
+    let tools: Option<Vec<serde_json::Value>> = req.active_tools();
+    // Forced tool use: we open the assistant's `<tool_call>` ourselves, so the
+    // model resumes *inside* a call. Whatever it generates must be stitched back
+    // onto this prefix before parsing — the opening tag is in the prompt, not in
+    // the completion.
+    let prefill = req.tool_prefill();
+    let mut cfg = build_config(
+        req.max_tokens,
+        req.temperature,
+        parse_stop(req.stop),
+        tools.as_deref(),
+    );
+    cfg.prefill = prefill.clone();
 
     // Prompt tokens for `usage` — the rendered chat prompt is what the model sees.
     let prompt_tokens = model
         .payload
-        .format_chat_prompt(&messages)
+        .format_chat_prompt(&messages, tools.as_deref())
         .map(|p| model.payload.count_tokens(&p))
         .unwrap_or(0);
 
@@ -906,7 +1311,7 @@ async fn handle_chat_completions(
                 index: 0,
                 delta: Delta {
                     role: Some("assistant"),
-                    content: None,
+                    ..Default::default()
                 },
                 finish_reason: None,
             }],
@@ -916,6 +1321,8 @@ async fn handle_chat_completions(
         let _ = tx.send(Ok(sse::Event::default().data(role_json))).await;
 
         let tx2 = tx.clone();
+        let tools_active = tools.is_some();
+        let prefill = prefill.clone();
         tokio::task::spawn(async move {
             // `model` (Arc) is moved in — no cache lock held during streaming, so
             // other models' requests run concurrently and the cache stays free.
@@ -925,6 +1332,16 @@ async fn handle_chat_completions(
             let mut stream = model.payload.chat_stream_with_config(&messages, &cfg).await;
             while let Some(token) = stream.next().await {
                 full.push_str(&token);
+
+                // When tools are on the table, hold the text back instead of
+                // streaming it. A tool call arrives as `<tool_call>…</tool_call>`
+                // markup that has to be lifted into a structured delta once
+                // complete — streaming it token-by-token would spray raw tags at
+                // the client as if they were prose.
+                if tools_active {
+                    continue;
+                }
+
                 let chunk_json = serde_json::to_string(&ChatCompletionChunk {
                     id: id.clone(),
                     object: "chat.completion.chunk",
@@ -933,8 +1350,8 @@ async fn handle_chat_completions(
                     choices: vec![DeltaChoice {
                         index: 0,
                         delta: Delta {
-                            role: None,
                             content: Some(token),
+                            ..Default::default()
                         },
                         finish_reason: None,
                     }],
@@ -949,8 +1366,60 @@ async fn handle_chat_completions(
                     return;
                 }
             }
-            // Final chunk carries token usage (OpenAI convention).
+
             let completion_tokens = model.payload.count_tokens(&full);
+            let mut finish_reason = "stop";
+
+            // The buffered tool turn: emit the whole thing as one delta.
+            if tools_active {
+                let (text, calls) = extract_tool_calls(&stitch(prefill.as_deref(), &full));
+                let delta = if calls.is_empty() {
+                    Delta {
+                        content: Some(text),
+                        ..Default::default()
+                    }
+                } else {
+                    finish_reason = "tool_calls";
+                    Delta {
+                        content: (!text.is_empty()).then_some(text),
+                        tool_calls: Some(
+                            calls
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, c)| DeltaToolCall {
+                                    index,
+                                    id: c.id,
+                                    kind: c.kind,
+                                    function: c.function,
+                                })
+                                .collect(),
+                        ),
+                        ..Default::default()
+                    }
+                };
+                let chunk_json = serde_json::to_string(&ChatCompletionChunk {
+                    id: id.clone(),
+                    object: "chat.completion.chunk",
+                    created,
+                    model: model_clone.clone(),
+                    choices: vec![DeltaChoice {
+                        index: 0,
+                        delta,
+                        finish_reason: None,
+                    }],
+                    usage: None,
+                })
+                .unwrap();
+                if tx2
+                    .send(Ok(sse::Event::default().data(chunk_json)))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+
+            // Final chunk carries token usage (OpenAI convention).
             let stop_json = serde_json::to_string(&ChatCompletionChunk {
                 id: id.clone(),
                 object: "chat.completion.chunk",
@@ -959,7 +1428,7 @@ async fn handle_chat_completions(
                 choices: vec![DeltaChoice {
                     index: 0,
                     delta: Delta::default(),
-                    finish_reason: Some("stop"),
+                    finish_reason: Some(finish_reason),
                 }],
                 usage: Some(Usage {
                     prompt_tokens,
@@ -977,6 +1446,17 @@ async fn handle_chat_completions(
         match model.payload.chat_with_config(&messages, &cfg).await {
             Ok(reply) => {
                 let completion_tokens = model.payload.count_tokens(&reply);
+
+                // Only mine the reply for calls when tools were actually
+                // offered — otherwise a model merely *quoting* `<tool_call>` in
+                // prose would be misread as calling one.
+                let (text, tool_calls) = if tools.is_some() {
+                    extract_tool_calls(&stitch(prefill.as_deref(), &reply))
+                } else {
+                    (reply, Vec::new())
+                };
+                let called = !tool_calls.is_empty();
+
                 Json(ChatCompletionResponse {
                     id: gen_id(),
                     object: "chat.completion",
@@ -986,9 +1466,14 @@ async fn handle_chat_completions(
                         index: 0,
                         message: OAIMessage {
                             role: "assistant".into(),
-                            content: OAIContent::Text(reply),
+                            // A pure tool-call turn carries no content — OpenAI
+                            // puts `null` there, and clients expect that.
+                            content: (!called || !text.is_empty())
+                                .then_some(OAIContent::Text(text)),
+                            tool_calls: called.then_some(tool_calls),
+                            tool_call_id: None,
                         },
-                        finish_reason: "stop",
+                        finish_reason: if called { "tool_calls" } else { "stop" },
                     }],
                     usage: Usage {
                         prompt_tokens,
@@ -1019,13 +1504,13 @@ async fn handle_vision_chat(
     };
     let earlier_images = req.messages[..req.messages.len() - 1]
         .iter()
-        .any(|m| !m.content.image_urls().is_empty());
+        .any(|m| !m.image_urls().is_empty());
     if earlier_images || last.role != "user" {
         return model_err(
             "image parts are only supported in the final user message (single-turn vision v1)",
         );
     }
-    let urls = last.content.image_urls();
+    let urls = last.image_urls();
     if urls.len() != 1 {
         return model_err("exactly one image part per request is supported (vision v1)");
     }
@@ -1033,7 +1518,7 @@ async fn handle_vision_chat(
         Ok(b) => b,
         Err(e) => return model_err(format!("{e:#}")),
     };
-    let question = last.content.text();
+    let question = last.text();
 
     let model = match state.get_or_load_vlm(&model_id).await {
         Ok(m) => m,
@@ -1091,15 +1576,15 @@ async fn handle_vision_chat(
             chunk(
                 Delta {
                     role: Some("assistant"),
-                    content: None,
+                    ..Default::default()
                 },
                 None,
                 None,
             ),
             chunk(
                 Delta {
-                    role: None,
                     content: Some(reply),
+                    ..Default::default()
                 },
                 None,
                 None,
@@ -1123,7 +1608,11 @@ async fn handle_vision_chat(
                 index: 0,
                 message: OAIMessage {
                     role: "assistant".into(),
-                    content: OAIContent::Text(reply),
+                    content: Some(OAIContent::Text(reply)),
+                    // The VLM path is single-turn: it describes an image, it
+                    // does not drive tools.
+                    tool_calls: None,
+                    tool_call_id: None,
                 },
                 finish_reason: "stop",
             }],
@@ -1152,7 +1641,7 @@ async fn handle_completions(
         Err(_) => return server_err("server is shutting down"),
     };
 
-    let cfg = build_config(req.max_tokens, req.temperature, parse_stop(req.stop));
+    let cfg = build_config(req.max_tokens, req.temperature, parse_stop(req.stop), None);
     let prompt = req.prompt;
     let prompt_tokens = model.payload.count_tokens(&prompt);
 
@@ -1370,6 +1859,10 @@ pub async fn serve_llm(
             max_models,
             budget_bytes,
         ))),
+        tts_cache: Arc::new(Mutex::new(ModelCache::<Arc<KokoroTts>>::new(
+            max_models,
+            budget_bytes,
+        ))),
         load_lock: Arc::new(Mutex::new(())),
         inference_sem: Arc::new(tokio::sync::Semaphore::new(concurrency)),
         backend: backend.to_string(),
@@ -1405,6 +1898,8 @@ pub async fn serve_llm(
             post(handle_audio_transcriptions)
                 .layer(axum::extract::DefaultBodyLimit::max(512 * 1024 * 1024)),
         )
+        // Text-to-speech. Returns a WAV body, not JSON.
+        .route("/v1/audio/speech", post(handle_audio_speech))
         .layer(CorsLayer::permissive())
         // Allow large prompts (long context / pasted documents) but cap to guard
         // against unbounded request bodies. 32 MiB ≫ any realistic chat payload.
@@ -1485,6 +1980,262 @@ fn print_banner(port: u16, backend: &str, loaded: Option<(&str, &str, &str)>) {
 mod tests {
     use super::*;
 
+    // ── Tool calling ────────────────────────────────────────────────────────
+    //
+    // The rules below are the wire contract the OpenAI SDKs actually enforce
+    // (verified against `@ai-sdk/openai-compatible`), not merely what reads
+    // nicely — each assertion here corresponds to a client-side hard failure.
+
+    /// `function.arguments` must be a JSON-encoded **string**. An object there
+    /// makes the AI SDK throw `Invalid JSON response` — the single easiest way
+    /// to get a hand-rolled tool-calling server wrong.
+    #[test]
+    fn tool_call_arguments_are_a_json_string() {
+        let (text, calls) = extract_tool_calls(
+            r#"<tool_call>{"name":"walk","arguments":{"meters":2}}</tool_call>"#,
+        );
+
+        assert_eq!(text, "");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "walk");
+        assert_eq!(calls[0].function.arguments, r#"{"meters":2}"#);
+        assert_eq!(calls[0].kind, "function");
+        assert!(
+            !calls[0].id.is_empty(),
+            "clients require an id when streaming"
+        );
+    }
+
+    /// A no-argument call must produce `"{}"`. `"null"` is silently treated as
+    /// "nothing to execute", so the tool never runs and the agent loop stalls
+    /// without surfacing an error.
+    #[test]
+    fn tool_call_without_arguments_is_empty_object_not_null() {
+        let (_, calls) = extract_tool_calls(r#"<tool_call>{"name":"sit"}</tool_call>"#);
+        assert_eq!(calls[0].function.arguments, "{}");
+
+        let (_, calls) =
+            extract_tool_calls(r#"<tool_call>{"name":"sit","arguments":null}</tool_call>"#);
+        assert_eq!(calls[0].function.arguments, "{}", "null must not survive");
+
+        // A model completing a forced call sometimes writes a bare scalar. It is
+        // not a valid argument set, and `"0"` is not something a client can parse.
+        let (_, calls) =
+            extract_tool_calls(r#"<tool_call>{"name":"sit","arguments":0}</tool_call>"#);
+        assert_eq!(calls[0].function.arguments, "{}", "scalar must not survive");
+    }
+
+    /// Models often narrate before calling. The prose becomes `content`, the
+    /// call becomes structured output, and neither contaminates the other.
+    #[test]
+    fn prose_and_call_are_separated() {
+        let (text, calls) = extract_tool_calls(
+            "Let me look first.\n<tool_call>{\"name\":\"look\",\"arguments\":{}}</tool_call>",
+        );
+        assert_eq!(text, "Let me look first.");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "look");
+    }
+
+    #[test]
+    fn multiple_calls_are_indexed_in_order() {
+        let (_, calls) = extract_tool_calls(
+            r#"<tool_call>{"name":"stand","arguments":{}}</tool_call><tool_call>{"name":"walk","arguments":{"meters":1}}</tool_call>"#,
+        );
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].function.name, "stand");
+        assert_eq!(calls[1].function.name, "walk");
+    }
+
+    /// A call cut off by `max_tokens` must not vanish. Silently dropping it
+    /// would hand the client an empty assistant turn with no hint that the
+    /// model tried to act — leave it visible as text instead.
+    #[test]
+    fn unterminated_call_survives_as_text() {
+        let raw = r#"<tool_call>{"name":"walk","arguments":{"met"#;
+        let (text, calls) = extract_tool_calls(raw);
+        assert!(calls.is_empty());
+        assert_eq!(text, raw);
+    }
+
+    /// A complete call that merely forgot its closing tag is still a call.
+    ///
+    /// Models routinely drop `</tool_call>` when generation was prefilled *into*
+    /// the call — they never saw themselves open one, so they do not think to
+    /// close it. The JSON is whole; only the tag is missing. Refusing it would
+    /// turn a forced tool call into silent prose, which is the exact failure
+    /// forcing was meant to prevent.
+    #[test]
+    fn complete_call_without_closing_tag_is_honored() {
+        let (text, calls) = extract_tool_calls("<tool_call>\n{\"name\":\"look\",\"arguments\":{}}");
+
+        assert_eq!(calls.len(), 1, "complete JSON must be honored: {text:?}");
+        assert_eq!(calls[0].function.name, "look");
+        assert_eq!(calls[0].function.arguments, "{}");
+    }
+
+    /// Same for a block whose body isn't valid JSON.
+    #[test]
+    fn malformed_call_survives_as_text() {
+        let raw = "<tool_call>not json at all</tool_call>";
+        let (text, calls) = extract_tool_calls(raw);
+        assert!(calls.is_empty());
+        assert_eq!(text, raw);
+    }
+
+    #[test]
+    fn plain_reply_has_no_calls() {
+        let (text, calls) = extract_tool_calls("The room looks clear.");
+        assert_eq!(text, "The room looks clear.");
+        assert!(calls.is_empty());
+    }
+
+    /// The tool-loop round-trip: an assistant turn with `"content": null` plus
+    /// `tool_calls`, followed by a `role: "tool"` result. OpenAI clients send
+    /// exactly this on turn two, so failing to deserialize it would break every
+    /// multi-step agent — while a non-optional `content` field would reject it.
+    #[test]
+    fn tool_loop_turn_two_deserializes() {
+        let body = r#"{
+            "messages": [
+                {"role":"user","content":"walk 2m"},
+                {"role":"assistant","content":null,"tool_calls":[
+                    {"id":"call_1","type":"function",
+                     "function":{"name":"walk","arguments":"{\"meters\":2}"}}
+                ]},
+                {"role":"tool","tool_call_id":"call_1","content":"ok, moved 2m"}
+            ],
+            "tools": [{"type":"function","function":{
+                "name":"walk",
+                "parameters":{"$schema":"http://json-schema.org/draft-07/schema#",
+                              "type":"object","additionalProperties":false}
+            }}],
+            "tool_choice": "auto"
+        }"#;
+
+        let req: ChatCompletionRequest = serde_json::from_str(body).unwrap();
+        assert!(req.active_tools().is_some());
+
+        let msgs = to_chat_messages(&req.messages);
+        assert_eq!(msgs.len(), 3);
+
+        // The wire carries `arguments` as a string; the template needs a value.
+        let calls = msgs[1].tool_calls.as_ref().expect("tool calls preserved");
+        assert_eq!(calls[0].name, "walk");
+        assert_eq!(calls[0].arguments, json!({"meters": 2}));
+
+        assert_eq!(msgs[2].role, sapient_tokenizers::ChatRole::Tool);
+        assert_eq!(msgs[2].content, "ok, moved 2m");
+    }
+
+    /// `$schema` must never reach the model.
+    ///
+    /// Templates dump each tool verbatim into the tools preamble, and a draft-07
+    /// dialect URL sitting in there is enough to knock a small tool-trained model
+    /// off-distribution: Qwen2.5-1.5B stops emitting `<tool_call>` and answers in
+    /// prose instead — it *claims* to have walked without walking. Zod v4 (and so
+    /// the Vercel AI SDK) tags every schema with it, making this the default
+    /// payload rather than an edge case.
+    #[test]
+    fn schema_dialect_key_is_stripped_from_tools() {
+        let req: ChatCompletionRequest = serde_json::from_str(
+            r#"{"messages":[],"tools":[{"type":"function","function":{
+                "name":"walk",
+                "parameters":{
+                    "$schema":"http://json-schema.org/draft-07/schema#",
+                    "type":"object",
+                    "properties":{"meters":{"type":"number","exclusiveMinimum":0}},
+                    "required":["meters"],
+                    "additionalProperties":false
+                }}}]}"#,
+        )
+        .unwrap();
+
+        let tools = req.active_tools().expect("tools active");
+        let rendered = serde_json::to_string(&tools).unwrap();
+
+        assert!(
+            !rendered.contains("$schema"),
+            "dialect key leaked: {rendered}"
+        );
+        // Everything the model genuinely needs must survive the strip.
+        assert!(rendered.contains(r#""name":"walk""#));
+        assert!(rendered.contains(r#""required":["meters"]"#));
+        assert!(rendered.contains(r#""exclusiveMinimum":0"#));
+        assert!(rendered.contains(r#""additionalProperties":false"#));
+    }
+
+    /// `tool_choice` must be *binding*, not advisory.
+    ///
+    /// `auto` is a suggestion the model may decline. `required` and a named
+    /// function are not — and a small model left to decide will happily answer
+    /// "what do you see?" from imagination rather than calling the tool. The
+    /// prefill removes the choice: the assistant turn is already open inside a
+    /// `<tool_call>`, so prose is no longer a reachable continuation.
+    #[test]
+    fn tool_choice_required_forces_a_call() {
+        let prefill_for = |choice: &str| -> Option<String> {
+            let body = format!(
+                r#"{{"messages":[],"tools":[{{"type":"function","function":{{"name":"look"}}}}],
+                    "tool_choice":{choice}}}"#
+            );
+            serde_json::from_str::<ChatCompletionRequest>(&body)
+                .unwrap()
+                .tool_prefill()
+        };
+
+        assert_eq!(
+            prefill_for(r#""required""#).as_deref(),
+            Some("<tool_call>\n")
+        );
+        // A named function pins the name too, so the model cannot call another.
+        assert_eq!(
+            prefill_for(r#"{"type":"function","function":{"name":"look"}}"#).as_deref(),
+            Some("<tool_call>\n{\"name\": \"look\", \"arguments\": {"),
+        );
+        // `auto` leaves the model free; `none` leaves it toolless. Neither forces.
+        assert_eq!(prefill_for(r#""auto""#), None);
+        assert_eq!(prefill_for(r#""none""#), None);
+    }
+
+    /// The forced-call prefill lives in the *prompt*, so the model never emits
+    /// the opening tag. Un-stitched, its reply is a bare JSON fragment that
+    /// parses as prose — the forced call would silently become no call at all.
+    #[test]
+    fn prefilled_reply_is_stitched_before_parsing() {
+        let generated = r#"{"name":"look","arguments":{}}</tool_call>"#;
+
+        let (_, unstitched) = extract_tool_calls(generated);
+        assert!(
+            unstitched.is_empty(),
+            "a bare fragment must not parse alone"
+        );
+
+        let (_, calls) = extract_tool_calls(&stitch(Some("<tool_call>\n"), generated));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "look");
+    }
+
+    /// `tool_choice: "none"` means "answer in prose" — the tools preamble must
+    /// not be rendered at all.
+    #[test]
+    fn tool_choice_none_disables_tools() {
+        let req: ChatCompletionRequest = serde_json::from_str(
+            r#"{"messages":[],"tools":[{"type":"function","function":{"name":"walk"}}],
+                "tool_choice":"none"}"#,
+        )
+        .unwrap();
+        assert!(req.active_tools().is_none());
+    }
+
+    /// An empty `tools: []` must behave as "no tools", not as an empty preamble.
+    #[test]
+    fn empty_tools_array_is_no_tools() {
+        let req: ChatCompletionRequest =
+            serde_json::from_str(r#"{"messages":[],"tools":[]}"#).unwrap();
+        assert!(req.active_tools().is_none());
+    }
+
     // ── OpenAI content parsing (Phase 12.3) ─────────────────────────────────
 
     /// Plain-string content must keep deserializing (existing clients) and
@@ -1492,8 +2243,8 @@ mod tests {
     #[test]
     fn content_plain_string_roundtrip() {
         let m: OAIMessage = serde_json::from_str(r#"{"role":"user","content":"hi"}"#).unwrap();
-        assert_eq!(m.content.text(), "hi");
-        assert!(m.content.image_urls().is_empty());
+        assert_eq!(m.text(), "hi");
+        assert!(m.image_urls().is_empty());
         let back = serde_json::to_string(&m).unwrap();
         assert_eq!(back, r#"{"role":"user","content":"hi"}"#);
     }
@@ -1509,8 +2260,8 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        assert_eq!(m.content.text(), "what is\nhere?");
-        assert_eq!(m.content.image_urls(), vec!["data:image/png;base64,AAAA"]);
+        assert_eq!(m.text(), "what is\nhere?");
+        assert_eq!(m.image_urls(), vec!["data:image/png;base64,AAAA"]);
     }
 
     #[test]

@@ -30,7 +30,7 @@ pub mod vad;
 #[cfg(feature = "audio-io")]
 pub use capture::MicCapture;
 pub use config::MelConfig;
-pub use io::{load_audio, write_wav};
+pub use io::{encode_wav, load_audio, write_wav};
 pub use mel::MelFrontend;
 #[cfg(feature = "audio-io")]
 pub use permissions::{

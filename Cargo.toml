@@ -99,7 +99,10 @@ block     = "0.1"    # ObjC completion-handler block for the above
 # HuggingFace ecosystem
 hf-hub     = { version = "0.4.0", default-features = false, features = ["tokio", "ureq", "rustls-tls"] }
 tokenizers = { version = "0.23", features = ["http"] }
-minijinja  = "2.0"
+# `json` enables the `tojson` filter, which the tool-calling chat templates
+# (Qwen2.5, Hermes) use to serialize tool definitions and call arguments.
+# Without it a tool-aware template fails to render at all.
+minijinja  = { version = "2.0", features = ["json"] }
 
 # HTTP & Download
 reqwest   = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }

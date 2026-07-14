@@ -3,6 +3,57 @@
 Release notes for SAPIENT. The release workflow publishes each version's
 section below as the GitHub release body.
 
+## [Unreleased]
+
+**SAPIENT becomes an agent backend.** `sapient serve` now speaks OpenAI **tool
+calling**, so the Vercel AI SDK, LangChain or the OpenAI SDK can drive it
+unmodified — closing the last gap that forced users to keep a second engine
+around for the action-selecting model. Speech gains an HTTP surface too.
+
+### 🔧 Tool calling — `tools` / `tool_choice` on `/v1/chat/completions`
+
+- **The models could already do this.** Every `qwen2.5-*` alias resolves to
+  Qwen2.5-Instruct, whose chat template carries a `{%- if tools %}` branch and
+  which is trained to answer with `<tool_call>{…}</tool_call>`. SAPIENT simply
+  never told it: the Jinja context was built from `messages` alone, and an
+  incoming `tools` array was dropped by serde. An agent loop pointed at SAPIENT
+  would never actuate anything — and never say why.
+- `tools` now flows render → `GenerationConfig` → server; the model's
+  `<tool_call>` blocks are lifted back into OpenAI `tool_calls`; and the return
+  leg (`role: "tool"` results, assistant turns with `"content": null`) is
+  accepted. A malformed or truncated call stays visible as text rather than
+  vanishing into an empty assistant turn.
+- **`tool_choice` is binding, not advisory.** `"required"` and a named function
+  *force* a call — implemented by prefilling the assistant turn, so prose is no
+  longer a reachable continuation. This is what a caller needs when an answer
+  must not come from imagination.
+- **`$schema` is stripped from tool definitions.** Zod v4 — and therefore every
+  Vercel AI SDK tool — tags each schema with a draft-07 dialect URL. Templates
+  serialize tools verbatim into the model's preamble, and that URL alone is
+  enough to push a small model off-distribution: Qwen2.5-1.5B stops emitting
+  `<tool_call>` and answers in prose. The framework most likely to be pointed at
+  SAPIENT was the one guaranteed to trip it.
+- `minijinja` gains its `json` feature — without the `tojson` filter, every
+  tool-aware chat template fails to render at all.
+
+### 🔊 `POST /v1/audio/speech`
+
+- Kokoro TTS over HTTP (54 voices, WAV/PCM), behind an LRU cache mirroring the
+  STT one. `KokoroTts::synthesize_as` lets one cached engine serve every voice,
+  and `sapient_audio::encode_wav` returns audio without staging a temp file.
+  MP3 is rejected loudly rather than mislabelled as WAV bytes.
+
+### ⚠️ For agents, model size is a correctness knob
+
+Tool-calling quality falls off sharply below ~3B. Qwen2.5-1.5B answers
+perception questions from imagination under `tool_choice: "auto"` — it will
+describe a scene it never looked at rather than call the tool. 3B calls it.
+Prefer 3B+ for agent work, or force the call with `tool_choice`.
+
+Verified end-to-end against `ai@7.0.26` + `@ai-sdk/openai-compatible@3.0.9`: a
+`ToolLoopAgent` drives multi-step tool use on both the streaming and
+non-streaming paths.
+
 ## [0.6.0] - 2026-07-13
 
 SAPIENT goes mobile: the engine runs **on-device** in Swift, Kotlin, and React

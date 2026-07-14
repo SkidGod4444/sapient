@@ -134,6 +134,21 @@ impl KokoroTts {
         Ok(audio.len())
     }
 
+    /// Synthesize `text` in an explicit `voice` and `speed`, overriding the
+    /// instance defaults.
+    ///
+    /// Every voice embedding is already resident in the loaded model, so one
+    /// cached engine can serve all of them — this is what lets the HTTP TTS
+    /// route honor a per-request `voice` without reloading weights per caller.
+    pub fn synthesize_as(&self, text: &str, voice: &str, speed: f32) -> Result<Vec<f32>> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(Vec::new());
+        }
+        let phonemes = self.phonemize(text)?;
+        self.model.synthesize(&phonemes, voice, speed)
+    }
+
     /// Grapheme-to-phoneme for `text` (IPA string in Kokoro's inventory).
     pub fn phonemize(&self, text: &str) -> Result<String> {
         let (phonemes, _tokens) = self

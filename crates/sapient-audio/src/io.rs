@@ -164,10 +164,13 @@ pub fn resample(input: &[f32], from: u32, to: u32) -> Result<Vec<f32>> {
     Ok(out)
 }
 
-/// Write mono `f32` samples (in `[-1, 1]`) to a 16-bit PCM WAV file at
+/// Encode mono `f32` samples (in `[-1, 1]`) as a 16-bit PCM WAV byte buffer at
 /// `sample_rate`. Pure Rust — emits the 44-byte canonical header + i16 samples;
-/// no `hound`/codec dependency needed for output. Used by `sapient speak` (TTS).
-pub fn write_wav(path: impl AsRef<Path>, samples: &[f32], sample_rate: u32) -> Result<()> {
+/// no `hound`/codec dependency needed for output.
+///
+/// Separate from [`write_wav`] so TTS can be served straight over HTTP
+/// (`POST /v1/audio/speech`) without staging a temp file on disk.
+pub fn encode_wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     let n = samples.len();
     let data_bytes = (n * 2) as u32; // 16-bit mono
     let byte_rate = sample_rate * 2;
@@ -189,7 +192,12 @@ pub fn write_wav(path: impl AsRef<Path>, samples: &[f32], sample_rate: u32) -> R
         let v = (s.clamp(-1.0, 1.0) * 32767.0).round() as i16;
         buf.extend_from_slice(&v.to_le_bytes());
     }
-    std::fs::write(path.as_ref(), &buf)
+    buf
+}
+
+/// Write mono `f32` samples to a 16-bit PCM WAV file. Used by `sapient speak`.
+pub fn write_wav(path: impl AsRef<Path>, samples: &[f32], sample_rate: u32) -> Result<()> {
+    std::fs::write(path.as_ref(), encode_wav(samples, sample_rate))
         .with_context(|| format!("writing WAV {}", path.as_ref().display()))
 }
 

@@ -561,9 +561,10 @@ sapient serve --port 8080 --speculative
 | Endpoint | Purpose |
 |---|---|
 | `GET /v1/models` | List loaded model(s) |
-| `POST /v1/chat/completions` | OpenAI-compatible chat — plain text or **image parts** (base64 data URIs) |
+| `POST /v1/chat/completions` | OpenAI-compatible chat — plain text, **image parts** (base64 data URIs), and **tool calling** |
 | `POST /v1/completions` | Raw text completion |
 | `POST /v1/audio/transcriptions` | OpenAI-compatible speech-to-text (multipart audio upload) |
+| `POST /v1/audio/speech` | OpenAI-compatible text-to-speech → WAV (Kokoro, 54 voices) |
 | `GET /v1/health` | Liveness check |
 
 `/v1/chat/completions` accepts OpenAI-style image content parts as **base64 data URIs**,
@@ -586,6 +587,70 @@ curl http://localhost:8080/v1/chat/completions \
 
 The server is compatible with any OpenAI-client SDK or tool (LangChain, LlamaIndex, etc.)
 by pointing the base URL at `http://localhost:8080/v1`.
+
+### Tool calling — a local backend for agents
+
+`/v1/chat/completions` speaks OpenAI **`tools`** / **`tool_choice`**, so an agent framework
+can drive SAPIENT unmodified. Point the Vercel AI SDK, LangChain, or the OpenAI SDK at
+`localhost` and your agent loop runs entirely on-device.
+
+Use a **tool-trained** model — every `qwen2.5-*` alias resolves to Qwen2.5-Instruct, which is:
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen2.5-3b",
+    "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the weather for a city",
+        "parameters": {
+          "type": "object",
+          "properties": {"city": {"type": "string"}},
+          "required": ["city"]
+        }
+      }
+    }]
+  }'
+```
+
+```json
+{"choices": [{
+  "message": {"role": "assistant", "content": null, "tool_calls": [
+    {"id": "call_…", "type": "function",
+     "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}}
+  ]},
+  "finish_reason": "tool_calls"
+}]}
+```
+
+Send the result back as a `{"role": "tool", "tool_call_id": …, "content": …}` message and the
+model continues. That is the whole loop; SDKs do it for you.
+
+**`tool_choice` is binding, not advisory.** `"auto"` lets the model decide, `"none"` suppresses
+the tools entirely, and **`"required"`** — or a named function, `{"type":"function","function":
+{"name":"look"}}` — *forces* a call. This matters when an answer must not come from imagination:
+a small model asked "what do you see?" will otherwise happily describe a scene it never looked
+at. Under `required` it calls the tool instead.
+
+> **Model size is a correctness knob here.** Tool-calling quality falls off sharply below ~3B.
+> Qwen2.5-1.5B will answer perception questions from imagination under `tool_choice: "auto"`;
+> 3B calls the tool. Prefer 3B+ for agent work, or force the call.
+
+### Text-to-speech
+
+```bash
+curl http://localhost:8080/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{"model": "kokoro-82m", "input": "Hello from your own silicon.", "voice": "af_heart"}' \
+  --output hello.wav
+```
+
+Returns a 16-bit PCM WAV. `response_format` accepts `wav` or `pcm` — SAPIENT has no MP3 encoder,
+and rejects other formats loudly rather than mislabelling WAV bytes as `audio/mpeg`.
 
 ---
 
