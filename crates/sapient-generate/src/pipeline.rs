@@ -455,6 +455,17 @@ impl Pipeline {
         }
     }
 
+    /// Whether this model's chat template can render tool definitions.
+    ///
+    /// `false` means a `tools` array would be silently discarded — the model
+    /// would never learn the tools exist and would answer in prose. Callers must
+    /// refuse the request rather than serve a confident non-answer.
+    pub fn supports_tools(&self) -> bool {
+        self.chat_template
+            .as_ref()
+            .is_some_and(|t| t.supports_tools())
+    }
+
     /// Render the chat prompt string for a message history.
     pub fn format_chat_prompt(&self, messages: &[ChatMessage]) -> Result<String> {
         self.format_chat_prompt_with_tools(messages, None)
@@ -787,9 +798,35 @@ impl Pipeline {
             let mut all_tokens = input_ids;
             let eos_ids = self.eos_token_ids();
 
-            engine.reset_cache();
+            // Prefix caching — the same reuse the streaming path already does.
+            //
+            // This branch used to unconditionally `reset_cache()` and re-prefill
+            // the entire prompt, so prefix caching existed *only* for streaming
+            // callers. That is the wrong half: OpenAI clients default to
+            // `stream: false` (the Vercel AI SDK's `generateText` omits the field
+            // altogether), so every agent-loop turn re-read its whole prompt from
+            // scratch.
+            //
+            // Agent prompts are the pathological case for this. The system prompt
+            // and tool definitions are byte-identical on every turn and dominate
+            // the token count, while the reply is a handful of tokens. Measured on
+            // a Jetson Thor: a 484-token barkmind prompt spent ~7s re-prefilling
+            // to emit 20 tokens of tool call.
+            let prefill_start = if self.prefix_cache {
+                let shared = {
+                    // Recover from a poisoned lock rather than cascading the panic:
+                    // stale prefix tracking is harmless, a dead server is not.
+                    let prev = self.last_prompt.lock().unwrap_or_else(|e| e.into_inner());
+                    common_prefix_len(&prev, &all_tokens)
+                }
+                .min(all_tokens.len().saturating_sub(1));
+                engine.truncate_cache(shared) // actual kept positions (≤ shared)
+            } else {
+                engine.reset_cache();
+                0
+            };
 
-            let logits = engine.forward_logits(&all_tokens, true)?;
+            let logits = engine.forward_logits(&all_tokens[prefill_start..], true)?;
             let mut next = sampler.sample(&logits, &all_tokens)?;
             generated.push(next);
             all_tokens.push(next);
@@ -797,6 +834,9 @@ impl Pipeline {
             if eos_ids.contains(&next) {
                 self.last_truncated
                     .store(false, std::sync::atomic::Ordering::Relaxed);
+                // Even a one-token reply leaves a populated cache — record it, or
+                // the next call sees an empty `last_prompt` and re-prefills.
+                self.record_cached_prefix(&all_tokens);
                 return Ok(generated);
             }
 
@@ -827,9 +867,18 @@ impl Pipeline {
             }
             self.last_truncated
                 .store(!clean_stop, std::sync::atomic::Ordering::Relaxed);
+            self.record_cached_prefix(&all_tokens);
 
             Ok(generated)
         })
+    }
+
+    /// Record the token sequence now resident in the KV cache, so the next call
+    /// can reuse its shared prefix instead of re-prefilling it.
+    fn record_cached_prefix(&self, all_tokens: &[u32]) {
+        if self.prefix_cache {
+            *self.last_prompt.lock().unwrap_or_else(|e| e.into_inner()) = all_tokens.to_vec();
+        }
     }
 
     /// True when the most recent reply stopped at the `max_new_tokens` cap

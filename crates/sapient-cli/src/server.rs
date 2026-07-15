@@ -118,6 +118,14 @@ impl ServedModel {
         encoded.map(|t| t.len()).unwrap_or(0)
     }
 
+    /// Whether this model's chat template can render tool definitions.
+    fn supports_tools(&self) -> bool {
+        match self {
+            ServedModel::Plain(p) => p.supports_tools(),
+            ServedModel::Speculative(p) => p.supports_tools(),
+        }
+    }
+
     /// Render the chat prompt string (used to count prompt tokens for `usage`).
     /// Takes `tools` because the tools preamble is part of the prompt the model
     /// actually sees — omitting it would under-report `prompt_tokens`.
@@ -563,6 +571,11 @@ struct SpeechRequest {
     response_format: Option<String>,
     #[serde(default)]
     speed: Option<f32>,
+    /// Stream the audio clause by clause as it is synthesized, instead of
+    /// waiting for the whole utterance. The body is raw 16-bit PCM; the sample
+    /// rate comes back in `X-Sample-Rate`.
+    #[serde(default)]
+    stream: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1223,13 +1236,18 @@ async fn handle_audio_speech(
         .unwrap_or_else(|| DEFAULT_KOKORO_VOICE.to_string());
     let speed = req.speed.unwrap_or(1.0);
     let input = req.input;
+    let sample_rate = tts.payload.sample_rate();
+    let engine = tts.payload.clone();
+
+    if req.stream {
+        return stream_speech(engine, input, voice, speed, sample_rate, permit);
+    }
 
     // Synthesis is CPU-bound and blocking — keep it off the async runtime.
-    let engine = tts.payload.clone();
     let synth = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let samples = engine.synthesize_as(&input, &voice, speed)?;
-        Ok::<_, anyhow::Error>(sapient_audio::encode_wav(&samples, engine.sample_rate()))
+        Ok::<_, anyhow::Error>(sapient_audio::encode_wav(&samples, sample_rate))
     })
     .await;
 
@@ -1247,6 +1265,120 @@ async fn handle_audio_speech(
         Ok(Err(e)) => model_err(format!("{e:#}")),
         Err(e) => server_err(format!("speech synthesis task panicked: {e}")),
     }
+}
+
+/// Streaming TTS: synthesize clause by clause and send each one as it is ready.
+///
+/// Kokoro generates **faster than real time** (RTF ~0.72), so a caller that waits
+/// for the whole WAV is waiting on nothing — the audio for the opening words was
+/// finished long before the closing ones were started. On a robot that wait is
+/// the machine standing still with its mouth shut, and it is the single largest
+/// term left in the response latency.
+///
+/// Chunking is by clause rather than by decoder frame on purpose. Kokoro's
+/// `decode_prefix` always decodes from frame 0, so slicing an utterance into K
+/// pieces re-decodes the prefix K times — O(n²) work to save latency. Splitting
+/// the *text* costs nothing extra: each clause is synthesized exactly once, and
+/// the first one lands after only its own share of the work.
+///
+/// The body is raw 16-bit PCM (`audio/pcm`), not WAV: a streaming WAV would need
+/// its length in the header before the audio exists. The sample rate is returned
+/// in `X-Sample-Rate` so the client can play it without guessing.
+fn stream_speech(
+    engine: Arc<KokoroTts>,
+    input: String,
+    voice: String,
+    speed: f32,
+    sample_rate: u32,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> Response {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(4);
+
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        for clause in split_for_speech(&input) {
+            let samples = match engine.synthesize_as(&clause, &voice, speed) {
+                Ok(s) => s,
+                Err(e) => {
+                    // The stream has already begun; there is no status code left
+                    // to send. Break the body so the client sees a truncated
+                    // response rather than silently short audio it believes is
+                    // complete.
+                    let _ = tx.blocking_send(Err(std::io::Error::other(format!("{e:#}"))));
+                    return;
+                }
+            };
+            // 16-bit PCM, little-endian — the same samples `encode_wav` would
+            // write, minus the header.
+            let mut pcm = Vec::with_capacity(samples.len() * 2);
+            for s in &samples {
+                pcm.extend_from_slice(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
+            }
+            if tx.blocking_send(Ok(pcm)).is_err() {
+                return; // client hung up mid-sentence
+            }
+        }
+    });
+
+    (
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "audio/pcm".to_string()),
+            (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+            (
+                axum::http::HeaderName::from_static("x-sample-rate"),
+                sample_rate.to_string(),
+            ),
+        ],
+        axum::body::Body::from_stream(ReceiverStream::new(rx)),
+    )
+        .into_response()
+}
+
+/// Split text into speakable clauses, so the first audio arrives after the first
+/// clause instead of the last.
+///
+/// Splits only where a speaker would already pause — sentence enders, then
+/// commas, colons and semicolons — so the seams fall on natural breaths and the
+/// chunks do not sound spliced. Short trailing fragments are folded back into the
+/// previous clause: a chunk of two words costs a model invocation and buys no
+/// latency, and Kokoro's prosody on a bare fragment is poor.
+fn split_for_speech(text: &str) -> Vec<String> {
+    // Below this a clause is not worth its own synthesis pass: it buys little
+    // latency and Kokoro's prosody on a two-word stub is poor. Tuned so that a
+    // real opening clause ("Stopped early,") does split — that first chunk is
+    // precisely the latency being bought — while a whole short reply
+    // ("Blocked, sorry.") stays intact.
+    const MIN_CHARS: usize = 12;
+
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+
+    for ch in text.chars() {
+        cur.push(ch);
+        let breakable = matches!(ch, '.' | '!' | '?' | ',' | ';' | ':');
+        if breakable && cur.trim().len() >= MIN_CHARS {
+            out.push(cur.trim().to_string());
+            cur.clear();
+        }
+    }
+
+    let tail = cur.trim();
+    if !tail.is_empty() {
+        // Fold a stub tail into the previous clause rather than speaking it alone.
+        match out.last_mut() {
+            Some(last) if tail.len() < MIN_CHARS => {
+                last.push(' ');
+                last.push_str(tail);
+            }
+            _ => out.push(tail.to_string()),
+        }
+    }
+
+    if out.is_empty() {
+        out.push(text.trim().to_string());
+    }
+    out
 }
 
 async fn handle_chat_completions(
@@ -1276,6 +1408,19 @@ async fn handle_chat_completions(
 
     let messages: Vec<ChatMessage> = to_chat_messages(&req.messages);
     let tools: Option<Vec<serde_json::Value>> = req.active_tools();
+
+    // Refuse tools this model's template cannot render, rather than dropping
+    // them. A silently-discarded tools array returns a confident 200 of prose —
+    // the agent loop never actuates, and nothing anywhere says why. Models
+    // without a tools branch (Gemma, Phi, Llama-2, plain-ChatML GGUFs) must say
+    // so out loud.
+    if tools.is_some() && !model.payload.supports_tools() {
+        return model_err(format!(
+            "model '{model_id}' cannot use tools: its chat template has no tool support, \
+             so the tools would be silently ignored and the model would answer in prose. \
+             Use a tool-trained model whose template renders tools (e.g. qwen2.5-3b)."
+        ));
+    }
     // Forced tool use: we open the assistant's `<tool_call>` ourselves, so the
     // model resumes *inside* a call. Whatever it generates must be stitched back
     // onto this prefix before parsing — the opening tag is in the prompt, not in
@@ -2214,6 +2359,62 @@ mod tests {
         let (_, calls) = extract_tool_calls(&stitch(Some("<tool_call>\n"), generated));
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "look");
+    }
+
+    // ── Streaming TTS chunking ──────────────────────────────────────────────
+
+    /// A multi-clause reply must break at the comma, so the first audio lands
+    /// after the first clause instead of the whole sentence.
+    #[test]
+    fn speech_splits_on_clause_boundaries() {
+        let chunks = split_for_speech("Stopped early, there is an obstacle ahead of me.");
+        assert_eq!(chunks.len(), 2, "{chunks:?}");
+        assert_eq!(chunks[0], "Stopped early,");
+        assert_eq!(chunks[1], "there is an obstacle ahead of me.");
+    }
+
+    /// A short reply must NOT be chopped up. Splitting "Sitting now." into
+    /// fragments costs a model invocation per fragment and buys no latency,
+    /// and Kokoro's prosody on a bare stub is poor.
+    #[test]
+    fn speech_does_not_split_a_short_reply() {
+        assert_eq!(split_for_speech("Sitting now."), vec!["Sitting now."]);
+        assert_eq!(split_for_speech("Blocked, sorry."), vec!["Blocked, sorry."]);
+    }
+
+    /// A stub tail is folded back rather than spoken alone — otherwise a
+    /// trailing "ok." becomes its own synthesis pass and its own audio chunk.
+    #[test]
+    fn speech_folds_a_stub_tail_into_the_previous_clause() {
+        let chunks = split_for_speech("I could not get past the obstacle ahead, sorry");
+        assert_eq!(
+            chunks.len(),
+            1,
+            "stub tail must not stand alone: {chunks:?}"
+        );
+        assert!(chunks[0].ends_with("sorry"));
+    }
+
+    /// Every character survives the split — audio must never silently lose words.
+    #[test]
+    fn speech_split_is_lossless() {
+        for text in [
+            "Stopped early, there is an obstacle 0.79 meters ahead.",
+            "Sitting.",
+            "I see a person; they are about three meters away, slightly left.",
+            "no punctuation at all just words running on and on and on",
+        ] {
+            let joined = split_for_speech(text).join(" ");
+            let strip = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+            assert_eq!(strip(&joined), strip(text), "lost text in: {text:?}");
+        }
+    }
+
+    /// Text with no punctuation at all still yields exactly one speakable chunk.
+    #[test]
+    fn speech_handles_text_with_no_punctuation() {
+        let chunks = split_for_speech("walking forward now");
+        assert_eq!(chunks, vec!["walking forward now"]);
     }
 
     /// `tool_choice: "none"` means "answer in prose" — the tools preamble must
