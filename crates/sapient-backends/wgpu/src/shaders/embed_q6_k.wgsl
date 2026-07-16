@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 // Embedding gather from a Q6_K-resident table: out[t, i] = dequant(table[ids[t], i]).
 // Same padded-super-block layout as matmul_nt_q6_k.wgsl (53 words per 256 weights).
 // Matters for tied-embedding Q4_K_M models (Llama-3.2 class) whose token table is

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 // Multi-row Q8_0 linear projection (prefill): MT = 8 x-rows per workgroup over
 // one Q8_0 weight row — each 4-weight word is dequantized ONCE and FMA-ed into
 // 8 accumulators, so both weight traffic and dequant ALU drop ~8× per prefill

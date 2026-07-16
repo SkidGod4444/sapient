@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! MoE decode/prefill micro-benchmark on real Mixtral-8x7B Q4_K_M.
 //!
 //! Ignored (needs the model + 32 GB). Loads the model ONCE and emits, apples-to-

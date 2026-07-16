@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! The PLBERT text encoder — HuggingFace ALBERT with cross-layer parameter
 //! sharing (one `albert_layer` group applied `num_hidden_layers` times) and a
 //! factorized embedding (`embedding_size=128` → `hidden_size=768`). Kokoro runs

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Golden end-to-end gate for the SmolVLM path (Roadmap 12.1: "golden-output
 //! test with a fixed image"): a synthetic solid-red image must be identified
 //! as red, greedily, end to end (SigLIP tower → pixel shuffle → connector →

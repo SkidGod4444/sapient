@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! `WhisperTokenizer` — Whisper's GPT-2 BPE vocabulary plus its control-token
 //! protocol (start-of-transcript, language, task, timestamps, end-of-text).
 //!

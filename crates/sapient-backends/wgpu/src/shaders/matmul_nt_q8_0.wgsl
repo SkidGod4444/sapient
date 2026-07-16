@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 // Resident quantized linear projection: out[M,N] = x[M,K] @ dequant(W)[N,K]^T.
 // W stays Q8_0 on the GPU — int8 weights dequantized inside the kernel, no host-side
 // f32 expansion (Phase 7.1). Layout produced by `upload_q8_0` from raw ggml blocks:

@@ -4,7 +4,7 @@
   <p>
     <a href="https://github.com/SkidGod4444/sapient/releases"><img src="https://img.shields.io/github/v/release/SkidGod4444/sapient" alt="Release"/></a>
     <a href="https://github.com/SkidGod4444/sapient/actions"><img src="https://github.com/SkidGod4444/sapient/workflows/CI/badge.svg" alt="CI"/></a>
-    <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License"/>
+    <img src="https://img.shields.io/badge/license-AGPL--3.0%20or%20commercial-blue" alt="License"/>
     <img src="https://img.shields.io/badge/rust-1.82%2B-orange" alt="MSRV"/>
     <img src="https://img.shields.io/github/downloads/SkidGod4444/sapient/total" alt="Downloads"/>
   </p>
@@ -327,8 +327,10 @@ packaging is a tracked rung): see [`docs/MOBILE.md`](docs/MOBILE.md).
   three stacks (SwiftUI macOS+iOS, Jetpack Compose, React Native/Expo),
   CI-built.
 
-> **License note:** SAPIENT is GPL-3.0 — an app that embeds these SDKs is
-> subject to the GPL's terms. See [LICENSE](LICENSE).
+> **License note:** SAPIENT is dual-licensed **AGPL-3.0 or commercial**. An app
+> that embeds these SDKs under the AGPL must comply with the AGPL's terms
+> (including network/source-disclosure); for closed-source or hosted commercial
+> use, get a [commercial license](COMMERCIAL-LICENSE.md). See [LICENSE](LICENSE).
 
 ---
 
@@ -721,9 +723,20 @@ cargo build -p sapient-cli --release --features mlx
 
 ## License
 
-SAPIENT is licensed under the **[GNU General Public License v3.0](LICENSE)**.
+SAPIENT is **dual-licensed**. Use it under **either**:
 
-You are free to use, study, share, and improve this software. Any modified version you distribute must also be open-source under the GPL-3.0.
+1. The **[GNU Affero General Public License v3.0](LICENSE)** (AGPL-3.0-only) —
+   free for open-source and internal use. You are free to use, study, share, and
+   improve this software; any modified version you **distribute or run as a
+   network service** must also be open-sourced under the AGPL-3.0 (this includes
+   hosted/SaaS use). See [`NOTICE`](NOTICE).
+2. A **[commercial license](COMMERCIAL-LICENSE.md)** from **OpenHorizon Labs Pvt
+   Ltd** — for embedding SAPIENT in closed-source or hosted commercial products
+   without the AGPL's source-disclosure obligations.
+
+**"SAPIENT"** and the SAPIENT logo are trademarks of OpenHorizon Labs Pvt Ltd.
+Neither license grants trademark rights — forks must rebrand and white-labelling
+requires a separate agreement. See [`TRADEMARK.md`](TRADEMARK.md).
 
 ---
 

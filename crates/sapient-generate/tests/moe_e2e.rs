@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Golden gate for the Mixtral-class sparse-MoE path: Mixtral-8x7B-Instruct
 //! (Q4_K_M GGUF) greedy must answer the capital question correctly. This is the
 //! end-to-end check that no synthetic test can be: it exercises the real load

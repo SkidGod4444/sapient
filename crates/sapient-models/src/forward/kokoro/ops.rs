@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! New CPU primitives required by Kokoro-82M (StyleTTS2 + ISTFTNet) that the
 //! existing SAPIENT kernel stack does not already provide. Everything here is
 //! purely additive — the chat / serve / transcribe / Orpheus-speak paths never

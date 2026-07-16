@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! `KokoroTts` — a real-time [`Tts`] backend powered by Kokoro-82M.
 //!
 //! Kokoro is a *non-autoregressive* StyleTTS2 + ISTFTNet model (see

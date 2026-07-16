@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! SNAC neural-audio-codec **decoder** building blocks (Phase 6d, LM-codec TTS).
 //!
 //! The LM (Orpheus/OuteTTS, a Llama-3.2 run by `LlamaForward`) emits SNAC codec

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Coherence test for `WhisperForward` on a synthetic tiny model.
 //!
 //! Builds a 2-mel / d=8 / 1-encoder / 2-decoder-layer Whisper with deterministic

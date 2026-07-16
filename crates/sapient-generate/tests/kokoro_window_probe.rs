@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Measured negative result, kept as a regression record: windowed (rolling)
 //! decoding of the Kokoro ISTFTNet decoder is NOT viable without a
 //! streaming-norm redesign. Window bookkeeping + analytic NSF phase carry are

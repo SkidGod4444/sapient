@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 // Element-wise kernels, one invocation per element, 2-D-tiled grid.
 // `op`: 0 = add (a+b, residual), 1 = SwiGLU (silu(a)*b = gate·sigmoid(gate)·up),
 //       2 = exact erf GELU of `a` (b ignored — Whisper's activation),

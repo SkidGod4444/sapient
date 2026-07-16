@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 // Embedding gather from a Q8_0-resident table: out[t, i] = dequant(table[ids[t], i]).
 // Same `upload_q8_0` layout as matmul_nt_q8_0.wgsl (qs: 4 int8 per u32 word,
 // scales: one f32 per 32-weight block). One workgroup per token row; lanes

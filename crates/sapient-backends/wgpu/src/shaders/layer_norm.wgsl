@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 // LayerNorm: out[r,i] = (x[r,i] - mean_r) / sqrt(var_r + eps) * weight[i] + bias[i]
 // One workgroup per row; cooperative mean + variance reduction in shared memory.
 // f32 accumulation throughout. Unlike RMSNorm this subtracts the row mean and

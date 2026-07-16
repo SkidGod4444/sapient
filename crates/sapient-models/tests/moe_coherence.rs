@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Correctness gate for the Mixtral-class sparse-MoE FFN in `LlamaForward`.
 //!
 //! There is no second MoE engine to diff against, so this uses two independent

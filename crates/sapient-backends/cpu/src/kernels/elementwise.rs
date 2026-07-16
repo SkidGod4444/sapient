@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Element-wise CPU kernels — arithmetic, activations, and mathematical ops.
 //!
 //! All kernels operate on F32 tensors. Binary ops support same-shape operands

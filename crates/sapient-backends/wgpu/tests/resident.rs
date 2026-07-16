@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Resident-compute kernel tests — validate each GPU kernel against a CPU
 //! reference. Run on whatever backend wgpu picks (Metal on a Mac, Vulkan/DX12 on
 //! Linux/Windows); the same WGSL runs on all of them.

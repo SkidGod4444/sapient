@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! End-to-end coherence: the wgpu GPU forward engine must produce the same logits as
 //! the proven CPU `LlamaForward` for an identical (synthetic) Llama-family model. This
 //! is the gating test for the cross-platform GPU path — if a kernel (RoPE axis, GQA

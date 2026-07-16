@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Cross-platform GPU Whisper engine (wgpu/WGSL — Vulkan/DX12/Metal).
 //!
 //! Mirrors the CPU [`super::whisper::WhisperForward`] but runs the transformer

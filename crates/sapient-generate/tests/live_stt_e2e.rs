@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! End-to-end gate for the Phase-10.1 incremental transcriber ([`LiveStt`]):
 //! feed a speech clip in growing snapshots (as the live loop does while the
 //! user is still talking), `settle`, and require the incremental transcript to

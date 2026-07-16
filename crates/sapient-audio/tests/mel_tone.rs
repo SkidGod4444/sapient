@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! End-to-end DSP sanity: a pure tone must concentrate its energy in the mel
 //! channel(s) whose triangular filter covers that frequency. This validates the
 //! STFT framing, windowing, power spectrum, and filterbank projection together

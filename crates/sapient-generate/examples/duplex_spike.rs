@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Non-autoregressive duplex-codec spike harness (Paper 1, §7 "de-risking spike").
 //!
 //! GOAL: decide GO/NO-GO on a CPU-real-time, full-duplex voice agent built on a

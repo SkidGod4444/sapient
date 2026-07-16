@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! MixtralForCausalLM graph builder — Sparse Mixture of Experts.
 //! Covers: Mixtral-8x7B, Mixtral-8x22B.
 

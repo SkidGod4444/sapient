@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 // Resident linear projection: out[M,N] = x[M,K] @ w[N,K]^T  (w in HF [N,K] layout).
 // One workgroup per output element; 256 lanes cooperatively reduce the K dot product
 // (GEMV-style — ideal for batch-1 decode). f32 accumulation.

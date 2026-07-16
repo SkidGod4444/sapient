@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Constant folding pass — evaluate sub-graphs whose inputs are all constants
 //! at graph-build time and replace them with a single `Constant` node.
 
