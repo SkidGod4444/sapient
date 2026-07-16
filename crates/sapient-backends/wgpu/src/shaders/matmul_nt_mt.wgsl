@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 // Multi-row f32 linear projection (prefill): out[M,N] = x[M,K] @ w[N,K]^T with
 // MT = 8 x-rows per workgroup. Each workgroup owns ONE weight row and reads it
 // once, FMA-ing into 8 accumulators — weight traffic per prefill chunk drops

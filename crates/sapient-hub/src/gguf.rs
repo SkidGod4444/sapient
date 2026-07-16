@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! GGUF file selection helpers for HuggingFace Hub downloads.
 
 /// If `name` is one shard of a split GGUF (`<base>-<NNNNN>-of-<MMMMM>.gguf`, the

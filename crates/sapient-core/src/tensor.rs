@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! `Tensor` — the central multi-dimensional array type in SAPIENT.
 //!
 //! A `Tensor` owns its shape and dtype metadata, and holds a reference-counted

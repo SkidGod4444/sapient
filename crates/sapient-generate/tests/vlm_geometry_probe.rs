@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Numeric orientation probe for the SmolVLM vision path: encode synthetic
 //! half-images and check the 8×8 visual-token grid varies along the correct
 //! axis (columns for a vertical split, rows for a horizontal one) — verifies

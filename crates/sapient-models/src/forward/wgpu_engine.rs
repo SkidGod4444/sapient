@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Cross-platform GPU forward engine via wgpu/WGSL (Vulkan on Linux, DX12 on
 //! Windows, Metal on macOS — Intel/AMD/Nvidia/Apple). Weights are uploaded to GPU
 //! storage buffers once at load; every decode step runs entirely on-device (embed →

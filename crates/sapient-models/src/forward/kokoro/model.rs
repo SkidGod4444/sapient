@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! `KokoroModel` — the full StyleTTS2 + ISTFTNet forward pass, tying the ALBERT
 //! encoder, the prosody predictor, the prosodic text encoder, and the ISTFTNet
 //! decoder into `phonemes (input_ids) + voice → 24 kHz waveform`. Non-autoregressive

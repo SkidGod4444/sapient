@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Licensing (dual-license — read before touching license/headers)
+
+SAPIENT is **dual-licensed by OpenHorizon Labs Pvt Ltd** (registered in India): **AGPL-3.0-only** (`LICENSE`) **OR** a commercial license (`COMMERCIAL-LICENSE.md`). This is NOT plain open source — the AGPL copyleft (network/source-disclosure) is the moat, and the commercial license is the paid track. Invariants: (1) every `.rs`/`.wgsl` source file under `crates/` carries the two-line SPDX header `// SPDX-License-Identifier: AGPL-3.0-only` + `// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)` — add it to any new source file; (2) the workspace `Cargo.toml` `license = "AGPL-3.0-only"`; (3) dual-licensing requires contributors to grant OpenHorizon Labs the right to also relicense commercially — `CONTRIBUTING.md` carries that inbound grant, so don't weaken it; (4) `NOTICE`, `TRADEMARK.md`, and the README License section must stay consistent with this model. The **"SAPIENT" name/logo are trademarks** (not covered by either code license) — forks must rebrand; white-labelling needs a separate agreement (`TRADEMARK.md`). Do NOT add "no commercial use" clauses into the AGPL text (invalid); commercial restriction lives in the separate commercial license, not the AGPL.
+
 ## Essential commands
 
 ```bash

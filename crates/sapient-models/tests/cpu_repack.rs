@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Engine-level gate for the Q4_K_R4 multi-row repack: a pure-CPU `LlamaForward`
 //! must produce IDENTICAL logits with the repack enabled (the aarch64 default)
 //! and disabled (`SAPIENT_NO_REPACK=1`) — the repacked kernel's per-row math is

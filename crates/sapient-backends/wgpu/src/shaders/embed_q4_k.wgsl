@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 // Embedding gather from a Q4_K-resident table: out[t, i] = dequant(table[ids[t], i]).
 // Same raw-super-block layout as matmul_nt_q4_k.wgsl (36 words per 256 weights).
 // One workgroup per token row; lanes dequantize `dim` elements strided.

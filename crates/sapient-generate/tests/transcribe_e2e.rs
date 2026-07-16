@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! End-to-end Whisper transcription test (ignored — needs network + an audio file).
 //!
 //! This is the absolute-correctness gate: it downloads the real `whisper-tiny`

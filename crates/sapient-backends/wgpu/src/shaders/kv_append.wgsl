@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 // KV-cache append (f32 cache): write `seq` tokens' K (or V) — an f32 buffer of
 // [n_kv_heads, seq, head_dim] (heads-major, i.e. post-transpose) — into positions
 // pos..pos+seq of a pre-allocated [n_kv_heads, max_seq, head_dim] f32 cache.

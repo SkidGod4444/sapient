@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Thermal-aware sustained decode (roadmap Phase 8.4).
 //!
 //! Passively-cooled boards (Raspberry Pi 4/5) hit their thermal limit under

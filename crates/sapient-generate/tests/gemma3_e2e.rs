@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Golden gate for the Gemma3 text engine: gemma-3-1b-it greedy must answer
 //! the capital question exactly — this catches the whole class of "wired but
 //! wrong math" regressions (norm folding, QK-norm, sandwich norms, sliding

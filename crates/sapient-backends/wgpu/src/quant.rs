@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Quantized GPU-resident weights (Phase 7.1 — in-shader Q8_0 dequant).
 //!
 //! Raw ggml Q8_0 blocks (34 bytes per 32 weights: one little-endian f16 scale +

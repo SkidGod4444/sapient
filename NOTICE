@@ -1,0 +1,63 @@
+SAPIENT
+Copyright (C) 2026 OpenHorizon Labs Pvt Ltd
+
+OpenHorizon Labs Pvt Ltd is a company registered in India.
+
+------------------------------------------------------------------------------
+Dual licensing
+------------------------------------------------------------------------------
+
+SAPIENT is dual-licensed. You may use it under EITHER of the following, at your
+option:
+
+  (1) The GNU Affero General Public License, version 3 (AGPL-3.0-only), the
+      terms of which are in the LICENSE file at the root of this repository and
+      at <https://www.gnu.org/licenses/agpl-3.0.txt>; OR
+
+  (2) A commercial license from OpenHorizon Labs Pvt Ltd, for users who do not
+      wish to comply with the AGPL-3.0 (for example, to embed SAPIENT in a
+      closed-source or hosted commercial product without releasing their own
+      source). See COMMERCIAL-LICENSE.md.
+
+Unless you have a separate commercial license agreement with OpenHorizon Labs
+Pvt Ltd, your use is governed by the AGPL-3.0-only.
+
+------------------------------------------------------------------------------
+AGPL-3.0 warranty notice
+------------------------------------------------------------------------------
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
+
+The AGPL additionally requires that if you run a modified version of this
+program to provide a service over a network, you must offer the users of that
+service access to the complete corresponding source code of your modified
+version.
+
+------------------------------------------------------------------------------
+Trademarks
+------------------------------------------------------------------------------
+
+"SAPIENT", the SAPIENT name, and the SAPIENT logo are trademarks of OpenHorizon
+Labs Pvt Ltd. Neither the AGPL-3.0 license nor a commercial license grants any
+right to use these trademarks. If you redistribute a modified version of this
+software, you must rebrand it under your own name and remove SAPIENT branding,
+except for factual "based on SAPIENT" statements. See TRADEMARK.md for the full
+trademark and branding policy.
+
+------------------------------------------------------------------------------
+Attribution
+------------------------------------------------------------------------------
+
+If you redistribute this software under the AGPL-3.0 (modified or unmodified),
+the license requires you to:
+  - keep this NOTICE, the LICENSE file, and the per-file copyright headers
+    intact;
+  - release your complete corresponding source code under AGPL-3.0-only,
+    including for network/hosted use;
+  - prominently state any changes you made to the original files.
+
+This product bundles third-party open-source components, each distributed under
+its own license. Those licenses are listed in the dependency manifests
+(Cargo.toml / Cargo.lock) and retained in the respective upstream sources.

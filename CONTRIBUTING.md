@@ -29,11 +29,39 @@ Be respectful, constructive, and inclusive. We want this project to be welcoming
 
 ---
 
-## License
+## License & contributor terms
 
-SAPIENT is licensed under **[GPL-3.0-only](LICENSE)**.
+SAPIENT is **dual-licensed**: **[AGPL-3.0-only](LICENSE)** or a
+**[commercial license](COMMERCIAL-LICENSE.md)** from OpenHorizon Labs Pvt Ltd.
 
-By contributing code, documentation, or other materials, you agree that your contributions will be licensed under the same terms. If you modify SAPIENT and distribute binaries, those binaries must also comply with the GPL.
+Because SAPIENT is dual-licensed, contributions must be usable under **both**
+licenses. By submitting a contribution (code, documentation, or other
+materials), you agree that:
+
+1. Your contribution is licensed to the project and its users under the
+   **AGPL-3.0-only**; **and**
+2. You grant **OpenHorizon Labs Pvt Ltd** a perpetual, worldwide,
+   royalty-free, irrevocable license to also use, distribute, and **relicense
+   your contribution under the commercial license** (and any future license
+   terms OpenHorizon Labs offers for SAPIENT), so the project can be offered
+   under the dual-license model above; **and**
+3. You represent that you are legally entitled to grant this — i.e. the work is
+   yours to license (or you have permission from the rights holder, such as your
+   employer).
+
+This is a lightweight inbound-licensing grant, not a copyright assignment — you
+keep ownership of your contribution. New source files should carry the standard
+header:
+
+```
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+```
+
+Any modified version you **distribute or run as a network service** under the
+AGPL must comply with the AGPL-3.0 (including the source-disclosure obligation
+for hosted use). See [`TRADEMARK.md`](TRADEMARK.md) for name/logo use — forks
+must rebrand.
 
 ---
 

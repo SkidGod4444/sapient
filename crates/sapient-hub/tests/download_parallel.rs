@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Network integration tests for Hub download performance settings.
 //!
 //! Run with `SAPIENT_RUN_HF_NETWORK_TESTS=1 cargo test -p sapient-hub --test download_parallel`.

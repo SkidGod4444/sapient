@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Stage-by-stage coherence tests against a PyTorch Kokoro reference fixture
 //! (`tests/fixtures/kokoro_hello.safetensors`, every intermediate dumped by
 //! `scripts/`-generated ground truth for phonemes "həlˈoʊ" + voice af_heart).

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Kokoro-82M text-to-speech (StyleTTS2 + ISTFTNet) — a pure-Rust forward pass.
 //!
 //! Kokoro is a *non-autoregressive* TTS: a single forward pass turns a phoneme

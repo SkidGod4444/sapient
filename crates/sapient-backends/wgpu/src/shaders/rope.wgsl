@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 // Rotary position embedding (NEOX / rotate_half split-half convention), in-place.
 // Matches the CPU `apply_rope_partial`: data is [rows, head_dim] where a row is one
 // (batch, head, seq) slice; rows = batch*n_heads*seq_len laid out so row % seq_len is

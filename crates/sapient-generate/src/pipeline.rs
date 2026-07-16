@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! `Pipeline` — the main user-facing LLM inference API.
 //!
 //! One line to load any HuggingFace model, one line to generate text.

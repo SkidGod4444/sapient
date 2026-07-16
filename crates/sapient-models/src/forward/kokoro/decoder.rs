@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! The ISTFTNet decoder + generator: from the length-regulated text features
 //! (`asr`), the F0/N curves, and the decoder (timbre) style it synthesises the
 //! 24 kHz waveform. AdaIN+Snake residual blocks, ConvTranspose upsampling, an NSF

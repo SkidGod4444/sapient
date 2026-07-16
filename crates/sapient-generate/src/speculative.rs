@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Speculative decoding: a small draft model generates K candidate tokens,
 //! a larger target model verifies them in one forward pass, and accepted tokens
 //! are kept. Expected speedup: 3–5× on generation-heavy workloads.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 // Resident Q4_K linear projection: out[M,N] = x[M,K] @ dequant(W)[N,K]^T (Phase 7.2).
 // W stays in raw ggml Q4_K super-blocks on the GPU — 144 bytes per 256 weights,
 // uploaded verbatim (144 is word-aligned, so no host repack at all):

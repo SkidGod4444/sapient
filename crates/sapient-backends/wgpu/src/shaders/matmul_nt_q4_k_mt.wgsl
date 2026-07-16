@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 // Multi-row Q4_K linear projection (prefill): MT = 8 x-rows per workgroup over
 // one Q4_K weight row. Per 32-weight sub-block the 6-bit scale/min pair and the
 // 4-bit quants are decoded ONCE and applied to all 8 rows (per-row Σx·q and Σx,

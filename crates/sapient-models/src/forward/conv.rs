@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! 1-D convolution primitives for audio models.
 //!
 //! - [`conv1d`] wraps the verified 2-D im2col [`conv2d`] (Whisper's audio stem).

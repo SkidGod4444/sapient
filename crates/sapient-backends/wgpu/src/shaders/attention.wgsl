@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 // FlashDecoding: causal grouped-query attention with online softmax. Never
 // materialises the seq_q×seq_k score matrix; O(head_dim) working set per query row.
 // Matches the CPU `scaled_dot_product_attention` (flash_attn_row), causal-only.

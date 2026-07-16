@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! GGUF format parser — Phase 4: memory-mapped loading for bigger-than-RAM models.
 //!
 //! Five guarantees over the original:

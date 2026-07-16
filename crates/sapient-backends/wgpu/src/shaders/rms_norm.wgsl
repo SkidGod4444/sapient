@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 // RMSNorm: out[r,i] = x[r,i] / sqrt(mean_i(x[r,i]^2) + eps) * weight[i]
 // One workgroup per row; cooperative sum-of-squares reduction in shared memory.
 // f32 accumulation (f16 accumulation produces incoherent LLM output).

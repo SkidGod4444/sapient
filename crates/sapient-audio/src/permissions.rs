@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Microphone-capture permission handling (behind the `audio-io` feature).
 //!
 //! Permission models differ sharply by OS, so this exposes one honest API:

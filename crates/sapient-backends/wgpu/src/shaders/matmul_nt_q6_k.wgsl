@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 // Resident Q6_K linear projection: out[M,N] = x[M,K] @ dequant(W)[N,K]^T.
 // W stays in ggml Q6_K super-blocks on the GPU, host-padded from 210 to 212 bytes
 // per 256 weights (2 zero bytes so each block is word-aligned; nothing dequantized):

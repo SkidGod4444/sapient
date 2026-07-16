@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! End-to-end `KokoroTts` test: plain text → misaki G2P → Kokoro-82M → 24 kHz
 //! audio. Ignored by default (needs the converted weights). Run with:
 //!   SAPIENT_KOKORO_DIR=~/.cache/sapient-kokoro \

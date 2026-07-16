@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 //! Streaming sentence chunker for the speech-to-speech cascade.
 //!
 //! In a voice conversation we want to start speaking the LLM's reply before it

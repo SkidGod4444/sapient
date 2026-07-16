@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenHorizon Labs Pvt Ltd — SAPIENT: AGPL-3.0-only OR commercial (see LICENSE, NOTICE)
+
 // Embedding gather: out[t, :] = table[ids[t], :]  (rows of the token-embedding
 // matrix). One workgroup per token row; lanes copy `dim` elements strided.
 
