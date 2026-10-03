@@ -5,6 +5,13 @@ section below as the GitHub release body.
 
 ## [Unreleased]
 
+### ⚡ GPU path: fewer GPU jobs per token
+
+- Bias adds, residual adds and the SwiGLU activation are now computed inside the
+  matrix kernels. A token of a 28-layer model takes 395 GPU jobs where it took 563.
+  Results are bit-identical. Measured on an Apple M4 (Qwen2.5-1.5B): about 6% faster
+  decode (34 → 36 tok/s); the CPU path is still faster there (41 tok/s).
+
 ### 📱 Measure CPU against GPU on a real iPhone
 
 - The Swift example app has a benchmark mode: launch it with `-benchmark <model>` and

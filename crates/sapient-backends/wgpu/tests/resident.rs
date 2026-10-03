@@ -1077,3 +1077,71 @@ fn non_causal_attention_matches_cpu() {
         .fold(0.0f32, f32::max);
     assert!(max_err < 1e-4, "non-causal attention max_err={max_err}");
 }
+
+/// A matmul with a bias/residual or the SwiGLU gate folded into its write must
+/// return exactly what the matmul followed by the separate `add` / `swiglu`
+/// kernel returns — for every weight format, including a partial last
+/// workgroup (n = 13).
+#[test]
+fn fused_matmul_post_is_bit_identical_to_separate_kernels() {
+    use sapient_backends_wgpu::MatmulPost;
+    let Some(ctx) = ctx() else {
+        return;
+    };
+    for (k, n) in [(1536usize, 512usize), (256, 13), (256, 1536)] {
+        let mut next = lcg();
+        let x: Vec<f32> = (0..k).map(|_| next()).collect();
+        let aux: Vec<f32> = (0..n).map(|_| next() * 3.0).collect();
+        let xg = ctx.upload_f32(&x, "x");
+        let ag = ctx.upload_f32(&aux, "aux");
+
+        let wf: Vec<f32> = (0..n * k).map(|_| next()).collect();
+        let (b8, _) = quantize_q8_0_blocks(&wf);
+        let (b4, _) = random_q4_k_blocks(n * k / 256, &mut next);
+        let (b6, _) = random_q6_k_blocks(n * k / 256, &mut next);
+        let w_f32 = ctx.upload_f32(&wf, "w");
+        let w_q8 = ctx.upload_q8_0(&b8, n * k, "w8").unwrap();
+        let w_q4 = ctx.upload_q4_k(&b4, n * k, "w4").unwrap();
+        let w_q6 = ctx.upload_q6_k(&b6, n * k, "w6").unwrap();
+
+        for post in [MatmulPost::Add, MatmulPost::SiluMul] {
+            let separate = |y: sapient_backends_wgpu::GpuBuffer| match post {
+                MatmulPost::Add => ctx.add(&y, &ag),
+                MatmulPost::SiluMul => ctx.swiglu(&ag, &y),
+            };
+            let cases = [
+                (
+                    "f32",
+                    separate(ctx.matmul_nt(&xg, &w_f32, 1, k, n)),
+                    ctx.matmul_nt_post(&xg, &w_f32, k, n, post, &ag),
+                ),
+                (
+                    "q8_0",
+                    separate(ctx.matmul_nt_q8_0(&xg, &w_q8, 1, k, n)),
+                    ctx.matmul_nt_q8_0_post(&xg, &w_q8, k, n, post, &ag),
+                ),
+                (
+                    "q4_k",
+                    separate(ctx.matmul_nt_q4_k(&xg, &w_q4, 1, k, n)),
+                    ctx.matmul_nt_q4_k_post(&xg, &w_q4, k, n, post, &ag),
+                ),
+                (
+                    "q6_k",
+                    separate(ctx.matmul_nt_q6_k(&xg, &w_q6, 1, k, n)),
+                    ctx.matmul_nt_q6_k_post(&xg, &w_q6, k, n, post, &ag),
+                ),
+            ];
+            for (name, want, got) in cases {
+                let want = ctx.download_f32(&want).unwrap();
+                let got = ctx.download_f32(&got).unwrap();
+                assert_eq!(got.len(), n);
+                assert!(
+                    want.iter()
+                        .zip(&got)
+                        .all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "{name} {post:?} k={k} n={n}: fused differs from separate kernels"
+                );
+            }
+        }
+    }
+}

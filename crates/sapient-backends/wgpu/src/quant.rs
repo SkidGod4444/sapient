@@ -188,6 +188,29 @@ impl WgpuContext {
         out
     }
 
+    /// Single-row [`Self::matmul_nt_q8_0`] with `post` folded in (see
+    /// [`MatmulPost`](crate::MatmulPost)).
+    pub fn matmul_nt_q8_0_post(
+        &self,
+        x: &GpuBuffer,
+        w: &GpuQ8Buffer,
+        k: usize,
+        n: usize,
+        post: crate::MatmulPost,
+        aux: &GpuBuffer,
+    ) -> GpuBuffer {
+        self.gemv_post(
+            "matmul_nt_q8_0",
+            include_str!("shaders/matmul_nt_q8_0.wgsl"),
+            &[&w.qs, &w.scales],
+            x,
+            k,
+            n,
+            post,
+            aux,
+        )
+    }
+
     /// Upload raw ggml Q4_K super-block bytes (`numel/256` × 144-byte blocks, e.g.
     /// from `Tensor::as_quant_blocks()`) into GPU-resident quantized storage. The
     /// bytes upload **verbatim** (144 is a multiple of 4, so the blocks bind
@@ -267,6 +290,29 @@ impl WgpuContext {
             );
         }
         out
+    }
+
+    /// Single-row [`Self::matmul_nt_q4_k`] with `post` folded in (see
+    /// [`MatmulPost`](crate::MatmulPost)).
+    pub fn matmul_nt_q4_k_post(
+        &self,
+        x: &GpuBuffer,
+        w: &GpuQ4KBuffer,
+        k: usize,
+        n: usize,
+        post: crate::MatmulPost,
+        aux: &GpuBuffer,
+    ) -> GpuBuffer {
+        self.gemv_post(
+            "matmul_nt_q4_k",
+            include_str!("shaders/matmul_nt_q4_k.wgsl"),
+            &[&w.qb],
+            x,
+            k,
+            n,
+            post,
+            aux,
+        )
     }
 
     /// Embedding gather from a Q4_K-resident table: `out[t,:] = dequant(table[ids[t],:])`.
@@ -397,6 +443,29 @@ impl WgpuContext {
             );
         }
         out
+    }
+
+    /// Single-row [`Self::matmul_nt_q6_k`] with `post` folded in (see
+    /// [`MatmulPost`](crate::MatmulPost)).
+    pub fn matmul_nt_q6_k_post(
+        &self,
+        x: &GpuBuffer,
+        w: &GpuQ6KBuffer,
+        k: usize,
+        n: usize,
+        post: crate::MatmulPost,
+        aux: &GpuBuffer,
+    ) -> GpuBuffer {
+        self.gemv_post(
+            "matmul_nt_q6_k",
+            include_str!("shaders/matmul_nt_q6_k.wgsl"),
+            &[&w.qb],
+            x,
+            k,
+            n,
+            post,
+            aux,
+        )
     }
 
     /// Embedding gather from a Q6_K-resident table: `out[t,:] = dequant(table[ids[t],:])`.

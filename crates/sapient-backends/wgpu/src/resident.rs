@@ -38,6 +38,80 @@ fn f16_kv_variant(src: &str) -> String {
     out
 }
 
+/// An operation folded into a single-row matmul's final write, so that it does
+/// not need a kernel dispatch of its own. A decode token is several hundred
+/// dispatches and each has a fixed cost (docs/BENCHMARKS.md, "Where a wgpu
+/// decode token goes"); the values are the ones the separate kernels compute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MatmulPost {
+    /// `out[i] = (W·x)[i] + aux[i]` — a bias or a residual (replaces `add`).
+    Add,
+    /// `out[i] = silu(aux[i]) · (W·x)[i]` — SwiGLU with `aux` = the gate
+    /// projection and this matmul the up projection (replaces `swiglu`).
+    SiluMul,
+}
+
+impl MatmulPost {
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::SiluMul => "silu_mul",
+        }
+    }
+}
+
+/// The write line every single-row matmul shader ends with.
+const GEMV_WRITE: &str = "if (in_range && lane == 0u) { out[idx] = partial[lid.x]; }";
+
+/// Label and source of the `post` variant of a single-row matmul shader with
+/// `n_storage` storage bindings: binds `aux` after them (the uniform moves up
+/// one slot) and rewrites the final write. Built once per (shader, post) and
+/// kept for the life of the process, so the hot path pays one map lookup.
+pub(crate) fn fused_gemv_source(
+    base_label: &'static str,
+    src: &'static str,
+    n_storage: usize,
+    post: MatmulPost,
+) -> (&'static str, &'static str) {
+    type Cache = std::sync::Mutex<
+        std::collections::HashMap<(&'static str, MatmulPost), (&'static str, &'static str)>,
+    >;
+    static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
+    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
+    *cache.entry((base_label, post)).or_insert_with(|| {
+        let uniform = format!("@group(0) @binding({n_storage}) var<uniform>");
+        let write = match post {
+            MatmulPost::Add => {
+                "if (in_range && lane == 0u) { out[idx] = partial[lid.x] + aux[idx]; }"
+            }
+            // The same expression as elementwise.wgsl op 1 (silu(a) * b).
+            MatmulPost::SiluMul => {
+                "if (in_range && lane == 0u) { let g = aux[idx]; \
+                 let silu = g * (1.0 / (1.0 + exp(-g))); out[idx] = silu * partial[lid.x]; }"
+            }
+        };
+        assert!(
+            src.matches(uniform.as_str()).count() == 1 && src.matches(GEMV_WRITE).count() == 1,
+            "fused_gemv_source: markers not found in {base_label}"
+        );
+        let fused = src
+            .replace(
+                &uniform,
+                &format!(
+                    "@group(0) @binding({n_storage}) var<storage, read> aux: array<f32>;\n\
+                     @group(0) @binding({}) var<uniform>",
+                    n_storage + 1
+                ),
+            )
+            .replace(GEMV_WRITE, write);
+        let label = format!("{base_label}_{}", post.suffix());
+        (
+            &*Box::leak(label.into_boxed_str()),
+            &*Box::leak(fused.into_boxed_str()),
+        )
+    })
+}
+
 /// Rows per workgroup in the multi-row (`_mt8`) matmul variants — the prefill
 /// kernels that dequantize/read each weight once and reuse it across MT rows.
 /// Must match `const MT` in the `matmul_nt*_mt.wgsl` shaders.
@@ -396,6 +470,81 @@ impl WgpuContext {
     }
 
     /// Residual add: `out = a + b`.
+    /// One row through a single-row matmul shader with `post` folded into its
+    /// write: `out[n] = post(W·x, aux)`. `weights` are the shader's weight
+    /// bindings, in order, between `x` and `out`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn gemv_post(
+        &self,
+        base_label: &'static str,
+        src: &'static str,
+        weights: &[&wgpu::Buffer],
+        x: &GpuBuffer,
+        k: usize,
+        n: usize,
+        post: MatmulPost,
+        aux: &GpuBuffer,
+    ) -> GpuBuffer {
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct P {
+            m: u32,
+            k: u32,
+            n: u32,
+            _pad: u32,
+        }
+        debug_assert_eq!(
+            aux.len, n,
+            "matmul post: aux must have one value per output"
+        );
+        let out = self.alloc_f32(n, "matmul.out");
+        let params = self.uniform(
+            &P {
+                m: 1,
+                k: k as u32,
+                n: n as u32,
+                _pad: 0,
+            },
+            "matmul.params",
+        );
+        let (label, wgsl) = fused_gemv_source(base_label, src, weights.len() + 2, post);
+        let mut storages: Vec<&wgpu::Buffer> = Vec::with_capacity(weights.len() + 3);
+        storages.push(&x.buf);
+        storages.extend_from_slice(weights);
+        storages.push(&out.buf);
+        storages.push(&aux.buf);
+        self.dispatch(
+            label,
+            wgsl,
+            &storages,
+            &params,
+            n.div_ceil(GEMV_ROWS) as u32,
+        );
+        out
+    }
+
+    /// Single-row [`Self::matmul_nt`] with `post` folded in (see [`MatmulPost`]).
+    pub fn matmul_nt_post(
+        &self,
+        x: &GpuBuffer,
+        w: &GpuBuffer,
+        k: usize,
+        n: usize,
+        post: MatmulPost,
+        aux: &GpuBuffer,
+    ) -> GpuBuffer {
+        self.gemv_post(
+            "matmul_nt",
+            include_str!("shaders/matmul_nt.wgsl"),
+            &[&w.buf],
+            x,
+            k,
+            n,
+            post,
+            aux,
+        )
+    }
+
     pub fn add(&self, a: &GpuBuffer, b: &GpuBuffer) -> GpuBuffer {
         self.ewise(a, b, 0, 0)
     }

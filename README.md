@@ -700,7 +700,7 @@ M4, v0.6.2: about 34 tok/s on Qwen2.5-1.5B Q4_K_M through wgpu, against 48–58 
 CPU engine and 82 on the `-metal` build; Qwen2.5-0.5B full precision is on par with the
 CPU at about 43). A measurement of one token shows why: the matrix kernels run about
 as fast as the CPU's, and roughly 14 ms of a 33 ms token is the fixed cost of issuing
-563 separate GPU jobs (the iPhone and Android packages default to this path; it has
+several hundred separate GPU jobs (563 at the time; 395 now — the iPhone and Android packages default to this path; it has
 not been measured against the CPU on a real phone — see docs/MOBILE.md §5.8 for how). Its
 value is running quantized models on non-Apple GPUs and on small-VRAM
 cards. Intel Arc and AMD Radeon numbers are still unmeasured — datapoints welcome

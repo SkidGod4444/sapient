@@ -1228,6 +1228,31 @@ The ratio is what matters here.)
   shows call counts and the one outlier (the output projection), not compute shares;
   use the two probes for those.
 
+### wgpu: bias, residual and SwiGLU folded into the matmul kernels (2026-10-04)
+
+First step on the budget above: the single-row matmul shaders got `add` and `silu·mul`
+variants of their final write (`MatmulPost`), so the q/k/v bias adds, the two residual
+adds and the SwiGLU activation no longer need kernels of their own. A decode token of
+Qwen2.5-1.5B drops from 563 to 395 dispatches (20 → 14 per layer). The fused kernels
+are bit-identical to the separate ones (`fused_matmul_post_is_bit_identical_to_separate_kernels`,
+all four weight formats), and the 120-token greedy reply is byte-identical.
+
+Apple M4, `bench-llm`, 80 tokens, three runs each, interleaved twice
+(`SAPIENT_WGPU_FUSE=0` is the old path):
+
+| | decode tok/s, round 1 | round 2 |
+|---|---|---|
+| wgpu, separate kernels | 34.0 / 34.4 / 34.1 | 33.4 / 33.4 / 33.3 |
+| wgpu, fused | 36.3 / 36.8 / 36.2 | 34.9 / 35.6 / 35.5 |
+| CPU | 39.5 / 40.3 / 43.3 | 41.4 / 41.7 / 41.2 |
+
+About +6%: per token, CPU recording 5.2 → 3.4 ms and GPU wait about 2 ms less; removing
+168 dispatches bought roughly 2 ms, about 12 µs each — less than the 20–25 µs per
+dispatch the trivial-kernel probe suggested, so the remaining 395 are not worth 14 ms.
+The GPU path is still behind the CPU on this chip. Left on the budget: reuse of output
+buffers, uniforms and bind groups across tokens (every kernel call still allocates
+all three), and folding RoPE into the K/V append.
+
 ### SmolVLA task success in LIBERO (2026-10-03)
 
 `HuggingFaceVLA/smolvla_libero` (32 language + 32 expert layers, two cameras) on

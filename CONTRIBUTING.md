@@ -416,7 +416,8 @@ Where a wgpu token's time goes: `SAPIENT_WGPU_PROFILE=1` prints a per-kernel tab
 counts and outliers; every kernel is submitted on its own, so sizes do not show), and
 `cargo test -p sapient-backends-wgpu --release --test dispatch_overhead -- --ignored --nocapture`
 measures the fixed cost per dispatch and each matmul shape. A change meant to speed up the
-GPU path should say which line of that budget it moves.
+GPU path should say which line of that budget it moves. A kernel that replaces others
+(such as the fused matmuls) needs a bit-identity test against the kernels it replaces.
 Profiling the wgpu engine: `SAPIENT_WGPU_TIMING=1 sapient chat <model> --backend wgpu -p "…"`
 prints CPU recording vs GPU time per token; `SAPIENT_WGPU_SHARED_PASS=0` reverts to one
 compute pass per kernel for A/B. Compare backends end to end with
