@@ -47,6 +47,19 @@ pub struct WgpuContext {
     /// A decode step is ~450 kernels — batching them cuts ~450 submissions per
     /// token to 1, removing the fixed per-submission CPU cost from the hot loop.
     batch: Mutex<Option<Batch>>,
+    /// `SAPIENT_WGPU_PROFILE=1`: per-kernel timings, keyed by "label [workgroups]".
+    profile: Mutex<HashMap<String, KernelTime>>,
+}
+
+/// Accumulated cost of one kernel shape under `SAPIENT_WGPU_PROFILE`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct KernelTime {
+    /// Dispatches recorded.
+    pub calls: u64,
+    /// Time to encode and submit (CPU side).
+    pub submit_ns: u128,
+    /// Time from submission until the GPU reports the work done.
+    pub wait_ns: u128,
 }
 
 /// An open command batch: the encoder plus, while kernels are being recorded
@@ -149,6 +162,7 @@ impl WgpuContext {
             max_binding_bytes,
             pipelines: Mutex::new(HashMap::new()),
             batch: Mutex::new(None),
+            profile: Mutex::new(HashMap::new()),
         })
     }
 
@@ -157,6 +171,11 @@ impl WgpuContext {
     /// instead of paying a queue submission each. Execution order is identical —
     /// WebGPU guarantees commands execute in recording order. Idempotent.
     pub fn begin_batch(&self) {
+        if profile_enabled() {
+            // Profiling submits and waits for every kernel on its own, so that
+            // each one can be timed; nothing may sit in an unsubmitted batch.
+            return;
+        }
         let mut batch = self.batch.lock().unwrap();
         if batch.is_none() {
             *batch = Some(Batch {
@@ -189,12 +208,40 @@ impl WgpuContext {
             b.pass = None; // encoder-level commands (copies) end the shared pass
             f(&mut b.enc);
         } else {
+            let started = std::time::Instant::now();
             let mut enc = self
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
             f(&mut enc);
             self.queue.submit(Some(enc.finish()));
+            if profile_enabled() {
+                drop(batch);
+                self.profile_wait("copy", started);
+            }
         }
+    }
+
+    /// Under `SAPIENT_WGPU_PROFILE`: block until the GPU has finished everything
+    /// submitted so far and charge the time to `key`.
+    fn profile_wait(&self, key: &str, started: std::time::Instant) {
+        let submitted = std::time::Instant::now();
+        self.device.poll(wgpu::Maintain::Wait);
+        let mut p = self.profile.lock().unwrap();
+        let e = p.entry(key.to_string()).or_default();
+        e.calls += 1;
+        e.submit_ns += (submitted - started).as_nanos();
+        e.wait_ns += submitted.elapsed().as_nanos();
+    }
+
+    /// Take (and clear) the per-kernel timings collected under
+    /// `SAPIENT_WGPU_PROFILE=1`. Each kernel was submitted on its own and waited
+    /// for, so the figures include a fixed per-submission cost that the normal
+    /// batched path pays once per token; compare kernels with each other and
+    /// against the smallest kernel, not against batched wall time.
+    pub fn take_profile(&self) -> Vec<(String, KernelTime)> {
+        let mut v: Vec<_> = self.profile.lock().unwrap().drain().collect();
+        v.sort_by_key(|(_, t)| std::cmp::Reverse(t.submit_ns + t.wait_ns));
+        v
     }
 
     /// Record one dispatch: into the open batch's shared compute pass when a
@@ -232,6 +279,7 @@ impl WgpuContext {
             pass.dispatch_workgroups(groups.0, groups.1, 1);
         } else {
             drop(batch);
+            let started = std::time::Instant::now();
             let mut enc = self
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -245,6 +293,10 @@ impl WgpuContext {
                 pass.dispatch_workgroups(groups.0, groups.1, 1);
             }
             self.queue.submit(Some(enc.finish()));
+            if profile_enabled() {
+                let key = format!("{label} [{}]", groups.0 as u64 * groups.1 as u64);
+                self.profile_wait(&key, started);
+            }
         }
     }
 
@@ -311,4 +363,11 @@ impl WgpuContext {
 fn shared_pass_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("SAPIENT_WGPU_SHARED_PASS").as_deref() != Ok("0"))
+}
+
+/// `SAPIENT_WGPU_PROFILE=1`: time every kernel on its own (see
+/// [`WgpuContext::take_profile`]). Much slower than normal decode.
+pub fn profile_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("SAPIENT_WGPU_PROFILE").is_some())
 }

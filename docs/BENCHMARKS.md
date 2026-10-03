@@ -1192,6 +1192,42 @@ wgpu remains slower than the CPU for Q4_K_M models on Apple Silicon; on non-Appl
 (its purpose) these kernels are untuned and unmeasured here. The `metal` 500 is now a
 startup error naming the reason (see CHANGELOG).
 
+### Where a wgpu decode token goes (Apple M4, 2026-10-03)
+
+Qwen2.5-1.5B Q4_K_M, 80-token greedy decode, `bench-llm`, CPU and wgpu alternated:
+CPU 42.9 / 43.6 tok/s (23 ms per token), wgpu 28.8 / 27.1 tok/s (35 ms). (Both are
+below the figures in the 2026-10-02 section; the machine had been under load all day.
+The ratio is what matters here.)
+
+`SAPIENT_WGPU_TIMING=1` splits a wgpu token into 5.2 ms of CPU-side recording and
+28.0 ms of waiting for the GPU. Two probes in
+`crates/sapient-backends/wgpu/tests/dispatch_overhead.rs` (ignored tests) attribute it:
+
+| Part of a token | Time | How measured |
+|---|---|---|
+| FFN matmuls: gate + up (56 × 1536→8960) | 8.1 ms | 28 repeats per batch, minus the batch floor |
+| FFN matmuls: down (28 × 8960→1536) | 4.0 ms | same |
+| Output projection (Q6_K, 1536→151 936) | 4.2 ms | same |
+| q / k / v / o projections (112 calls) | 0.8 ms | same |
+| **Kernel compute, subtotal** | **about 17 ms** | attention and RoPE not measured separately |
+| CPU recording of 563 dispatches | 5.2 ms | `SAPIENT_WGPU_TIMING` |
+| GPU-side cost of 563 dispatches | about 9 ms | remainder; 560 trivial kernels in one batch take 12–13 ms end to end |
+| One submission + readback | 1.3 ms | one-dispatch batch |
+
+- The kernels themselves are not slow: the FFN matmuls move about 95 G weights per
+  second and the whole token about 46 GB/s of weights, against about 38 GB/s for the
+  CPU path. Both are limited by the memory they share.
+- About 14 ms of a 33–35 ms token is the fixed cost of issuing 563 separate dispatches
+  (20 per layer), not work. That is the gap to the CPU.
+- A token with no dispatch overhead at all would take about 19–20 ms (≈ 50 tok/s
+  against the CPU's 43): on this chip the GPU path can reach or slightly pass the CPU
+  for single-stream decode, not multiply it. Larger gains need batched work (prefill,
+  several requests) or a GPU with its own, faster memory; neither is measured.
+- `SAPIENT_WGPU_PROFILE=1` prints a per-kernel table, with every kernel submitted and
+  waited for on its own. Each then costs about 1.33 ms whatever its size, so that table
+  shows call counts and the one outlier (the output projection), not compute shares;
+  use the two probes for those.
+
 ### SmolVLA task success in LIBERO (2026-10-03)
 
 `HuggingFaceVLA/smolvla_libero` (32 language + 32 expert layers, two cameras) on

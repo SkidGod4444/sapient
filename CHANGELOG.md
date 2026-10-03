@@ -5,6 +5,14 @@ section below as the GitHub release body.
 
 ## [Unreleased]
 
+### 🔎 GPU path: measured where a token's time goes
+
+- `SAPIENT_WGPU_PROFILE=1` prints the per-kernel cost of a decode token, and two
+  probe tests measure the fixed cost per GPU dispatch and each matrix shape.
+- Finding on an Apple M4 (Qwen2.5-1.5B): of a 33–35 ms token, about 17 ms is
+  computation and about 14 ms is the overhead of issuing 563 separate GPU jobs. The
+  CPU path takes 23 ms. Details in `docs/BENCHMARKS.md`. No behaviour change.
+
 ### 🤖 `sapient act`: continue the queued actions
 
 - `POST /v1/actions` accepts `queued`: the actions still waiting to execute. The new
