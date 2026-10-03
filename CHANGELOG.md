@@ -5,6 +5,13 @@ section below as the GitHub release body.
 
 ## [Unreleased]
 
+### 📱 Measure CPU against GPU on a real iPhone
+
+- The Swift example app has a benchmark mode: launch it with `-benchmark <model>` and
+  it measures the CPU and the GPU path back to back and prints the comparison.
+- `docs/MOBILE.md` §5.8 is the step-by-step procedure for a real iPhone. It has been
+  run on a Mac and in the iOS simulator; no iPhone has been measured yet.
+
 ### 🔎 GPU path: measured where a token's time goes
 
 - `SAPIENT_WGPU_PROFILE=1` prints the per-kernel cost of a decode token, and two

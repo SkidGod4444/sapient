@@ -449,6 +449,78 @@ decode tok/s = `(tokens − 1) / (t_last − t_first)`, warm-up runs excluded.
 - Use a prompt that asks for a long answer; a run that ends on end-of-turn
   early (`hitEos`) measures fewer tokens.
 
+### 5.8 CPU versus GPU on a real iPhone
+
+The Swift package is built with the GPU path (wgpu → Metal) and `auto` picks it when
+a GPU is found. On an Apple M4 that path is slower than the CPU for one conversation
+(docs/BENCHMARKS.md, "Where a wgpu decode token goes"). Whether the same holds on an
+iPhone has **not been measured**. This is the procedure to measure it; it takes about
+30 minutes once Xcode is set up. The example app does the measuring.
+
+**What you need:** a Mac with Xcode, an iPhone with its cable, an Apple ID (a free
+personal team is enough), about 2 GB free on the phone.
+
+1. **Build the package** (repo root, about 15 minutes the first time):
+   ```bash
+   ./scripts/package-swift.sh
+   ```
+   On macOS 27 / Xcode 27 the build can stop with `can't find crate for …_derive`
+   (the system loader rejects stripped build helpers); run it as
+   `CARGO_PROFILE_RELEASE_STRIP=none ./scripts/package-swift.sh`.
+2. **Generate and open the project:**
+   ```bash
+   cd examples/swift-chat && xcodegen && open SapientChat.xcodeproj
+   ```
+   If you packaged before, delete Xcode's DerivedData first, or Xcode keeps linking
+   the old library.
+3. **Sign it:** target `SapientChatApp` → Signing & Capabilities → pick your team. If
+   Xcode says the bundle identifier is taken, change it to something of your own.
+4. **Prepare the phone:** enable Developer Mode (Settings → Privacy & Security →
+   Developer Mode, then restart), connect it, tap *Trust*. Turn Low Power Mode off,
+   close other apps, take it out of its case, and let it cool until it is not warm to
+   the touch. Battery above 50%.
+5. **Download the model first:** run the app once normally (▶), type a message with
+   the model field set to the model you will measure, wait for the reply, stop the app.
+   The benchmark then measures inference, not the download.
+6. **Set the benchmark arguments:** Product → Scheme → Edit Scheme → Run →
+   - *Info:* Build Configuration **Release**, untick **Debug executable**.
+   - *Arguments → Arguments Passed On Launch:* add
+     `-benchmark llama-3.2-1b-q4 -benchmark-rounds 2`
+7. **Run** (▶) with the phone selected as the destination and leave it alone. It
+   measures CPU, GPU, CPU, GPU. Progress shows in the app; results print in Xcode's
+   console (View → Debug Area → Activate Console) as lines starting `SAPIENT_BENCH`.
+8. **Copy every `SAPIENT_BENCH` line** and note the iPhone model and iOS version.
+
+Options: `-benchmark-tokens N` (default 128), `-benchmark-rounds N` (default 2),
+`-benchmark-backends cpu` or `wgpu` to measure one backend per launch — do that when
+memory is the question, because `peak_mb` is the whole process's high-water mark.
+
+**Which models:** `smollm2-135m-q4` first, to check the procedure works (about a
+minute). Then `llama-3.2-1b-q4` and `qwen2.5-1.5b-q4`, the sizes people ship.
+
+**Reading the result.** One line per measurement, then a summary:
+
+```
+SAPIENT_BENCH {"backend":"cpu","round":1,"resolved":"cpu","decode_tps":…,"ttft_ms":…,"peak_mb":…,"runs_hit_eos":0,"thermal_start":"nominal","thermal_end":"nominal"}
+SAPIENT_BENCH_SUMMARY cpu … tok/s · gpu … tok/s · gpu/cpu …x · faster: …
+```
+
+A run counts only if:
+- `resolved` says `wgpu (…Metal…)` on the GPU rows. If it says `cpu`, no GPU was used.
+- `thermal_start` is `nominal` on every row. If not, cool the phone and repeat.
+- `runs_hit_eos` is 0; otherwise the reply ended early and fewer tokens were timed.
+- both rounds agree on which backend is faster.
+
+Compare `decode_tps` (speed while generating) and `ttft_ms` (wait before the first
+token). If the CPU is faster by more than 10% in both rounds on the 1B model, `auto`
+should prefer the CPU on iPhone; record the lines in docs/BENCHMARKS.md with the device
+and iOS version before changing any default. Numbers from the simulator or from the
+macOS build of the app measure the Mac, not a phone.
+
+Checked on 2026-10-04 on what was available: the macOS build of the app on an M4
+(smollm2-135m-q4: CPU 128 tok/s, GPU 74) and the iOS simulator (the procedure runs end
+to end). No real iPhone has been measured.
+
 ## 6. GPU on-device (wgpu: Metal on iOS, Vulkan on Android)
 
 Both gates below are real screenshots from the iOS simulator — the SwiftUI

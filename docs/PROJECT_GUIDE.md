@@ -309,7 +309,9 @@ The real generation math: how to run a Phi or Llama-style model layer by layer.
     GPU as packed f16 (half the bytes → ctx 8192 instead of 4096), prompts prefill
     in 128-token batched chunks, and each decode token runs with all its kernels
     batched into one queue submission and one compute pass; only logits read back.
-    Llama-family — see the wgpu invariants in `CLAUDE.md`. `SAPIENT_WGPU_TIMING=1`
+    Llama-family — see the wgpu invariants in `CLAUDE.md`. To compare CPU and GPU on
+    a phone, the Swift example app has a `-benchmark <model>` launch mode
+    (docs/MOBILE.md §5.8). `SAPIENT_WGPU_TIMING=1`
     prints per-token CPU recording vs GPU time, `SAPIENT_WGPU_PROFILE=1` a per-kernel
     table (a token is 563 dispatches; their fixed cost, not the maths, is the gap to
     the CPU on Apple Silicon — docs/BENCHMARKS.md); `python3 scripts/bench_wgpu.py`
