@@ -24,7 +24,9 @@
 use std::collections::HashMap;
 
 use anyhow::{bail, Context, Result};
-use sapient_backends_wgpu::{GpuBuffer, GpuQ4KBuffer, GpuQ6KBuffer, GpuQ8Buffer, WgpuContext};
+use sapient_backends_wgpu::{
+    GpuBuffer, GpuQ4KBuffer, GpuQ6KBuffer, GpuQ8Buffer, MatmulPost, WgpuContext,
+};
 use sapient_core::{DType, Tensor};
 use sapient_hub::model_info::{ArchType, ModelInfo};
 
@@ -164,6 +166,48 @@ fn mm(ctx: &WgpuContext, x: &GpuBuffer, w: &GpuWeight, m: usize, k: usize, n: us
         GpuWeight::Q4K(q) => ctx.matmul_nt_q4_k(x, q, m, k, n),
         GpuWeight::Q6K(q) => ctx.matmul_nt_q6_k(x, q, m, k, n),
     }
+}
+
+/// Single-row `mm` with a bias, a residual or the SwiGLU gate folded into the
+/// kernel's write (see [`MatmulPost`]) — one dispatch where there were two.
+fn mm_post(
+    ctx: &WgpuContext,
+    x: &GpuBuffer,
+    w: &GpuWeight,
+    k: usize,
+    n: usize,
+    post: MatmulPost,
+    aux: &GpuBuffer,
+) -> GpuBuffer {
+    match w {
+        GpuWeight::F32(b) => ctx.matmul_nt_post(x, b, k, n, post, aux),
+        GpuWeight::Q8(q) => ctx.matmul_nt_q8_0_post(x, q, k, n, post, aux),
+        GpuWeight::Q4K(q) => ctx.matmul_nt_q4_k_post(x, q, k, n, post, aux),
+        GpuWeight::Q6K(q) => ctx.matmul_nt_q6_k_post(x, q, k, n, post, aux),
+    }
+}
+
+/// `W·x (+ bias)` in one dispatch.
+fn mm_bias(
+    ctx: &WgpuContext,
+    x: &GpuBuffer,
+    w: &GpuWeight,
+    bias: Option<&GpuBuffer>,
+    k: usize,
+    n: usize,
+) -> GpuBuffer {
+    match bias {
+        Some(b) if fuse_enabled() => mm_post(ctx, x, w, k, n, MatmulPost::Add, b),
+        Some(b) => ctx.add(&mm(ctx, x, w, 1, k, n), b),
+        None => mm(ctx, x, w, 1, k, n),
+    }
+}
+
+/// `SAPIENT_WGPU_FUSE=0` runs every bias add, residual add and SwiGLU as its
+/// own kernel again (the pre-fusion path), for A/B timing and bisection.
+fn fuse_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SAPIENT_WGPU_FUSE").as_deref() != Ok("0"))
 }
 
 impl WgpuForwardEngine {
@@ -400,18 +444,33 @@ impl WgpuForwardEngine {
         for layer in &self.layers {
             // ── Attention ───────────────────────────────────────────────────────
             let h = ctx.rms_norm(&x, &layer.input_ln, 1, hidden, eps);
-            let mut q = mm(ctx, &h, &layer.wq, 1, hidden, n_heads * head_dim);
-            if let Some(b) = &layer.bq {
-                q = ctx.add(&q, b);
-            }
-            let mut k = mm(ctx, &h, &layer.wk, 1, hidden, n_kv * head_dim);
-            if let Some(b) = &layer.bk {
-                k = ctx.add(&k, b);
-            }
-            let mut v = mm(ctx, &h, &layer.wv, 1, hidden, n_kv * head_dim);
-            if let Some(b) = &layer.bv {
-                v = ctx.add(&v, b);
-            }
+            // Biases, residuals and the SwiGLU gate are folded into the matmul
+            // kernels: 14 dispatches per layer where there were 20.
+            let fuse = fuse_enabled();
+            let q = mm_bias(
+                ctx,
+                &h,
+                &layer.wq,
+                layer.bq.as_ref(),
+                hidden,
+                n_heads * head_dim,
+            );
+            let k = mm_bias(
+                ctx,
+                &h,
+                &layer.wk,
+                layer.bk.as_ref(),
+                hidden,
+                n_kv * head_dim,
+            );
+            let v = mm_bias(
+                ctx,
+                &h,
+                &layer.wv,
+                layer.bv.as_ref(),
+                hidden,
+                n_kv * head_dim,
+            );
             ctx.rope(&q, &positions, n_heads, 1, head_dim, self.rotary_dim, theta);
             ctx.rope(&k, &positions, n_kv, 1, head_dim, self.rotary_dim, theta);
 
@@ -469,19 +528,36 @@ impl WgpuForwardEngine {
                     true,
                 )
             };
-            let mut o = mm(ctx, &attn, &layer.wo, 1, n_heads * head_dim, hidden);
-            if let Some(b) = &layer.bo {
-                o = ctx.add(&o, b);
-            }
-            x = ctx.add(&x, &o);
+            let ao = n_heads * head_dim;
+            x = match &layer.bo {
+                // No output bias (the usual case): the residual rides on o_proj.
+                None if fuse => mm_post(ctx, &attn, &layer.wo, ao, hidden, MatmulPost::Add, &x),
+                bo => {
+                    let o = mm_bias(ctx, &attn, &layer.wo, bo.as_ref(), ao, hidden);
+                    ctx.add(&x, &o)
+                }
+            };
 
             // ── MLP (SwiGLU) ────────────────────────────────────────────────────
             let h2 = ctx.rms_norm(&x, &layer.post_ln, 1, hidden, eps);
             let gate = mm(ctx, &h2, &layer.wgate, 1, hidden, inter);
-            let upp = mm(ctx, &h2, &layer.wup, 1, hidden, inter);
-            let act = ctx.swiglu(&gate, &upp);
-            let down = mm(ctx, &act, &layer.wdown, 1, inter, hidden);
-            x = ctx.add(&x, &down);
+            if fuse {
+                let act = mm_post(
+                    ctx,
+                    &h2,
+                    &layer.wup,
+                    hidden,
+                    inter,
+                    MatmulPost::SiluMul,
+                    &gate,
+                );
+                x = mm_post(ctx, &act, &layer.wdown, inter, hidden, MatmulPost::Add, &x);
+            } else {
+                let upp = mm(ctx, &h2, &layer.wup, 1, hidden, inter);
+                let act = ctx.swiglu(&gate, &upp);
+                let down = mm(ctx, &act, &layer.wdown, 1, inter, hidden);
+                x = ctx.add(&x, &down);
+            }
         }
 
         self.cur_len += 1;

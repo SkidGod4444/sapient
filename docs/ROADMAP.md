@@ -257,7 +257,9 @@ Radeon, Nvidia, and Apple — and are dev-tested on Apple Silicon (Metal under w
   for Q4 models on Apple Silicon (kernel fusion, x in workgroup memory, Q6_K lm_head);
   measured 2026-10-03: ~17 ms of a 33–35 ms token is compute, ~14 ms the fixed cost of
   563 dispatches — next rung is fewer dispatches (fuse bias/residual/swiglu into the
-  matmuls) and reusing buffers and bind groups across tokens, floor ≈ 20 ms; the
+  matmuls) and reusing buffers and bind groups across tokens, floor ≈ 20 ms; fusion
+  step 1 landed 2026-10-04 (563 → 395 dispatches, +6%, bit-identical) — buffer and
+  bind-group reuse is next; the
   mobile packages default to this path and a real-iPhone CPU-vs-GPU run is still open
   (procedure: docs/MOBILE.md §5.8, example app `-benchmark`);
   tune `LANES`/`ROWS` on Vulkan/DX12 GPUs; upgrade wgpu 22 → 30 (drops the `block`
