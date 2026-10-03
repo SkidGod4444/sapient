@@ -410,6 +410,8 @@ change to the request rule (`auto_trigger`) or to how chunks are combined needs
 that comparison, because fewer stalls did not mean more completed tasks. Measure stall
 rates over at least 20 chunk cycles (short runs read synchronous stalls low).
 
+CPU against GPU on a phone: the Swift example app's `-benchmark <model>` mode
+(docs/MOBILE.md §5.8). Simulator and macOS numbers do not count as phone numbers.
 Where a wgpu token's time goes: `SAPIENT_WGPU_PROFILE=1` prints a per-kernel table (call
 counts and outliers; every kernel is submitted on its own, so sizes do not show), and
 `cargo test -p sapient-backends-wgpu --release --test dispatch_overhead -- --ignored --nocapture`

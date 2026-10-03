@@ -37,7 +37,9 @@ public struct ChatView: View {
     /// turn on a simulator with no UI scripting.
     private func autosendIfRequested() {
         let args = ProcessInfo.processInfo.arguments
-        if let idx = args.firstIndex(of: "-autosend"), args.indices.contains(idx + 1) {
+        if let request = BackendBenchmark.Request.fromLaunchArguments(args) {
+            model.runBackendBenchmark(request)
+        } else if let idx = args.firstIndex(of: "-autosend"), args.indices.contains(idx + 1) {
             model.send(args[idx + 1])
         }
     }

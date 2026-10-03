@@ -185,6 +185,34 @@ public final class ChatViewModel: ObservableObject {
         }
     }
 
+    /// `-benchmark <alias>` launch hook: compare CPU and GPU on this device
+    /// (see `BackendBenchmark`). The chat session is released first so the
+    /// benchmark's models are the only ones in memory; results appear as one
+    /// transcript bubble and on stdout.
+    public func runBackendBenchmark(_ request: BackendBenchmark.Request) {
+        guard !isBusy else { return }
+        turnEpoch += 1
+        session = nil
+        loadedAlias = nil
+        modelAlias = request.model
+        messages.append(DisplayMessage(role: .user, text: "Benchmark \(request.model): CPU vs GPU"))
+        let bubble = DisplayMessage(role: .assistant, text: "")
+        messages.append(bubble)
+        let bubbleId = bubble.id
+        status = .loading(model: request.model)
+        inferenceQueue.async { [weak self] in
+            _ = BackendBenchmark.run(request) { line in
+                DispatchQueue.main.async {
+                    guard let self,
+                          let idx = self.messages.firstIndex(where: { $0.id == bubbleId })
+                    else { return }
+                    self.messages[idx].text += line + "\n"
+                }
+            }
+            DispatchQueue.main.async { self?.status = .idle }
+        }
+    }
+
     /// Ask the engine to stop mid-reply; the partial text stays in the
     /// transcript (and in the session history — intentional, see sapient-ffi).
     public func stop() {

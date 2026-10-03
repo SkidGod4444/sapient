@@ -36,6 +36,13 @@ cancels generation engine-side (the token listener returns `false`).
 For a personal device: Xcode → Signing & Capabilities → your (free) personal
 team — and read `docs/MOBILE.md` §5 first; it's a project rule.
 
+CPU versus GPU on a device: launch with `-benchmark <model-alias>` (optionally
+`-benchmark-rounds N`, `-benchmark-tokens N`, `-benchmark-backends cpu,wgpu`). The app
+loads the model on each backend in turn, runs the engine's benchmark and prints
+`SAPIENT_BENCH {json}` lines and a summary to the console. Step-by-step for a real
+iPhone: `docs/MOBILE.md` §5.8. On the Mac:
+`swift build && .build/debug/SapientChatMac -benchmark smollm2-135m-q4`.
+
 Demo/testing hook: launching with `-autosend "<prompt>"` sends one message on
 appear — `xcrun simctl launch <sim> so.openhorizon.sapient.chat -autosend
 "Hi"` drives a real end-to-end turn on a simulator with no UI scripting
