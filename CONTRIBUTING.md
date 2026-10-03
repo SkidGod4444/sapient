@@ -17,6 +17,7 @@ Thank you for your interest in contributing! SAPIENT is a Rust-native LLM infere
 - [Common contribution areas](#common-contribution-areas)
 - [Adding a CLI command](#adding-a-cli-command)
 - [Adding a model architecture](#adding-a-model-architecture)
+- [Adding a model to the catalog](#adding-a-model-to-the-catalog)
 - [Hub and download testing](#hub-and-download-testing)
 - [Releases (maintainers)](#releases-maintainers)
 - [Getting help](#getting-help)
@@ -588,6 +589,16 @@ Rm {
 For text-only support of vision models, document limitations in CLI output rather than failing silently.
 
 ---
+
+## Adding a model to the catalog
+
+A row in `crates/sapient-hub/src/registry.rs` is a promise that the model loads and
+answers. Before adding one: confirm the repository is ungated (or mark `gated: true`),
+build the CLI, and run the model once — `sapient chat <alias> -p "What is the capital of
+France?"`, `sapient transcribe <alias> clip.wav` or `sapient see image.png --model <alias>`.
+For a GGUF-only repository also check the tokenizer fallback (`tokenizer_fallback_model`)
+and the chat format (`builtin_template_for`): a wrong one shows up as an echoed question,
+an empty reply or a vocabulary-size error. Say in the PR what you ran and what it printed.
 
 ## Hub and download testing
 

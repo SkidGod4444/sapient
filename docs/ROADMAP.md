@@ -127,6 +127,11 @@
 - ✅ RoPE-axis correctness fix (transpose to `[1, n_heads, seq, head_dim]` before `fast::rope`).
 - ✅ **Engine reuse** — pipeline holds the engine in `Arc<Mutex<…>>`; streaming no longer rebuilds/re-quantizes the model per call (**TTFT 30–44× faster**, 1.5B: 3 s → 70 ms).
 - ✅ Correct CPU + Metal inference for Phi & Llama/Qwen families (F16/BF16 safetensors + GGUF Q4/Q8).
+- ✅ Catalog at 49 models (2026-10-03: +Qwen2.5 7B, Qwen2.5-Coder 3B/7B, Phi-3.5-mini,
+  DeepSeek-R1 1.5B, Gemma-3 270M, SmolLM2-135M, Whisper medium / large-v3-turbo,
+  SmolVLM-500M — each run once before listing). Next for the catalog: Qwen3 and SmolLM3
+  (need QK-norm / architecture work), SmolVLA entries, and a Needle engine (own
+  architecture and file format).
 - ✅ Curated registry, modern CLI (`chat`, `transcribe`, `speak`, `converse`, `pull`, `run`, `models`, `serve`, `reset`, `rm`, `update`, `devices`, `stats`), self-update. Distributed as prebuilt GitHub release binaries (not crates.io).
 - ✅ GGUF Q4_0/Q8_0/K-quant loading with mmap support (models larger than RAM).
 - ✅ Flash-Edge attention (online-softmax, O(head_dim) memory, NEON).

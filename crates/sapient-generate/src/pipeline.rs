@@ -1290,6 +1290,14 @@ fn builtin_template_for(
             vec!["<|im_end|>".to_string()],
         )
     };
+    // DeepSeek-R1 distills are Llama- or Qwen-arch but trained on DeepSeek's own
+    // turn markers; the id may be the GGUF general.name ("DeepSeek R1 Distill …").
+    if id.contains("deepseek") && (id.contains("r1") || id.contains("reasoner")) {
+        return (
+            ChatTemplate::from_template(builtin::DEEPSEEK_R1),
+            vec!["<｜end▁of▁sentence｜>".to_string()],
+        );
+    }
     match arch {
         ArchType::Llama if id.contains("tinyllama") => (
             ChatTemplate::from_template(builtin::ZEPHYR),
@@ -1348,6 +1356,36 @@ fn builtin_template_for(
 #[cfg(test)]
 mod tests {
     use super::common_prefix_len;
+    use super::{builtin_template_for, ArchType};
+    use sapient_tokenizers::ChatMessage;
+
+    /// DeepSeek-R1 distills are Llama- or Qwen-arch GGUFs, so without their own
+    /// arm they got `[INST]` or ChatML and echoed the question (verified on
+    /// DeepSeek-R1-Distill-Qwen-1.5B). The id is the GGUF `general.name`.
+    #[test]
+    fn deepseek_r1_gets_its_own_template_on_either_arch() {
+        for (arch, id, mt) in [
+            (ArchType::Qwen, "DeepSeek R1 Distill Qwen 1.5B", "qwen2"),
+            (ArchType::Llama, "DeepSeek R1 Distill Llama 8B", "llama"),
+        ] {
+            let (template, stops) = builtin_template_for(&arch, id, mt);
+            let prompt = template
+                .render(
+                    &[ChatMessage::system("Be brief."), ChatMessage::user("Hi")],
+                    true,
+                )
+                .unwrap();
+            assert_eq!(
+                prompt,
+                "<｜begin▁of▁sentence｜>Be brief.<｜User｜>Hi<｜Assistant｜><think>\n"
+            );
+            assert_eq!(stops, vec!["<｜end▁of▁sentence｜>".to_string()]);
+        }
+        // A plain Qwen GGUF still gets ChatML.
+        let (template, _) = builtin_template_for(&ArchType::Qwen, "Qwen2.5 1.5B Instruct", "qwen2");
+        let prompt = template.render(&[ChatMessage::user("Hi")], true).unwrap();
+        assert!(prompt.contains("<|im_start|>user"), "{prompt}");
+    }
 
     #[test]
     fn common_prefix_len_basic() {

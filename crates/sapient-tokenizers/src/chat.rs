@@ -316,6 +316,23 @@ pub mod builtin {
         "{% if add_generation_prompt %}<start_of_turn>model\n{% endif %}",
     );
 
+    /// DeepSeek-R1 (and its Llama/Qwen distills): the system text goes first
+    /// with no role marker, turns are `<｜User｜>…` / `<｜Assistant｜>…`, an
+    /// assistant turn ends with `<｜end▁of▁sentence｜>`, and generation starts
+    /// inside a `<think>` block. The model is not trained on ChatML or
+    /// `[INST]`: with either it echoes the question or stops at once.
+    pub const DEEPSEEK_R1: &str = concat!(
+        "<｜begin▁of▁sentence｜>",
+        "{% if messages[0]['role'] == 'system' %}{{ messages[0]['content'] }}{% endif %}",
+        "{% for message in messages %}",
+        "{% if message['role'] == 'user' %}<｜User｜>{{ message['content'] }}",
+        "{% elif message['role'] == 'assistant' %}",
+        "<｜Assistant｜>{{ message['content'] }}<｜end▁of▁sentence｜>",
+        "{% endif %}",
+        "{% endfor %}",
+        "{% if add_generation_prompt %}<｜Assistant｜><think>\n{% endif %}",
+    );
+
     /// Zephyr / TinyLlama chat format.
     pub const ZEPHYR: &str = concat!(
         "{% for message in messages %}",

@@ -172,7 +172,12 @@ pub fn tokenizer_fallback_model(model_id: &str) -> Option<&'static str> {
     if id.contains("smollm") {
         return Some("HuggingFaceTB/SmolLM2-360M-Instruct");
     }
-    // DeepSeek R1 distills carry their own (ungated) tokenizer.
+    // DeepSeek R1 distills carry their own (ungated) tokenizer. The Qwen-based
+    // distills use the Qwen vocabulary (151k), not the Llama one (128k), so they
+    // need their own repo — the Llama-8B tokenizer fails the vocab check.
+    if id.contains("deepseek") && id.contains("qwen") {
+        return Some("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B");
+    }
     if id.contains("deepseek") {
         return Some("deepseek-ai/DeepSeek-R1-Distill-Llama-8B");
     }
@@ -343,6 +348,20 @@ mod tests {
         assert_eq!(
             tokenizer_fallback_model("TheBloke/Llama-2-7B-GGUF"),
             Some("NousResearch/Llama-2-7b-hf")
+        );
+    }
+
+    /// The Qwen-based DeepSeek-R1 distills use the Qwen vocabulary; the Llama
+    /// distill's tokenizer (128k) fails their vocab check.
+    #[test]
+    fn deepseek_qwen_distill_gets_its_own_tokenizer() {
+        assert_eq!(
+            tokenizer_fallback_model("DeepSeek R1 Distill Qwen 1.5B"),
+            Some("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
+        );
+        assert_eq!(
+            tokenizer_fallback_model("DeepSeek R1 Distill Llama 8B"),
+            Some("deepseek-ai/DeepSeek-R1-Distill-Llama-8B")
         );
     }
 
