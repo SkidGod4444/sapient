@@ -136,6 +136,14 @@ pub const CATALOG: &[SupportedModel] = &[
         extra_aliases: &["smollm2-360m", "smollm2-360m-instruct"],
     },
     SupportedModel {
+        alias: "openhorizon/smollm2-135m",
+        repo_id: "HuggingFaceTB/SmolLM2-135M-Instruct",
+        family: "Llama",
+        params: "135M",
+        gated: false,
+        extra_aliases: &["smollm2-135m", "smollm2-135m-instruct"],
+    },
+    SupportedModel {
         alias: "openhorizon/smollm2-1.7b",
         repo_id: "HuggingFaceTB/SmolLM2-1.7B-Instruct",
         family: "Llama",
@@ -245,6 +253,14 @@ pub const CATALOG: &[SupportedModel] = &[
         extra_aliases: &["qwen2.5-3b-q4", "qwen3b-q4"],
     },
     SupportedModel {
+        alias: "openhorizon/qwen2.5-7b-q4",
+        repo_id: "bartowski/Qwen2.5-7B-Instruct-GGUF",
+        family: "Qwen2.5",
+        params: "7B Q4_K_M",
+        gated: false,
+        extra_aliases: &["qwen2.5-7b-q4", "qwen2.5-7b", "qwen7b-q4"],
+    },
+    SupportedModel {
         alias: "openhorizon/smollm2-360m-q4",
         repo_id: "HuggingFaceTB/SmolLM2-360M-Instruct-GGUF",
         family: "Llama",
@@ -311,6 +327,22 @@ pub const CATALOG: &[SupportedModel] = &[
         extra_aliases: &["qwen2.5-coder-1.5b", "qwen-coder-1.5b"],
     },
     SupportedModel {
+        alias: "openhorizon/qwen2.5-coder-3b",
+        repo_id: "Qwen/Qwen2.5-Coder-3B-Instruct-GGUF",
+        family: "Qwen2.5",
+        params: "3B Q4_K_M",
+        gated: false,
+        extra_aliases: &["qwen2.5-coder-3b", "qwen-coder-3b"],
+    },
+    SupportedModel {
+        alias: "openhorizon/qwen2.5-coder-7b",
+        repo_id: "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
+        family: "Qwen2.5",
+        params: "7B Q4_K_M",
+        gated: false,
+        extra_aliases: &["qwen2.5-coder-7b", "qwen-coder-7b"],
+    },
+    SupportedModel {
         alias: "openhorizon/llama-3.1-8b-q4",
         repo_id: "unsloth/Llama-3.1-8B-Instruct-GGUF",
         family: "Llama",
@@ -327,12 +359,28 @@ pub const CATALOG: &[SupportedModel] = &[
         extra_aliases: &["deepseek-r1-8b", "deepseek-r1-llama-8b"],
     },
     SupportedModel {
+        alias: "openhorizon/deepseek-r1-1.5b",
+        repo_id: "unsloth/DeepSeek-R1-Distill-Qwen-1.5B-GGUF",
+        family: "Qwen2.5",
+        params: "1.5B Q4_K_M",
+        gated: false,
+        extra_aliases: &["deepseek-r1-1.5b", "deepseek-r1-qwen-1.5b"],
+    },
+    SupportedModel {
         alias: "openhorizon/phi-4-mini",
         repo_id: "unsloth/Phi-4-mini-instruct-GGUF",
         family: "Phi",
         params: "3.8B Q4_K_M",
         gated: false,
         extra_aliases: &["phi-4-mini", "phi4-mini"],
+    },
+    SupportedModel {
+        alias: "openhorizon/phi-3.5-mini",
+        repo_id: "bartowski/Phi-3.5-mini-instruct-GGUF",
+        family: "Phi",
+        params: "3.8B Q4_K_M",
+        gated: false,
+        extra_aliases: &["phi-3.5-mini", "phi3.5-mini", "phi-3.5"],
     },
     // ── Whisper (speech-to-text — `sapient transcribe`) ──────────────────────
     SupportedModel {
@@ -358,6 +406,22 @@ pub const CATALOG: &[SupportedModel] = &[
         params: "244M",
         gated: false,
         extra_aliases: &["whisper-small"],
+    },
+    SupportedModel {
+        alias: "openhorizon/whisper-medium",
+        repo_id: "openai/whisper-medium",
+        family: "Whisper",
+        params: "769M",
+        gated: false,
+        extra_aliases: &["whisper-medium"],
+    },
+    SupportedModel {
+        alias: "openhorizon/whisper-large-v3-turbo",
+        repo_id: "openai/whisper-large-v3-turbo",
+        family: "Whisper",
+        params: "809M",
+        gated: false,
+        extra_aliases: &["whisper-large-v3-turbo", "whisper-turbo"],
     },
     // ── Orpheus TTS (text-to-speech — `sapient speak`) ───────────────────────
     // Llama-3.2-3B fine-tune that emits SNAC audio-codec tokens; runs on the
@@ -392,6 +456,14 @@ pub const CATALOG: &[SupportedModel] = &[
         gated: false,
         extra_aliases: &["gemma-3-1b", "gemma3-1b", "gemma-3-1b-it"],
     },
+    SupportedModel {
+        alias: "openhorizon/gemma-3-270m",
+        repo_id: "unsloth/gemma-3-270m-it",
+        family: "Gemma3",
+        params: "270M",
+        gated: false,
+        extra_aliases: &["gemma-3-270m", "gemma3-270m", "gemma-3-270m-it"],
+    },
     // Multimodal Gemma3 (text chat AND `sapient see`) via the ungated mirror.
     SupportedModel {
         alias: "openhorizon/gemma-3-4b",
@@ -424,6 +496,14 @@ pub const CATALOG: &[SupportedModel] = &[
         params: "256M",
         gated: false,
         extra_aliases: &["smolvlm-256m", "smolvlm", "smolvlm-256m-instruct"],
+    },
+    SupportedModel {
+        alias: "openhorizon/smolvlm-500m",
+        repo_id: "HuggingFaceTB/SmolVLM-500M-Instruct",
+        family: "SmolVLM",
+        params: "500M",
+        gated: false,
+        extra_aliases: &["smolvlm-500m", "smolvlm-500m-instruct"],
     },
     // SmolVLM2: same Idefics3 layout (config model_type "smolvlm"), the same
     // SigLIP-B/16 512² tower, a SmolLM2-360M-class backbone. This is the VLM

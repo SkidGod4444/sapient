@@ -252,7 +252,8 @@ model reads.
 Talks to Hugging Face, downloads model files, caches them, and keeps the **registry** of
 which models SAPIENT supports.
 - `lib.rs` — front door.
-- `registry.rs` — the **curated list** of supported models. Maps friendly `openhorizon/…`
+- `registry.rs` — the **curated list** of supported models (49 as of 2026-10-03). A row
+  is added only after the model has been downloaded and run once. Maps friendly `openhorizon/…`
   aliases to real Hugging Face repos (e.g. `openhorizon/phi-2` → `microsoft/phi-2`). Each
   entry also has a **capability category** (`SupportedModel::category()` → `Chat` /
   `SpeechToText` / `TextToSpeech`, derived from `family`): `sapient models` groups its

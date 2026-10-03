@@ -514,11 +514,12 @@ Pointing a command at the wrong category fails fast with a clear hint (e.g.
 | `openhorizon/phi-1.5` / `phi-1` | Phi | 1.3B | |
 | `openhorizon/phi-2-q4` | Phi | 2.7B GGUF | |
 | `openhorizon/phi-4-mini` | Phi | 3.8B Q4_K_M | |
+| `openhorizon/phi-3.5-mini` | Phi | 3.8B Q4_K_M | |
 | `openhorizon/qwen2.5-0.5b` | Qwen2.5 | 0.5B | Smallest chat model; great for quick tests |
 | `openhorizon/qwen2.5-1.5b` / `-3b` | Qwen2.5 | 1.5B / 3B | |
-| `openhorizon/qwen2.5-0.5b-q4` / `-1.5b-q4` / `-3b-q4` | Qwen2.5 | 0.5B / 1.5B / 3B Q4_K_M | 3B is the smallest we recommend for tool calling |
-| `openhorizon/qwen2.5-coder-0.5b` / `-1.5b` | Qwen2.5 | 0.5B / 1.5B Q4_K_M | Code-tuned |
-| `openhorizon/smollm2-135m-q4` | Llama | 135M Q4_K_M | Tiniest model in the catalog |
+| `openhorizon/qwen2.5-0.5b-q4` / `-1.5b-q4` / `-3b-q4` / `-7b-q4` | Qwen2.5 | 0.5B / 1.5B / 3B / 7B Q4_K_M | 3B is the smallest we recommend for tool calling; 7B is a 4.7 GB file |
+| `openhorizon/qwen2.5-coder-0.5b` / `-1.5b` / `-3b` / `-7b` | Qwen2.5 | 0.5B – 7B Q4_K_M | Code-tuned |
+| `openhorizon/smollm2-135m` (+ `-q4`) | Llama | 135M | Tiniest model in the catalog |
 | `openhorizon/smollm2-360m` (+ `-q4`) | Llama | 360M | |
 | `openhorizon/smollm2-1.7b` (+ `-q4`) | Llama | 1.7B | |
 | `openhorizon/tinyllama-1.1b` | Llama | 1.1B | |
@@ -526,8 +527,10 @@ Pointing a command at the wrong category fails fast with a clear hint (e.g.
 | `openhorizon/llama-3.2-3b` (+ `-q4`) | Llama | 3B | |
 | `openhorizon/llama-3.1-8b-q4` | Llama | 8B Q4_K_M | |
 | `openhorizon/deepseek-r1-8b` | Llama | 8B Q4_K_M | DeepSeek-R1-Distill |
+| `openhorizon/deepseek-r1-1.5b` | Qwen2.5 | 1.5B Q4_K_M | DeepSeek-R1-Distill; prints its reasoning, then the answer after `</think>` |
 | `openhorizon/mistral-7b` | Mistral | 7B | 13.5 GB safetensors — prefer `mistral-7b-q4` |
 | `openhorizon/mistral-7b-q4` | Mistral | 7B Q4_K_M | |
+| `openhorizon/gemma-3-270m` | Gemma3 | 270M | Smallest Gemma3 |
 | `openhorizon/gemma-3-1b` | Gemma3 | 1B | Gemma3 engine (QK-norm, sliding/global attention) |
 | `openhorizon/gemma-3-4b` | Gemma3 (multimodal) | 4B | Also serves `sapient see` |
 | `openhorizon/medgemma-4b` | Gemma3 (medical) | 4B | Medical Q&A + image analysis (gated — `sapient login`) |
@@ -544,6 +547,8 @@ expansion — and are the right pick for edge devices.
 | `openhorizon/whisper-tiny` | Whisper | 39M |
 | `openhorizon/whisper-base` | Whisper | 74M |
 | `openhorizon/whisper-small` | Whisper | 244M |
+| `openhorizon/whisper-medium` | Whisper | 769M |
+| `openhorizon/whisper-large-v3-turbo` | Whisper | 809M |
 
 Audio is decoded + resampled to 16 kHz in pure Rust (`symphonia`/`rubato`), turned into a
 log-mel spectrogram, and run through a native Whisper encoder/decoder. Auto-detects the
@@ -563,6 +568,7 @@ spoken language; `--language <code>` forces it and `--translate` outputs English
 | Alias | Family | Size | Notes |
 |---|---|---|---|
 | `openhorizon/smolvlm-256m` | SmolVLM (SigLIP + SmolLM2) | 256M | Default; about 0.6 s to first token on an M4 (v0.6.1; was ~1.3 s on v0.6.0) |
+| `openhorizon/smolvlm-500m` | SmolVLM (SigLIP + SmolLM2-360M) | 500M | |
 | `openhorizon/smolvlm2-500m` | SmolVLM2 (SigLIP + SmolLM2-360M-class) | 500M | Stronger than the 256M; the base model SmolVLA is built on (v0.6.2) |
 | `openhorizon/gemma-3-4b` | Gemma3 multimodal | 4B | |
 | `openhorizon/medgemma-4b` | Gemma3 medical | 4B | X-ray / dermatology / pathology (gated) |

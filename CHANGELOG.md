@@ -5,6 +5,17 @@ section below as the GitHub release body.
 
 ## [Unreleased]
 
+### 📚 Ten more models in the catalog
+
+- Chat: `qwen2.5-7b-q4`, `qwen2.5-coder-3b`, `qwen2.5-coder-7b`, `phi-3.5-mini`,
+  `deepseek-r1-1.5b`, `gemma-3-270m`, `smollm2-135m`.
+- Speech-to-text: `whisper-medium`, `whisper-large-v3-turbo`.
+- Vision: `smolvlm-500m`.
+- Each was downloaded and run on the CPU build before it was listed.
+- Fix: DeepSeek-R1 distills were prompted in the wrong chat format and echoed the
+  question. They now use DeepSeek's own turn markers and stop at its end-of-turn
+  token; the Qwen-based distills also load the right tokenizer.
+
 ## [0.6.3] - 2026-10-03
 
 **Robot-policy results you can check, and a safer default.** SmolVLA running in

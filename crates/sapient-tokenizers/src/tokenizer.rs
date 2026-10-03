@@ -50,6 +50,9 @@ const EOS_CANDIDATES: &[&str] = &[
     "<|end|>",
     "<end_of_turn>",
     "<|redacted_EOS|>",
+    // DeepSeek-R1's end-of-turn. It is a special token, so `decode` strips it
+    // and it can only stop generation by id.
+    "<｜end▁of▁sentence｜>",
 ];
 
 pub struct SapientTokenizer {
