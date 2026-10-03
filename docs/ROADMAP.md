@@ -255,6 +255,9 @@ Radeon, Nvidia, and Apple — and are dev-tested on Apple Silicon (Metal under w
   workgroup per element, and one compute pass per token. M4: qwen2.5-0.5b 23 → 43 tok/s
   (≈ CPU), 1.5B-Q4 13.5 → 34 (CPU 58). Output unchanged. Open: wgpu still trails the CPU
   for Q4 models on Apple Silicon (kernel fusion, x in workgroup memory, Q6_K lm_head);
+  measured 2026-10-03: ~17 ms of a 33–35 ms token is compute, ~14 ms the fixed cost of
+  563 dispatches — next rung is fewer dispatches (fuse bias/residual/swiglu into the
+  matmuls) and reusing buffers and bind groups across tokens, floor ≈ 20 ms;
   tune `LANES`/`ROWS` on Vulkan/DX12 GPUs; upgrade wgpu 22 → 30 (drops the `block`
   future-incompatibility warning).
 - ✅ **f16 KV cache** (Phase 7.3, `kv_append{,_f16}.wgsl` + templated attention):

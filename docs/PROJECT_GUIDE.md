@@ -310,7 +310,9 @@ The real generation math: how to run a Phi or Llama-style model layer by layer.
     in 128-token batched chunks, and each decode token runs with all its kernels
     batched into one queue submission and one compute pass; only logits read back.
     Llama-family — see the wgpu invariants in `CLAUDE.md`. `SAPIENT_WGPU_TIMING=1`
-    prints per-token CPU recording vs GPU time; `python3 scripts/bench_wgpu.py`
+    prints per-token CPU recording vs GPU time, `SAPIENT_WGPU_PROFILE=1` a per-kernel
+    table (a token is 563 dispatches; their fixed cost, not the maths, is the gap to
+    the CPU on Apple Silicon — docs/BENCHMARKS.md); `python3 scripts/bench_wgpu.py`
     compares cpu / wgpu / metal on the local machine (backends a binary can't run
     are skipped with the reason). On Apple Silicon wgpu is still slower than the CPU
     for 4-bit models.

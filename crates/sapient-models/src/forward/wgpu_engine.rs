@@ -662,6 +662,9 @@ impl WgpuForwardEngine {
         let recorded = std::time::Instant::now();
         let logits = mm(&self.ctx, &h, lm, 1, hidden, vocab);
         let out = self.ctx.download_f32(&logits)?;
+        if input_ids.len() == 1 && sapient_backends_wgpu::profile_enabled() {
+            self.profile_token(recorded.elapsed());
+        }
         if input_ids.len() == 1 && wgpu_timing() {
             eprintln!(
                 "[wgpu] token: record+submit {:.1} ms · lm_head+wait+readback {:.1} ms",
@@ -690,6 +693,62 @@ impl WgpuForwardEngine {
             out.push(self.ctx.download_f32(&logits)?);
         }
         Ok(out)
+    }
+}
+
+/// Decode tokens to skip, then to average over, under `SAPIENT_WGPU_PROFILE`.
+const PROFILE_WARMUP: usize = 4;
+const PROFILE_TOKENS: usize = 20;
+
+impl WgpuForwardEngine {
+    /// `SAPIENT_WGPU_PROFILE=1`: after a warm-up, print the per-token cost of
+    /// every kernel shape, averaged over [`PROFILE_TOKENS`] decode tokens.
+    fn profile_token(&self, lm_head_and_readback: std::time::Duration) {
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
+        static SEEN: AtomicUsize = AtomicUsize::new(0);
+        static TAIL_NS: AtomicU64 = AtomicU64::new(0);
+        let n = SEEN.fetch_add(1, Relaxed) + 1;
+        if n == PROFILE_WARMUP {
+            self.ctx.take_profile();
+            TAIL_NS.store(0, Relaxed);
+            return;
+        }
+        if n > PROFILE_WARMUP {
+            TAIL_NS.fetch_add(lm_head_and_readback.as_nanos() as u64, Relaxed);
+        }
+        if n != PROFILE_WARMUP + PROFILE_TOKENS {
+            return;
+        }
+        let rows = self.ctx.take_profile();
+        let per = |ns: u128| ns as f64 / 1e6 / PROFILE_TOKENS as f64;
+        let total: u128 = rows.iter().map(|(_, t)| t.submit_ns + t.wait_ns).sum();
+        let calls: u64 = rows.iter().map(|(_, t)| t.calls).sum();
+        eprintln!(
+            "[wgpu profile] per decode token, {PROFILE_TOKENS} tokens, every kernel submitted \
+             and waited for on its own: {:.1} ms in {} kernels",
+            per(total),
+            calls / PROFILE_TOKENS as u64
+        );
+        eprintln!(
+            "{:<34} {:>6} {:>9} {:>9} {:>9} {:>6}",
+            "kernel [workgroups]", "calls", "submit ms", "wait ms", "ms/call", "share"
+        );
+        for (name, t) in &rows {
+            let ns = t.submit_ns + t.wait_ns;
+            eprintln!(
+                "{:<34} {:>6.1} {:>9.2} {:>9.2} {:>9.3} {:>5.1}%",
+                name,
+                t.calls as f64 / PROFILE_TOKENS as f64,
+                per(t.submit_ns),
+                per(t.wait_ns),
+                ns as f64 / 1e6 / t.calls as f64,
+                100.0 * ns as f64 / total as f64
+            );
+        }
+        eprintln!(
+            "lm_head dispatch + readback: {:.2} ms per token",
+            TAIL_NS.load(Relaxed) as f64 / 1e6 / PROFILE_TOKENS as f64
+        );
     }
 }
 

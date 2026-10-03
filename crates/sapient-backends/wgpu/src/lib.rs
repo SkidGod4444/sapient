@@ -47,6 +47,6 @@ mod context;
 mod quant;
 mod resident;
 
-pub use context::{WgpuContext, WgpuError};
+pub use context::{profile_enabled, KernelTime, WgpuContext, WgpuError};
 pub use quant::{GpuQ4KBuffer, GpuQ6KBuffer, GpuQ8Buffer};
 pub use resident::GpuBuffer;

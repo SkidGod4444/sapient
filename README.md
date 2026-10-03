@@ -698,7 +698,9 @@ python3 scripts/bench_wgpu.py --model openhorizon/qwen2.5-1.5b --tokens 128
 Where it stands: on a strong CPU it is not the fastest path for 4-bit models (Apple
 M4, v0.6.2: about 34 tok/s on Qwen2.5-1.5B Q4_K_M through wgpu, against 48–58 on the
 CPU engine and 82 on the `-metal` build; Qwen2.5-0.5B full precision is on par with the
-CPU at about 43). Its value is running quantized models on non-Apple GPUs and on small-VRAM
+CPU at about 43). A measurement of one token shows why: the matrix kernels run about
+as fast as the CPU's, and roughly 14 ms of a 33 ms token is the fixed cost of issuing
+563 separate GPU jobs. Its value is running quantized models on non-Apple GPUs and on small-VRAM
 cards. Intel Arc and AMD Radeon numbers are still unmeasured — datapoints welcome
 (`scripts/bench_gpu_7_6.sh`).
 
