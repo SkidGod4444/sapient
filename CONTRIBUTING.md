@@ -405,7 +405,8 @@ once (downloads `lerobot/svla_so100_pickplace`, ~0.5 GB), then
 For task success, see the header of `scripts/vla_sim_eval.py` (LIBERO on macOS needs a
 manual install of its dependencies). Run long evaluations under `caffeinate -is` and
 detached with `nohup`: the Mac's idle sleep stalls them. `--delay D --mode sync|auto`
-adds a simulated inference delay; a change to the request rule (`auto_trigger`) needs
+adds a simulated inference delay (`--mode inpaint` also sends the queued actions); a
+change to the request rule (`auto_trigger`) or to how chunks are combined needs
 that comparison, because fewer stalls did not mean more completed tasks. Measure stall
 rates over at least 20 chunk cycles (short runs read synchronous stalls low).
 

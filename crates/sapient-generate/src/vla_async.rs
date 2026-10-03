@@ -48,13 +48,40 @@ pub struct Observation {
 
 /// Anything that turns an observation into an action chunk (`steps` rows).
 /// Implemented for [`VlaPipeline`]; tests use a fake.
+///
+/// `queued` holds the actions still waiting to execute when the chunk was
+/// requested. It is empty unless [`Aggregate::Continue`] is set; a policy that
+/// supports it returns a chunk whose first rows equal `queued` and whose
+/// remaining rows continue them.
 pub trait ChunkPolicy: Send + Sync + 'static {
-    fn predict_chunk(&self, obs: &Observation, seed: u64) -> Result<Vec<Vec<f32>>>;
+    fn predict_chunk(
+        &self,
+        obs: &Observation,
+        seed: u64,
+        queued: &[Vec<f32>],
+    ) -> Result<Vec<Vec<f32>>>;
 }
 
 impl ChunkPolicy for VlaPipeline {
-    fn predict_chunk(&self, obs: &Observation, seed: u64) -> Result<Vec<Vec<f32>>> {
-        let chunk = self.predict(&obs.images, &obs.task, &obs.state, seed)?;
+    fn predict_chunk(
+        &self,
+        obs: &Observation,
+        seed: u64,
+        queued: &[Vec<f32>],
+    ) -> Result<Vec<Vec<f32>>> {
+        let chunk = if queued.is_empty() {
+            self.predict(&obs.images, &obs.task, &obs.state, seed)?
+        } else {
+            let flat: Vec<f32> = queued.iter().flatten().copied().collect();
+            self.predict_continuing(
+                &obs.images,
+                &obs.task,
+                &obs.state,
+                &self.noise_for_seed(seed),
+                None,
+                &flat,
+            )?
+        };
         Ok((0..chunk.steps).map(|i| chunk.row(i).to_vec()).collect())
     }
 }
@@ -67,6 +94,12 @@ pub enum Aggregate {
     Latest,
     /// The mean of the queued and the new action (smoother hand-over).
     Average,
+    /// The queued actions are sent with the request and the policy generates
+    /// a chunk that keeps them and continues them (hard inpainting — see
+    /// `SmolVla::sample_actions_inpaint`). In LIBERO with a simulated delay of
+    /// 0.64 chunk it completed 9 of 30 episodes where `Latest` completed 4 and
+    /// synchronous execution 14; at a quarter chunk it made no difference.
+    Continue,
 }
 
 /// When to ask for the next chunk.
@@ -208,6 +241,7 @@ struct Request {
     obs: Observation,
     step: u64,
     seed: u64,
+    queued: Vec<Vec<f32>>,
 }
 
 struct Reply {
@@ -245,7 +279,7 @@ impl AsyncActions {
             .spawn(move || {
                 for req in worker_rx {
                     let started = Instant::now();
-                    let actions = policy.predict_chunk(&req.obs, req.seed);
+                    let actions = policy.predict_chunk(&req.obs, req.seed, &req.queued);
                     let reply = Reply {
                         step: req.step,
                         took: started.elapsed(),
@@ -311,10 +345,15 @@ impl AsyncActions {
             self.stats.last_trigger = trigger;
             self.request_tick = self.stats.ticks;
             let obs = observe()?;
+            let queued = match self.cfg.aggregate {
+                Aggregate::Continue => self.queue.iter().map(|(_, a)| a.clone()).collect(),
+                _ => Vec::new(),
+            };
             let req = Request {
                 obs,
                 step: self.step,
                 seed: self.next_seed,
+                queued,
             };
             self.next_seed = self.next_seed.wrapping_add(1);
             self.tx
@@ -378,7 +417,9 @@ impl AsyncActions {
                 Some(p) if p < self.queue.len() => {
                     let slot = &mut self.queue[p].1;
                     match self.cfg.aggregate {
-                        Aggregate::Latest => *slot = a,
+                        // With `Continue` the chunk's rows for queued steps
+                        // are the queued actions themselves.
+                        Aggregate::Latest | Aggregate::Continue => *slot = a,
                         Aggregate::Average => {
                             for (o, n) in slot.iter_mut().zip(&a) {
                                 *o = 0.5 * (*o + n);
@@ -475,7 +516,12 @@ mod tests {
     }
 
     impl ChunkPolicy for Fake {
-        fn predict_chunk(&self, obs: &Observation, _seed: u64) -> Result<Vec<Vec<f32>>> {
+        fn predict_chunk(
+            &self,
+            obs: &Observation,
+            _seed: u64,
+            _queued: &[Vec<f32>],
+        ) -> Result<Vec<Vec<f32>>> {
             std::thread::sleep(self.delay);
             Ok((0..self.chunk)
                 .map(|i| vec![obs.state[0] * 1000.0 + i as f32])
@@ -596,6 +642,61 @@ mod tests {
         );
         // Every chunk is executed in full.
         assert_eq!(r.stats().dropped, 0);
+    }
+
+    /// Records the queue it is sent and, like a continuing policy, returns
+    /// those rows first and its own plan after them.
+    struct Continuing {
+        seen: std::sync::Mutex<Vec<usize>>,
+    }
+
+    impl ChunkPolicy for Continuing {
+        fn predict_chunk(
+            &self,
+            obs: &Observation,
+            _seed: u64,
+            queued: &[Vec<f32>],
+        ) -> Result<Vec<Vec<f32>>> {
+            self.seen.lock().unwrap().push(queued.len());
+            std::thread::sleep(Duration::from_millis(12));
+            let mut rows = queued.to_vec();
+            rows.extend((rows.len()..10).map(|i| vec![obs.state[0] + i as f32]));
+            Ok(rows)
+        }
+    }
+
+    #[test]
+    fn continue_sends_the_queue_and_latest_does_not() {
+        let run = |aggregate| {
+            let policy = Arc::new(Continuing {
+                seen: std::sync::Mutex::new(Vec::new()),
+            });
+            let mut r = AsyncActions::new(
+                policy.clone(),
+                10,
+                AsyncConfig {
+                    threshold: Threshold::Fraction(0.5),
+                    aggregate,
+                    ..Default::default()
+                },
+            );
+            wait_for_chunk(&mut r);
+            for _ in 0..60 {
+                std::thread::sleep(Duration::from_millis(3));
+                let step = r.step;
+                r.tick(|| obs(step)).unwrap();
+            }
+            let seen = policy.seen.lock().unwrap().clone();
+            seen
+        };
+        let sent = run(Aggregate::Continue);
+        assert!(sent.len() > 2, "expected several requests, got {sent:?}");
+        assert_eq!(sent[0], 0, "nothing is queued for the first request");
+        assert!(
+            sent[1..].iter().any(|&n| n > 0),
+            "later requests carry the queued actions: {sent:?}"
+        );
+        assert!(run(Aggregate::Latest).iter().all(|&n| n == 0));
     }
 
     #[test]

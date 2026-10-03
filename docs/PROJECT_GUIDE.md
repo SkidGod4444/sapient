@@ -830,6 +830,8 @@ runs a control loop with asynchronous chunking (`AsyncActions` in
 never blocks) and prints stalls and per-chunk latency. `auto` asks just in time while
 inference takes at most half a chunk and runs synchronously above that
 (`auto_trigger`; the reason is a task-success measurement, see docs/BENCHMARKS.md).
+`--aggregate continue` sends the queued actions with each request, and the sampler keeps
+them and continues them (`sample_actions_inpaint` → `VlaPipeline::predict_continuing`).
 Real-data check:
 `scripts/smolvla_dataset_eval.py` → `smolvla_real_observations` in `vla_e2e.rs`.
 Task success: `scripts/vla_sim_eval.py` runs LIBERO episodes through LeRobot's env and

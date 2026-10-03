@@ -634,6 +634,13 @@ struct ActionsRequest {
     /// `seed`) — for exact comparison against another implementation.
     #[serde(default)]
     noise: Option<Vec<Vec<f32>>>,
+    /// Actions still queued for execution (rows of the policy's action
+    /// width, in the units this endpoint returns). The new chunk's first rows
+    /// are fixed to them and the rest is generated to continue them — for
+    /// asynchronous execution, so the next chunk follows what the robot does
+    /// while it is being computed.
+    #[serde(default)]
+    queued: Option<Vec<Vec<f32>>>,
 }
 
 /// `POST /v1/audio/speech` body (OpenAI shape).
@@ -1401,16 +1408,33 @@ async fn handle_actions(
     let robot_state = req.state.unwrap_or_else(|| vec![0.0; policy.state_dim()]);
     let (task, seed, steps) = (req.task, req.seed.unwrap_or(0), req.steps);
     let noise: Option<Vec<f32>> = req.noise.map(|rows| rows.into_iter().flatten().collect());
+    let queued: Vec<f32> = req
+        .queued
+        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .collect();
     let run = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let pixels = frames
             .iter()
             .map(|b| policy.preprocess_image_bytes(b))
             .collect::<Result<Vec<_>>>()?;
-        match &noise {
-            Some(n) => policy.predict_noise_steps(&pixels, &task, &robot_state, n, steps),
-            None => policy.predict_steps(&pixels, &task, &robot_state, seed, steps),
+        if queued.is_empty() {
+            return match &noise {
+                Some(n) => policy.predict_noise_steps(&pixels, &task, &robot_state, n, steps),
+                None => policy.predict_steps(&pixels, &task, &robot_state, seed, steps),
+            };
         }
+        let seeded;
+        let n = match &noise {
+            Some(n) => n.as_slice(),
+            None => {
+                seeded = policy.noise_for_seed(seed);
+                &seeded
+            }
+        };
+        policy.predict_continuing(&pixels, &task, &robot_state, n, steps, &queued)
     })
     .await;
 

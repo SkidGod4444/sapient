@@ -5,6 +5,17 @@ section below as the GitHub release body.
 
 ## [Unreleased]
 
+### 🤖 `sapient act`: continue the queued actions
+
+- `POST /v1/actions` accepts `queued`: the actions still waiting to execute. The new
+  chunk keeps them as its first rows and is generated to continue them, so the robot
+  does not jump to an unrelated plan while a chunk is being computed. In the async
+  runner: `sapient act --simulate --aggregate continue`.
+- Measured in LIBERO with a simulated delay of 0.64 chunk: 9 of 30 episodes, against
+  4 for a naive switch and 14 for synchronous execution; the jump at a switch falls
+  from 0.34 to 0.12. At shorter delays it makes no measurable difference. It is
+  opt-in, and `--threshold auto` still runs synchronously above half a chunk.
+
 ### 📚 Ten more models in the catalog
 
 - Chat: `qwen2.5-7b-q4`, `qwen2.5-coder-3b`, `qwen2.5-coder-7b`, `phi-3.5-mini`,

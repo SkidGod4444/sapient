@@ -668,7 +668,37 @@ impl SmolVla {
         noise: &[f32],
         num_steps: usize,
     ) -> Result<Vec<f32>> {
+        self.sample_actions_inpaint(cache, noise, num_steps, &[])
+    }
+
+    /// [`sample_actions_steps`](Self::sample_actions_steps) with the first rows
+    /// of the chunk fixed to `frozen` (`[n, max_action_dim]`, in the model's
+    /// normalized action space, `n ≤ chunk`): hard inpainting. On the flow
+    /// path `x_t = t·noise + (1 − t)·actions`, the frozen rows are overwritten
+    /// with their exact `x_t` before every step, so the remaining rows are
+    /// denoised next to actions that are already decided, and the result's
+    /// first `n` rows equal `frozen`.
+    ///
+    /// This is for asynchronous execution: `frozen` holds the queued actions
+    /// the robot will execute while this chunk is computed, so the new chunk
+    /// continues them instead of starting an unrelated plan (the gradient-free
+    /// "hard masking" form of real-time chunking, Black et al. 2025). An empty
+    /// `frozen` is exactly `sample_actions_steps`.
+    pub fn sample_actions_inpaint(
+        &self,
+        cache: &PrefixCache,
+        noise: &[f32],
+        num_steps: usize,
+        frozen: &[f32],
+    ) -> Result<Vec<f32>> {
         let c = &self.cfg;
+        if frozen.len() % c.max_action_dim != 0 || frozen.len() > c.chunk * c.max_action_dim {
+            bail!(
+                "frozen actions must be [n, {}] with n ≤ {}",
+                c.max_action_dim,
+                c.chunk
+            );
+        }
         if num_steps == 0 {
             bail!("num_steps must be at least 1");
         }
@@ -683,11 +713,15 @@ impl SmolVla {
         let (l0, a0) = (T_LINEAR.load(relaxed), T_ATTN.load(relaxed));
         for step in 0..num_steps {
             let t = (1.0 + step as f64 * dt) as f32;
+            for ((xi, ni), ai) in x.iter_mut().zip(noise).zip(frozen) {
+                *xi = t * ni + (1.0 - t) * ai;
+            }
             let v = self.denoise_step(cache, &x, t)?;
             for (xi, vi) in x.iter_mut().zip(&v) {
                 *xi += dt as f32 * vi;
             }
         }
+        x[..frozen.len()].copy_from_slice(frozen);
         if timing {
             let ms = |ns: u64| ns as f64 / 1e6;
             let (lin, att) = (T_LINEAR.load(relaxed) - l0, T_ATTN.load(relaxed) - a0);

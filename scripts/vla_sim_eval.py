@@ -58,7 +58,7 @@ def data_uri(img: torch.Tensor) -> str:
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
-def sapient_chunk(url, model, precision, obs, task, seed=0, noise=None) -> np.ndarray:
+def sapient_chunk(url, model, precision, obs, task, seed=0, noise=None, queued=None) -> np.ndarray:
     body = {
         "model": model,
         "task": task,
@@ -69,6 +69,8 @@ def sapient_chunk(url, model, precision, obs, task, seed=0, noise=None) -> np.nd
     }
     if noise is not None:
         body["noise"] = noise.tolist()
+    if queued:
+        body["queued"] = [np.asarray(a, dtype=np.float32).tolist() for a in queued]
     req = urllib.request.Request(
         url + "/v1/actions",
         data=json.dumps(body).encode(),
@@ -144,7 +146,14 @@ def run_episode(env, env_pre, env_post, get_chunk, horizon, episode, task_id, de
     command) — a stall, which counts against the episode's step limit. Chunks are
     aligned by executed actions: the actions executed while a chunk was being
     computed are dropped from it. `mode`: `sync` requests only when the queue is
-    empty; `auto` uses the latency rule of the paper / vla_async.rs.
+    empty; `auto` uses the stall-minimizing rule (see `auto_trigger`); `inpaint`
+    requests like `auto` and also sends the actions still queued, which the
+    policy keeps as the first rows of the new chunk and continues (hard
+    inpainting, `POST /v1/actions` field `queued`).
+
+    `jump` in the result is the mean, over chunk switches, of the largest change
+    in any motion dimension between the last executed action and the first
+    action taken from a new chunk.
     """
     raw, _ = env.reset(seed=[episode])
     task = list(env.call("task_description"))[0]
@@ -155,12 +164,14 @@ def run_episode(env, env_pre, env_post, get_chunk, horizon, episode, task_id, de
     trigger = 0 if mode == "sync" else auto_trigger(delay, horizon)
     gripper = -1.0
     infer_s, n_infer, success, step, stalls = 0.0, 0, False, 0, 0
+    last_action, switched, jumps = None, False, []
     while step < max_steps:
         if pending is not None and step >= pending[0]:
             _, at, chunk = pending
             pending = None
             usable = list(chunk[: horizon][max(0, executed - at) :])
             queue = usable  # newest plan replaces any overlap
+            switched = True
         if pending is None and len(queue) <= trigger:
             obs = observe(env_pre, raw, task)
             # Common random numbers: every backend gets the same start noise
@@ -169,17 +180,22 @@ def run_episode(env, env_pre, env_post, get_chunk, horizon, episode, task_id, de
             rng = np.random.default_rng([task_id, episode, n_infer])
             noise = rng.standard_normal((50, 32)).astype(np.float32)
             t = time.perf_counter()
-            chunk = get_chunk(obs, task, noise)
+            chunk = get_chunk(obs, task, noise, list(queue) if mode == "inpaint" else None)
             infer_s += time.perf_counter() - t
             n_infer += 1
             pending = (step + delay, executed, chunk)
             if delay == 0:
                 pending = None
                 queue = list(chunk[:horizon])
+                switched = True
         if queue:
             a = queue.pop(0)
             executed += 1
             gripper = float(a[-1])
+            if switched and last_action is not None:
+                jumps.append(float(np.abs(np.asarray(a)[:-1] - last_action[:-1]).max()))
+            switched = False
+            last_action = np.asarray(a)
         else:
             a = np.zeros(7, dtype=np.float32)
             a[-1] = gripper
@@ -199,6 +215,7 @@ def run_episode(env, env_pre, env_post, get_chunk, horizon, episode, task_id, de
         "success": success,
         "steps": step,
         "stalls": stalls,
+        "jump": round(float(np.mean(jumps)), 4) if jumps else None,
         "inferences": n_infer,
         "infer_s": round(infer_s, 2),
         "task": task,
@@ -216,7 +233,12 @@ def main() -> None:
     ap.add_argument("--episodes", type=int, default=5, help="init states per task (0..N-1)")
     ap.add_argument("--exec", type=int, default=10, help="actions executed per chunk (horizon c)")
     ap.add_argument("--delay", type=int, default=0, help="simulated inference delay d in control ticks")
-    ap.add_argument("--mode", choices=["sync", "auto"], default="sync", help="request policy")
+    ap.add_argument(
+        "--mode",
+        choices=["sync", "auto", "inpaint"],
+        default="sync",
+        help="request policy; inpaint = auto + continue the queued actions (sapient only)",
+    )
     ap.add_argument("--out", default="vla_sim_results.jsonl")
     ap.add_argument("--parity", action="store_true", help="compare one chunk from both backends")
     a = ap.parse_args()
@@ -256,10 +278,12 @@ def main() -> None:
 
     if a.backend == "lerobot":
         pol = LeRobotPolicy(a.model)
-        get_chunk = lambda obs, task, noise: pol.chunk(obs, task, noise)  # noqa: E731
+        if a.mode == "inpaint":
+            raise SystemExit("--mode inpaint needs --backend sapient")
+        get_chunk = lambda obs, task, noise, queued=None: pol.chunk(obs, task, noise)  # noqa: E731
     else:
-        get_chunk = lambda obs, task, noise: sapient_chunk(  # noqa: E731
-            a.url, a.model, a.precision, obs, task, noise=noise
+        get_chunk = lambda obs, task, noise, queued=None: sapient_chunk(  # noqa: E731
+            a.url, a.model, a.precision, obs, task, noise=noise, queued=queued
         )
 
     for tid in task_ids:

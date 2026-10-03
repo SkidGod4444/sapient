@@ -250,7 +250,8 @@ enum Commands {
         #[arg(long, default_value = "auto")]
         threshold: String,
 
-        /// How a new chunk combines with still-queued actions: latest | average.
+        /// How a new chunk combines with still-queued actions: latest | average |
+        /// continue (the new chunk is generated to keep and continue them).
         #[arg(long, default_value = "latest")]
         aggregate: String,
     },
@@ -670,7 +671,10 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 let aggregate = match aggregate.as_str() {
                     "latest" => sapient_generate::Aggregate::Latest,
                     "average" => sapient_generate::Aggregate::Average,
-                    other => anyhow::bail!("--aggregate must be latest or average, got {other:?}"),
+                    "continue" => sapient_generate::Aggregate::Continue,
+                    other => anyhow::bail!(
+                        "--aggregate must be latest, average or continue, got {other:?}"
+                    ),
                 };
                 let cfg = sapient_generate::AsyncConfig {
                     threshold: threshold.parse()?,
@@ -1900,10 +1904,22 @@ impl sapient_generate::ChunkPolicy for StepsPolicy {
         &self,
         obs: &sapient_generate::Observation,
         seed: u64,
+        queued: &[Vec<f32>],
     ) -> Result<Vec<Vec<f32>>> {
-        let c = self
-            .0
-            .predict_steps(&obs.images, &obs.task, &obs.state, seed, self.1)?;
+        let c = if queued.is_empty() {
+            self.0
+                .predict_steps(&obs.images, &obs.task, &obs.state, seed, self.1)?
+        } else {
+            let flat: Vec<f32> = queued.iter().flatten().copied().collect();
+            self.0.predict_continuing(
+                &obs.images,
+                &obs.task,
+                &obs.state,
+                &self.0.noise_for_seed(seed),
+                self.1,
+                &flat,
+            )?
+        };
         Ok((0..c.steps).map(|i| c.row(i).to_vec()).collect())
     }
 }
