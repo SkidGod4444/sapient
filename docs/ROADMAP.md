@@ -80,7 +80,10 @@
   (2026-10-03):** with a simulated 1.6 s delay (0.64 of a chunk) asynchronous requests
   stalled less but succeeded 4/30 vs 14/30 synchronous, so `--threshold auto` now goes
   synchronous above half a chunk; Pi 5 stall model re-measured with long runs, all
-  within 1 point. Open VLA rungs: blended/inpainted chunk switches (RTC-style) to
+  within 1 point. **Continue mode (2026-10-03):** hard inpainting of
+  the queued actions (`queued` in `/v1/actions`, `--aggregate continue`) recovers 9/30
+  at 0.64 chunk (naive 4, sync 14) — partial, opt-in. Open VLA rungs: guided (soft-mask)
+  inpainting, which needs gradients through the action expert (RTC-style) to
   recover success between half and one chunk, the LIBERO checkpoint's latency on the
   Pi, more suites, the
   expert's per-step overhead, jitter under load (latency-aware async threshold shipped:

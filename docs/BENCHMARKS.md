@@ -1268,6 +1268,37 @@ statistically significant.
 inference takes more than half a chunk (it used to stay asynchronous up to a full
 chunk). A fixed `--threshold` still allows the old behaviour.
 
+### Continuing the queued actions (hard inpainting), LIBERO with delay (2026-10-03)
+
+`POST /v1/actions` takes `queued` (the actions still waiting to execute); the sampler
+keeps them as the first rows of the new chunk and denoises the rest next to them
+(`SmolVla::sample_actions_inpaint`, the gradient-free "hard masking" form of real-time
+chunking). Harness: `scripts/vla_sim_eval.py --mode inpaint`. Same episodes, noise and
+policy as the delay table above; `jump` is the mean, over chunk switches, of the largest
+change in a motion dimension between the last executed action and the first action from
+the new chunk. Raw results: `benchmarks/2026-10-03-m4-libero-spatial-inpaint.jsonl`;
+the `sync` and `auto` rows were re-run with `jump` recorded
+(`…-delay-rerun.jsonl`) and reproduced the first run on 30 of 30 episodes each.
+
+| Chunk c | Delay d | sync | auto (naive) | inpaint | inpaint vs auto | inpaint vs sync |
+|---|---|---|---|---|---|---|
+| 50 | 32 (0.64 c) | 14/30 | 4/30 | **9/30** | p = 0.06 (5 gained, 0 lost) | p = 0.27 |
+| 50 | 12 (0.24 c) | 15/30 | 14/30 | 11/30 | p = 0.38 | p = 0.29 |
+| 25 | 12 (0.48 c) | 13/30 | 10/30 | 10/30 | p = 1.00 | p = 0.51 |
+
+At c = 50, d = 32: stalled 45% (sync), 27% (auto), 28% (inpaint); jump 0.39 (sync, after
+a pause), 0.34 (auto), 0.12 (inpaint).
+
+- Continuing the queue removes most of the jump at a chunk switch and recovers part of
+  what naive asynchronous execution loses beyond half a chunk (4 → 9 of 30). With 30
+  episodes that difference is not significant at the 5% level, and it does not reach
+  synchronous execution (14).
+- Inside the stall-free regime it changes nothing measurable.
+- On one chunk, with the queued rows taken from a different plan: jump 0.041 against
+  0.144 for a naive switch (a typical step inside a chunk is 0.078).
+- `--threshold auto` therefore still goes synchronous above half a chunk. `continue` is
+  opt-in: `sapient act --simulate --aggregate continue`, or `queued` in the request.
+
 ### Stall model re-measured with long runs (Raspberry Pi 5, 2026-10-03)
 
 The 40-second runs in "Latency-aware request threshold" above held only 3–8 chunk

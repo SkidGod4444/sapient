@@ -343,6 +343,13 @@ impl VlaPipeline {
         self.model.config().num_steps
     }
 
+    /// The start noise [`predict`](Self::predict) draws for `seed`
+    /// (`[chunk, max_action_dim]`).
+    pub fn noise_for_seed(&self, seed: u64) -> Vec<f32> {
+        let mc = self.model.config();
+        gaussian_noise(mc.chunk * mc.max_action_dim, seed)
+    }
+
     /// Predict one action chunk; the start noise is drawn from `seed`.
     pub fn predict(
         &self,
@@ -369,7 +376,14 @@ impl VlaPipeline {
     ) -> Result<ActionChunk> {
         let mc = self.model.config();
         let noise = gaussian_noise(mc.chunk * mc.max_action_dim, seed);
-        self.run(images, task, state, &noise, steps.unwrap_or(mc.num_steps))
+        self.run(
+            images,
+            task,
+            state,
+            &noise,
+            steps.unwrap_or(mc.num_steps),
+            &[],
+        )
     }
 
     /// [`predict_steps`](Self::predict_steps) with explicit start noise
@@ -392,7 +406,70 @@ impl VlaPipeline {
                 noise.len()
             );
         }
-        self.run(images, task, state, noise, steps.unwrap_or(mc.num_steps))
+        self.run(
+            images,
+            task,
+            state,
+            noise,
+            steps.unwrap_or(mc.num_steps),
+            &[],
+        )
+    }
+
+    /// [`predict_noise_steps`](Self::predict_noise_steps) with the first rows
+    /// of the chunk frozen to `queued` — rows of [`action_dim`](Self::action_dim)
+    /// values in the same units this pipeline returns (robot units when the
+    /// checkpoint has action statistics). Pass the actions still queued for
+    /// execution: the new chunk then continues them instead of starting an
+    /// unrelated plan (see `SmolVla::sample_actions_inpaint`). The returned
+    /// chunk's first rows equal `queued`.
+    pub fn predict_continuing(
+        &self,
+        images: &[Vec<f32>],
+        task: &str,
+        state: &[f32],
+        noise: &[f32],
+        steps: Option<usize>,
+        queued: &[f32],
+    ) -> Result<ActionChunk> {
+        let mc = self.model.config();
+        if noise.len() != mc.chunk * mc.max_action_dim {
+            bail!(
+                "noise must be {} × {} values, got {}",
+                mc.chunk,
+                mc.max_action_dim,
+                noise.len()
+            );
+        }
+        let dim = self.action_dim;
+        if queued.len() % dim != 0 || queued.len() > mc.chunk * dim {
+            bail!(
+                "queued actions must be rows of {dim} values, at most {} rows",
+                mc.chunk
+            );
+        }
+        // The inverse of the un-normalization in `run`, then zero-padded to
+        // the model's action width (padding is zero in training too).
+        let mut frozen = vec![0f32; queued.len() / dim * mc.max_action_dim];
+        for (row, out) in queued
+            .chunks_exact(dim)
+            .zip(frozen.chunks_exact_mut(mc.max_action_dim))
+        {
+            out[..dim].copy_from_slice(row);
+            if let Some(s) = &self.action_stats {
+                for ((v, m), sd) in out.iter_mut().zip(&s.mean).zip(&s.std) {
+                    *v = (*v - m) / (sd + NORM_EPS);
+                }
+            }
+        }
+        self.run(
+            images,
+            task,
+            state,
+            noise,
+            steps.unwrap_or(mc.num_steps),
+            &frozen,
+        )
     }
 
     /// [`predict`](Self::predict) with explicit start noise
@@ -404,7 +481,14 @@ impl VlaPipeline {
         state: &[f32],
         noise: &[f32],
     ) -> Result<ActionChunk> {
-        self.run(images, task, state, noise, self.model.config().num_steps)
+        self.run(
+            images,
+            task,
+            state,
+            noise,
+            self.model.config().num_steps,
+            &[],
+        )
     }
 
     fn run(
@@ -414,6 +498,7 @@ impl VlaPipeline {
         state: &[f32],
         noise: &[f32],
         steps: usize,
+        frozen: &[f32],
     ) -> Result<ActionChunk> {
         if images.is_empty() {
             bail!("SmolVLA needs at least one camera image");
@@ -438,7 +523,9 @@ impl VlaPipeline {
         embs.extend(self.model.embed_language_and_state(&lang, &state)?);
         let cache = self.model.prefix_cache(&embs)?;
         let t2 = Instant::now();
-        let x = self.model.sample_actions_steps(&cache, noise, steps)?;
+        let x = self
+            .model
+            .sample_actions_inpaint(&cache, noise, steps, frozen)?;
         let t3 = Instant::now();
 
         let dim = self.action_dim;

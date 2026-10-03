@@ -201,6 +201,70 @@ fn smolvla_matches_lerobot_reference() {
 /// The yardstick is LeRobot's own default precision: it runs the VLM and the expert in bf16,
 /// which moves the action chunk by `BF16_MAX` (max abs, measured with the same
 /// inputs) from the f32 reference.
+/// Hard inpainting (`sample_actions_inpaint`): an empty frozen prefix must be
+/// bit-identical to plain sampling, frozen rows must come back exactly, and a
+/// chunk asked to continue another plan's first rows must leave them with a
+/// smaller jump than switching plans naively.
+#[test]
+#[ignore = "needs the lerobot/smolvla_base checkpoint: set SAPIENT_SMOLVLA_DIR"]
+fn inpainting_keeps_frozen_rows_and_continues_them() {
+    let dir = std::env::var("SAPIENT_SMOLVLA_DIR").expect("set SAPIENT_SMOLVLA_DIR");
+    let weights = sapient_io::load_safetensors(&PathBuf::from(dir).join("model.safetensors"))
+        .expect("load SmolVLA checkpoint");
+    let model = SmolVla::from_weights(SmolVlaConfig::default(), weights).expect("build SmolVLA");
+    let c = model.config().clone();
+    let f = fixture();
+    let pixels = test_image(model.image_size());
+    let lang_mask = fx(&f, "input.lang_mask");
+    let lang: Vec<u32> = fx(&f, "input.lang_tokens")
+        .iter()
+        .zip(&lang_mask)
+        .filter(|(_, m)| **m > 0.5)
+        .map(|(t, _)| *t as u32)
+        .collect();
+    let state = fx(&f, "input.state");
+    let noise = fx(&f, "input.noise");
+    let embs = model.embed_prefix(&[&pixels], &lang, &state).unwrap();
+    let cache = model.prefix_cache(&embs).unwrap();
+    let (w, steps, n) = (c.max_action_dim, c.num_steps, 18);
+
+    let plain = model.sample_actions(&cache, &noise).unwrap();
+    let empty = model
+        .sample_actions_inpaint(&cache, &noise, steps, &[])
+        .unwrap();
+    assert_eq!(plain, empty, "an empty frozen prefix must change nothing");
+
+    // Another plan for the same observation: the noise reversed.
+    let other_noise: Vec<f32> = noise.iter().rev().copied().collect();
+    let other = model.sample_actions(&cache, &other_noise).unwrap();
+    let frozen = &other[..n * w];
+    let cont = model
+        .sample_actions_inpaint(&cache, &noise, steps, frozen)
+        .unwrap();
+    assert_eq!(
+        &cont[..n * w],
+        frozen,
+        "frozen rows must be returned exactly"
+    );
+
+    let jump = |a: &[f32], b: &[f32]| {
+        a.iter()
+            .zip(b)
+            .take(6)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0f32, f32::max)
+    };
+    let last = &other[(n - 1) * w..n * w];
+    let continued = jump(&cont[n * w..(n + 1) * w], last);
+    let naive = jump(&plain[n * w..(n + 1) * w], last);
+    println!("jump at the switch: continued {continued:.4}, naive {naive:.4}");
+    assert!(
+        continued < naive,
+        "continuing the queued rows should not jump more than a naive switch: {continued} vs {naive}"
+    );
+    assert!(cont.iter().all(|v| v.is_finite()));
+}
+
 #[test]
 #[ignore = "needs the lerobot/smolvla_base checkpoint: set SAPIENT_SMOLVLA_DIR"]
 fn smolvla_quantized_action_error() {

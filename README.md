@@ -225,7 +225,8 @@ computed while the robot executes the current one) and reports how often the rob
 would wait: none at 30 Hz on an M4, none at 5 Hz on a Pi 5. When to compute the next
 chunk is chosen automatically from the measured latency (`--threshold auto`, default):
 just in time while inference takes at most half a chunk, one chunk at a time when it
-takes longer — in a simulator, overlapping slower inference with execution stalled
+takes longer (`--aggregate continue` makes each new chunk continue the actions already
+queued; it helped only partly there) — in a simulator, overlapping slower inference with execution stalled
 less but completed fewer tasks. Details:
 `docs/BENCHMARKS.md`.
 The base checkpoint is meant to be fine-tuned for a robot; it prints actions in the
